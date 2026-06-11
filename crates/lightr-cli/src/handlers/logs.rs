@@ -2,10 +2,7 @@
 
 use lightr_run::{logs, LogStream};
 
-use crate::{
-    exit::{die_internal, die_lightr},
-    lightr_home,
-};
+use crate::{exit::die_lightr, lightr_home};
 
 pub fn run(id: &str, stderr: bool, both: bool, follow: bool) -> i32 {
     let home = lightr_home();

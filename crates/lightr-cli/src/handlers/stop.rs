@@ -2,10 +2,7 @@
 
 use lightr_run::stop;
 
-use crate::{
-    exit::{die_internal, die_lightr},
-    lightr_home,
-};
+use crate::{exit::die_lightr, lightr_home};
 
 pub fn run(id: &str, grace: u64) -> i32 {
     let home = lightr_home();
