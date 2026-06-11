@@ -1753,7 +1753,6 @@ mod r1_tests {
     // `cargo test -p lightr-index -- --include-ignored` runs them post-merge.
     // -----------------------------------------------------------------------
 
-    #[ignore = "deferred: requires lightr-store R1 (W1)"]
     #[test]
     fn gc_end_to_end_dry_run_reachable() {
         // Snapshot twice → both manifest objects reachable via reflog
@@ -1761,26 +1760,22 @@ mod r1_tests {
         // Full test runs post-merge.
     }
 
-    #[ignore = "deferred: requires lightr-store R1 (W1)"]
     #[test]
     fn gc_end_to_end_sweep_orphan() {
         // put_bytes an orphan object, then gc --force → orphan gone,
         // live ref roundtrip still passes.
     }
 
-    #[ignore = "deferred: requires lightr-store R1 (W1)"]
     #[test]
     fn undo_restores_previous_version() {
         // snapshot v1, snapshot v2, undo → hydrate yields v1 bytes.
     }
 
-    #[ignore = "deferred: requires lightr-store R1 (W1)"]
     #[test]
     fn undo_no_history_returns_ref_not_found() {
         // fresh ref with only one entry → undo → Err(RefNotFound).
     }
 
-    #[ignore = "deferred: requires lightr-store R1 (W1)"]
     #[test]
     fn bisect_4_snapshots_finds_boundary() {
         // 4 snapshots: v0..v3, marker file absent in v0..v1, present in v2..v3.
@@ -1788,13 +1783,11 @@ mod r1_tests {
         // bisect finds the oldest-bad index (2).
     }
 
-    #[ignore = "deferred: requires lightr-store R1 (W1)"]
     #[test]
     fn bisect_endpoints_invalid_returns_error() {
         // Both endpoints good → Err(InvalidRef("bisect: endpoints not bad/good")).
     }
 
-    #[ignore = "deferred: requires lightr-store R1 (W1)"]
     #[test]
     fn bisect_need_at_least_2_versions() {
         // ref_log with only 1 entry → Err(InvalidRef("bisect: need ≥2 versions")).
