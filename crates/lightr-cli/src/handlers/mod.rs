@@ -15,6 +15,7 @@ pub mod oci;
 pub mod plan;
 pub mod ps;
 pub mod run;
+pub mod schema;
 pub mod snapshot;
 pub mod status;
 pub mod stop;
