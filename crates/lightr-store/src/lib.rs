@@ -645,11 +645,13 @@ mod tests {
 
     // ── default_root ─────────────────────────────────────────────────────────
 
+    // Env vars are process-global; these two tests mutate LIGHTR_HOME and
+    // race under the parallel test runner — serialize them.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn default_root_honors_lightr_home() {
-        // SAFETY: test manipulates env vars — don't run this in parallel with
-        // other env-var tests (cargo test is single-threaded per integration
-        // binary; unit tests within one binary share the process).
+        let _guard = ENV_LOCK.lock().unwrap();
         let orig = std::env::var_os("LIGHTR_HOME");
         std::env::set_var("LIGHTR_HOME", "/tmp/custom-lightr-home");
         let root = Store::default_root();
@@ -663,6 +665,7 @@ mod tests {
 
     #[test]
     fn default_root_fallback_to_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let orig_lightr = std::env::var_os("LIGHTR_HOME");
         std::env::remove_var("LIGHTR_HOME");
         let root = Store::default_root();
