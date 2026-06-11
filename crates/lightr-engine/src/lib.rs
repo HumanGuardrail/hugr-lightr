@@ -3,6 +3,9 @@
 use lightr_core::{LightrError, Result};
 use std::path::{Path, PathBuf};
 
+pub mod pack;
+pub mod vsock;
+
 // ── EngineKind ────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -434,9 +437,15 @@ fn ns_engine_box() -> Box<dyn Engine> {
 
 #[cfg(all(target_os = "macos", feature = "vz"))]
 mod vz_impl {
+    use super::vsock::VsockExitReceiver;
     use super::{pack_dir, Engine, ExecSpec};
     use lightr_core::{LightrError, Result};
     use std::ffi::CString;
+
+    /// Exit code returned when the VM booted (and stopped) but the guest never
+    /// delivered a vsock exit frame — i.e. PID1 crashed before reporting. NOT a
+    /// success: we surface a real, non-zero failure rather than fabricate 0.
+    const GUEST_NO_REPORT_CODE: i32 = 255;
 
     extern "C" {
         /// C ABI exposed by shim/vz.swift (compiled to static lib by build.rs).
@@ -446,6 +455,12 @@ mod vz_impl {
         /// Apple's VZ save/restore is arm64-only; the boot path itself (cold
         /// kernel start) may work on x86 with a suitable kernel+initrd pack,
         /// but is only validated by the S5 owner spike when the pack exists.
+        ///
+        /// RETURN CONTRACT (WP-B-vsock): this is a VM-LIFECYCLE status, NOT the
+        /// guest's exit code. `0` = the VM booted and stopped cleanly; a
+        /// negative value = boot/config failure. The guest's REAL exit code
+        /// arrives out-of-band on the host vsock receiver (see `super::vsock`),
+        /// never from this return value. The shim no longer fabricates `0`.
         fn lightr_vz_run(
             kernel: *const libc::c_char,
             initrd: *const libc::c_char,
@@ -459,6 +474,20 @@ mod vz_impl {
     pub struct VzEngine;
 
     impl Engine for VzEngine {
+        /// Run the guest and return its REAL exit code.
+        ///
+        /// Sequence (build-spec-prod §WP-B-vsock):
+        ///   1. Bind the host vsock exit receiver on CID_HOST:EXIT_PORT and
+        ///      start its accept+read on a thread BEFORE booting (so the guest
+        ///      can connect the instant PID1 comes up).
+        ///   2. Boot the VM via the Swift shim and block until it stops.
+        ///   3. Join the receiver for the guest's exit frame.
+        ///
+        /// Exit-code law:
+        ///   - boot/config failure (shim < 0)            ⇒ `Err(LightrError)`
+        ///   - VM stopped but no exit frame (guest crash) ⇒ 255, NOT 0
+        ///   - otherwise                                  ⇒ the guest's code
+        ///     parsed from the vsock frame by `vsock::read_exit_frame`.
         fn run(&self, spec: &ExecSpec) -> Result<i32> {
             let dir = pack_dir();
             let kernel = dir.join("kernel");
@@ -487,8 +516,15 @@ mod vz_impl {
                 argv_cstrings.iter().map(|c| c.as_ptr()).collect();
             argv_ptrs.push(std::ptr::null());
 
-            // BOOT PATH (S5): see BOOT NOTE above — validated with a real pack.
-            let rc = unsafe {
+            // ── 1. Start the exit-code receiver BEFORE booting ──────────────
+            // BOOT-PATH (S5): the real AF_VSOCK bind only succeeds with a live
+            // VM subsystem. Bind first so we are listening before PID1 connects.
+            let receiver = VsockExitReceiver::bind().map_err(LightrError::Io)?;
+            let recv_handle = std::thread::spawn(move || receiver.recv());
+
+            // ── 2. Boot the VM and block until it stops (or fails) ──────────
+            // BOOT-PATH (S5): see BOOT NOTE above — validated with a real pack.
+            let vm_status = unsafe {
                 lightr_vz_run(
                     kernel_c.as_ptr(),
                     initrd_c.as_ptr(),
@@ -498,7 +534,37 @@ mod vz_impl {
                     argv_ptrs.as_ptr(),
                 )
             };
-            Ok(rc as i32)
+            if vm_status < 0 {
+                // The VM never booted (config/boot failure). The receiver thread
+                // is still blocked on accept; we abandon it (it unblocks on
+                // process teardown). There is no guest, so there is no code to
+                // fake — surface a real error.
+                return Err(LightrError::InvalidRef(format!(
+                    "vz engine: VM boot/config failed (shim status {vm_status})"
+                )));
+            }
+
+            // ── 3. Join the receiver for the guest's REAL exit code ─────────
+            // BOOT-PATH (S5): the frame the guest wrote (parsed by the tested
+            // vsock::read_exit_frame) is the SOLE source of the exit code.
+            //
+            // BOOT-PATH (S5) follow-up: if the VM stops cleanly but the guest
+            // never connected at all, accept(2) blocks and this join() hangs.
+            // The S5 owner must add an accept/read timeout (e.g. SO_RCVTIMEO or
+            // a poll(2)) so a silent guest maps to GUEST_NO_REPORT_CODE too. We
+            // do NOT add a timeout here because it cannot be validated without
+            // a live boot, and a wrong timeout would itself be a lie about the
+            // exit code. The short-read/EOF case below is already handled.
+            match recv_handle.join() {
+                Ok(Ok(code)) => Ok(code),
+                // VM stopped but the guest never delivered a (full) frame:
+                // PID1 crashed before reporting ⇒ 255, never a fabricated 0.
+                Ok(Err(_)) => Ok(GUEST_NO_REPORT_CODE),
+                // Receiver thread panicked — also not a success.
+                Err(_) => Err(LightrError::InvalidRef(
+                    "vz engine: vsock exit receiver panicked".to_string(),
+                )),
+            }
         }
     }
 
@@ -675,5 +741,67 @@ mod tests {
             }
             Ok(_) => panic!("engine_for(Ns) must fail on macOS"),
         }
+    }
+
+    // ── KEY INVARIANT (WP-B-vsock) ─────────────────────────────────────────
+    // There is NO code path where vz returns a hardcoded 0. The exit code
+    // ALWAYS originates from a real vsock frame parsed by vsock::read_exit_frame
+    // (or an explicit error / 255 when the guest didn't report). These two
+    // source-level tests pin that down so a future edit can't silently restore
+    // the fake success.
+
+    /// The Swift shim must NOT contain the fabricated `exitCode = 0` it used to.
+    /// The shim now returns a VM-lifecycle status; the exit code is the Rust
+    /// vsock receiver's job.
+    #[test]
+    fn swift_shim_has_no_fabricated_exit_code_zero() {
+        let shim = include_str!("../shim/vz.swift");
+        assert!(
+            !shim.contains("exitCode = 0"),
+            "vz.swift must not fabricate a guest exit code of 0"
+        );
+        assert!(
+            !shim.contains("exitCode"),
+            "vz.swift must not name a guest exitCode at all — it reports only \
+             VM-lifecycle status (vmStatus); the code comes from vsock"
+        );
+        // It must still document where the real code comes from.
+        assert!(
+            shim.contains("vsock") && shim.contains("vmStatus"),
+            "vz.swift must report vmStatus and point at the vsock channel"
+        );
+    }
+
+    /// `read_exit_frame` is the SOLE parser of the guest exit code in the engine
+    /// source, and `VzEngine::run` routes through the vsock receiver (which
+    /// calls it) rather than trusting the shim's return value as the code.
+    #[test]
+    fn read_exit_frame_is_the_sole_exit_code_source() {
+        let lib = include_str!("lib.rs");
+        let vsock_src = include_str!("vsock.rs");
+
+        // The parser exists exactly once as a definition, in vsock.rs.
+        assert!(
+            vsock_src.contains("pub fn read_exit_frame"),
+            "read_exit_frame must be defined in vsock.rs"
+        );
+
+        // VzEngine::run binds the receiver and joins it for the code; it does
+        // NOT return the shim status as the exit code.
+        assert!(
+            lib.contains("VsockExitReceiver::bind") && lib.contains("recv_handle.join()"),
+            "VzEngine::run must obtain the code via the vsock receiver"
+        );
+        // The shim's return value is treated as a VM-lifecycle status only
+        // (named vm_status), never returned directly as the exit code.
+        assert!(
+            lib.contains("let vm_status") && lib.contains("vm_status < 0"),
+            "the shim return must be handled as a lifecycle status (vm_status)"
+        );
+        // The honest no-report fallback is 255, explicitly NOT 0.
+        assert!(
+            lib.contains("GUEST_NO_REPORT_CODE: i32 = 255"),
+            "a missing guest frame must map to 255, not a fabricated 0"
+        );
     }
 }
