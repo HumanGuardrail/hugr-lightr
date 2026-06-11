@@ -25,3 +25,5 @@ target/
 
 # packaging build output (release tarballs — never committed)
 packaging/dist/
+/build/
+/.claude/

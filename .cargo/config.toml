@@ -1,0 +1,15 @@
+# Swift runtime rpath for `--features vz` builds.
+#
+# The Virtualization.framework shim (crates/lightr-engine/shim/vz.swift) links
+# against the Swift runtime (libswiftCore.dylib et al.), referenced via @rpath.
+# macOS ships that runtime in the OS at /usr/lib/swift (10.14.4+), so adding it
+# as an rpath lets the linked `lightr` binary resolve those dylibs at load time
+# (without it, a `--features vz` build compiles + links but crashes at startup
+# with "Library not loaded: @rpath/libswiftCore.dylib — no LC_RPATH's found").
+#
+# Harmless for non-vz / non-macOS builds: it is just one extra rpath, only ever
+# consulted when an @rpath-referenced dylib exists (i.e. the vz shim is linked).
+# Verified during the Intel vz boot bring-up (2026-06-12): the same flag via
+# RUSTFLAGS turned a dyld-crashing binary into a running one.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
