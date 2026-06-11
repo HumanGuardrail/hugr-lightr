@@ -948,6 +948,83 @@ pub fn exec_in(dir: &std::path::Path, command: &[String]) -> Result<i32> {
 }
 
 // ---------------------------------------------------------------------------
+// R4 additions — frozen contract: build-spec-r4.md §1 (bodies: R4-W1)
+// ---------------------------------------------------------------------------
+
+/// Deep-memo (opt-in nitro, ADR-0016): process-tree memoization via a
+/// spawn-shim. Degrades HONESTLY to whole-run memo when the shim can't
+/// attach (SIP/static binaries) — never silently claims the capability.
+pub struct DeepMemoConfig {
+    pub enabled: bool,
+}
+
+/// Probe whether the deep-memo spawn-shim mechanism is available on this host.
+///
+/// Returns `(available, reason)`.
+///
+/// R4 scope: no prebuilt dylib ships yet, so this always returns `(false,
+/// reason)`.  A future WP that ships the dylib flips this to `(true, "")` by
+/// (a) checking `$LIGHTR_HOME/shims/lightr_shim.dylib` exists and
+/// (b) confirming DYLD injection is allowed for the target interpreter.
+/// The caller (CLI W2) is responsible for surfacing `reason` to the user
+/// when `available` is false and `--deep-memo` was requested.
+///
+/// Note: DYLD_INSERT_LIBRARIES injection is blocked for SIP-protected
+/// system interpreters (e.g. `/bin/sh`); that check belongs here once
+/// a real shim path is probed.
+pub fn deep_memo_available() -> (bool, String) {
+    // Probe: does the shim dylib exist at $LIGHTR_HOME/shims/lightr_shim.dylib?
+    let shim_path = lightr_home().join("shims").join("lightr_shim.dylib");
+    if !shim_path.exists() {
+        return (
+            false,
+            format!(
+                "deep-memo unavailable (no shim installed at {}) \
+                 \u{2014} falling back to whole-run memo",
+                shim_path.display()
+            ),
+        );
+    }
+    // Shim exists: future WP validates DYLD injection is permitted and
+    // loads the dylib. For now, treat presence as insufficient (not yet
+    // integrated) and return unavailable.
+    (
+        false,
+        "deep-memo unavailable (shim present but not yet integrated) \
+         \u{2014} falling back to whole-run memo"
+            .to_string(),
+    )
+}
+
+/// run_memoized with optional deep-memo (build-spec-r4 §1, ADR-0016).
+///
+/// Behaviour:
+/// - `cfg.enabled == false`: exactly `run_memoized(spec, store)` — no change.
+/// - `cfg.enabled == true`: calls `deep_memo_available()`; since R4 ships no
+///   prebuilt shim, this always returns `(false, reason)`, so the function
+///   falls back to `run_memoized`.  The CLI (W2) surfaces the reason string
+///   to the user via `deep_memo_available()`.  **No sub-process memoization
+///   is faked; the fallback is to whole-run memo, honestly.**
+///
+/// The `RunOutcome` returned is identical to `run_memoized` in all cases.
+pub fn run_memoized_deep(
+    spec: &RunSpec,
+    store: &Store,
+    cfg: &DeepMemoConfig,
+) -> Result<RunOutcome> {
+    if !cfg.enabled {
+        return run_memoized(spec, store);
+    }
+
+    // Probe the shim mechanism.  On this host deep-memo is not yet available
+    // (R4 ships no dylib); the CLI is responsible for printing the reason.
+    let (_available, _reason) = deep_memo_available();
+    // _available is always false in R4; _reason is consumed by the CLI layer.
+    // Honest fallback: whole-run memoization, correctness preserved.
+    run_memoized(spec, store)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1616,27 +1693,136 @@ mod tests {
         assert_eq!(key1, key2, "key must be stable");
         assert!(hit2, "predict after run must be hit");
     }
-}
 
-// ---------------------------------------------------------------------------
-// R4 additions — frozen contract: build-spec-r4.md §1 (bodies: R4-W1)
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // R4 tests — build-spec-r4.md §1
+    // -----------------------------------------------------------------------
 
-/// Deep-memo (opt-in nitro, ADR-0016): process-tree memoization via a
-/// spawn-shim. Degrades HONESTLY to whole-run memo when the shim can't
-/// attach (SIP/static binaries) — never silently claims the capability.
-pub struct DeepMemoConfig {
-    pub enabled: bool,
-}
+    // deep_memo_disabled_equals_run_memoized:
+    // run_memoized_deep(cfg.enabled=false) must produce same key and hit
+    // behaviour as run_memoized — miss on first call, hit on second.
+    #[test]
+    fn deep_memo_disabled_equals_run_memoized() {
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+        let store = make_store(&home_path);
 
-/// run_memoized with optional deep-memo. When cfg.enabled and the shim
-/// attaches, sub-invocations are memoized; otherwise falls back to whole-run
-/// memo (run_memoized) and reports the fallback reason via the returned
-/// outcome's stderr stream / a stderr note at the CLI layer.
-pub fn run_memoized_deep(
-    _spec: &RunSpec,
-    _store: &Store,
-    _cfg: &DeepMemoConfig,
-) -> Result<RunOutcome> {
-    todo!("R4-W1: spawn-shim deep-memo + honest fallback to run_memoized")
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+
+        let side_effect = tmp.path().join("dm_disabled_side.txt");
+        let spec = RunSpec {
+            cwd: work.clone(),
+            inputs: vec![],
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                format!("echo deep >> {}", side_effect.display()),
+            ],
+            env_keys: vec![],
+            mounts: vec![],
+        };
+        let cfg = DeepMemoConfig { enabled: false };
+
+        // First call: miss (same as run_memoized miss)
+        let out1 = run_memoized_deep(&spec, &store, &cfg).expect("deep miss");
+        assert!(!out1.hit, "disabled deep-memo first call must be miss");
+        assert_eq!(out1.exit_code, 0);
+
+        // Second call: hit (run_memoized would also hit)
+        let out2 = run_memoized_deep(&spec, &store, &cfg).expect("deep hit");
+        assert!(out2.hit, "disabled deep-memo second call must be hit");
+        assert_eq!(out2.key, out1.key, "key must be stable across calls");
+
+        // Verify same key as plain run_memoized would produce
+        let out_plain = run_memoized(&spec, &store).expect("plain hit");
+        assert!(out_plain.hit, "plain run_memoized should also hit");
+        assert_eq!(
+            out1.key, out_plain.key,
+            "deep disabled key must match plain key"
+        );
+
+        // Side-effect written once (command did not re-execute on hit)
+        let line_count = std::fs::read_to_string(&side_effect)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(line_count, 1, "side effect must be written exactly once");
+    }
+
+    // deep_memo_available_returns_false_with_shim_reason:
+    // On this host (no shim installed), deep_memo_available() must return
+    // (false, reason) where reason is non-empty and mentions "shim" or "unavailable".
+    #[test]
+    fn deep_memo_available_returns_false_with_shim_reason() {
+        let (_home, _env_guard) = isolated_home();
+        let (available, reason) = deep_memo_available();
+        assert!(
+            !available,
+            "deep_memo_available must return false on R4 host"
+        );
+        assert!(!reason.is_empty(), "reason must be non-empty");
+        let reason_lower = reason.to_lowercase();
+        assert!(
+            reason_lower.contains("shim") || reason_lower.contains("unavailable"),
+            "reason must mention 'shim' or 'unavailable', got: {reason:?}"
+        );
+    }
+
+    // deep_memo_enabled_fallback_correctness:
+    // run_memoized_deep(cfg.enabled=true) on this host falls back to
+    // whole-run memo: miss then hit; deep_memo_available() confirms (false, reason).
+    #[test]
+    fn deep_memo_enabled_fallback_correctness() {
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+        let store = make_store(&home_path);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+
+        let side_effect = tmp.path().join("dm_enabled_side.txt");
+        let spec = RunSpec {
+            cwd: work.clone(),
+            inputs: vec![],
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                format!("echo enabled >> {}", side_effect.display()),
+            ],
+            env_keys: vec![],
+            mounts: vec![],
+        };
+        let cfg_on = DeepMemoConfig { enabled: true };
+
+        // Confirm probe says unavailable before we call the function
+        let (available, reason) = deep_memo_available();
+        assert!(!available);
+        assert!(!reason.is_empty());
+
+        // First call with enabled=true: should return Ok, fall back to miss
+        let out1 = run_memoized_deep(&spec, &store, &cfg_on).expect("enabled call 1 must not err");
+        assert!(
+            !out1.hit,
+            "first enabled call must be miss (fallback to whole-run memo)"
+        );
+        assert_eq!(out1.exit_code, 0);
+
+        // Second call with enabled=true: should hit (whole-run memo populated)
+        let out2 = run_memoized_deep(&spec, &store, &cfg_on).expect("enabled call 2 must not err");
+        assert!(
+            out2.hit,
+            "second enabled call must be hit (fallback memoized)"
+        );
+        assert_eq!(out2.key, out1.key, "keys must be stable");
+
+        // Side-effect written once (no double-exec)
+        let line_count = std::fs::read_to_string(&side_effect)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(line_count, 1, "side effect must be written exactly once");
+    }
 }
