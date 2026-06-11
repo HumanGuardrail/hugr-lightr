@@ -1,9 +1,10 @@
-//! lightr-run — frozen contract: build-spec v2 §6.
-//! Memo key, native exec, replay. Bodies are WP-4.
+//! lightr-run — frozen contract: build-spec v2 §6 + build-spec-r1 §2.
+//! Memo key, native exec, replay, supervisor, ps, logs, stop, exec_in.
 
 use lightr_core::{Digest, LightrError, Result, OUTPUT_CAP_BYTES};
 use lightr_index::{scan, Index};
 use lightr_store::Store;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub struct RunSpec {
@@ -66,6 +67,30 @@ fn decode_ac_record(bytes: &[u8]) -> Option<(i32, Digest, Digest)> {
 }
 
 // ---------------------------------------------------------------------------
+// Mount target validation
+// ---------------------------------------------------------------------------
+
+fn validate_mount_target(t: &str) -> Result<()> {
+    use std::path::Path;
+    let p = Path::new(t);
+    // Must be relative
+    if p.is_absolute() {
+        return Err(LightrError::InvalidRef(format!(
+            "mount target escapes cwd: {t}"
+        )));
+    }
+    // Must not contain ".." components
+    for component in p.components() {
+        if component == std::path::Component::ParentDir {
+            return Err(LightrError::InvalidRef(format!(
+                "mount target escapes cwd: {t}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Key assembly — exact order per contract:
 //   update(b"lightr/run/v1\0")
 //   for each input (spec.inputs; if empty use [spec.cwd]) in GIVEN order:
@@ -78,10 +103,15 @@ fn decode_ac_record(bytes: &[u8]) -> Option<(i32, Digest, Digest)> {
 //       update(key + b"=" + value + b"\0")
 //       absent keys: update(key + b"\x01")
 //   update(std::env::consts::OS + "-" + std::env::consts::ARCH)
+//   mounts: for each mount in order:
+//       validate target (reject "..")
+//       update(ref_name bytes + [0x02] + mount-ref's CURRENT root digest bytes)
 //   key = finalize
 // ---------------------------------------------------------------------------
 
-fn build_key(spec: &RunSpec) -> Result<Digest> {
+/// Shared private key-assembly fn. `hydrate_mounts` controls whether to
+/// actually hydrate into cwd (true for run_memoized, false for predict).
+fn assemble_key(spec: &RunSpec, store: &Store, hydrate_mounts: bool) -> Result<Digest> {
     let mut hasher = blake3::Hasher::new();
 
     // Domain separator
@@ -141,37 +171,125 @@ fn build_key(spec: &RunSpec) -> Result<Digest> {
     let triple = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     hasher.update(triple.as_bytes());
 
+    // Mounts key contribution
+    for mount in &spec.mounts {
+        validate_mount_target(&mount.target)?;
+
+        if hydrate_mounts {
+            // Hydrate the mount into cwd/target
+            let dest = spec.cwd.join(&mount.target);
+            lightr_index::hydrate(&dest, store, &mount.ref_name)?;
+        }
+
+        // Key contribution: ref_name bytes + [0x02] + mount root digest
+        let rec = store
+            .ref_get(&mount.ref_name)?
+            .ok_or_else(|| LightrError::RefNotFound(mount.ref_name.clone()))?;
+        hasher.update(mount.ref_name.as_bytes());
+        hasher.update(&[0x02u8]);
+        hasher.update(&rec.root.0);
+    }
+
+    Ok(Digest(*hasher.finalize().as_bytes()))
+}
+
+// Keep the old build_key for backward-compat within existing tests
+fn build_key(spec: &RunSpec) -> Result<Digest> {
+    // No store needed for no-mounts case; but we must handle it.
+    // For the unmounted path (used by existing tests), we short-circuit.
+    let mut hasher = blake3::Hasher::new();
+
+    hasher.update(b"lightr/run/v1\0");
+
+    let inputs: Vec<&PathBuf> = if spec.inputs.is_empty() {
+        vec![&spec.cwd]
+    } else {
+        spec.inputs.iter().collect()
+    };
+
+    for input_path in inputs {
+        let abs_path = if input_path.is_absolute() {
+            input_path.clone()
+        } else {
+            spec.cwd.join(input_path)
+        };
+        let canonical = abs_path.canonicalize().map_err(LightrError::Io)?;
+        let mut index = Index::load_for(&canonical)?;
+        let report = scan(&canonical, &mut index)?;
+        let rel_path_bytes = input_path.as_os_str().as_encoded_bytes();
+        hasher.update(rel_path_bytes);
+        hasher.update(b"\0");
+        hasher.update(&report.manifest.digest().0);
+    }
+
+    for arg in &spec.command {
+        let len = arg.len() as u64;
+        hasher.update(&len.to_le_bytes());
+        hasher.update(arg.as_bytes());
+    }
+
+    let mut sorted_keys = spec.env_keys.clone();
+    sorted_keys.sort();
+    for key in &sorted_keys {
+        if let Some(val) = std::env::var_os(key) {
+            hasher.update(key.as_bytes());
+            hasher.update(b"=");
+            hasher.update(val.as_encoded_bytes());
+            hasher.update(b"\0");
+        } else {
+            hasher.update(key.as_bytes());
+            hasher.update(b"\x01");
+        }
+    }
+
+    let triple = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    hasher.update(triple.as_bytes());
+
+    // No mount contribution (mounts empty in all existing callers)
     Ok(Digest(*hasher.finalize().as_bytes()))
 }
 
 pub fn run_memoized(spec: &RunSpec, store: &Store) -> Result<RunOutcome> {
-    let key = build_key(spec)?;
+    // For specs with no mounts, use fast path (no store needed for key)
+    let key = if spec.mounts.is_empty() {
+        build_key(spec)?
+    } else {
+        // Validate mount targets before anything else (before hydration)
+        for mount in &spec.mounts {
+            validate_mount_target(&mount.target)?;
+        }
+        // assemble_key with hydrate_mounts=false first to check AC hit
+        // then hydrate if miss
+        assemble_key(spec, store, false)?
+    };
 
     // --- Hit path ---
     if let Ok(Some(record_bytes)) = store.ac_get(&key) {
         if let Some((exit_code, stdout_d, stderr_d)) = decode_ac_record(&record_bytes) {
-            // Fetch stored outputs; any NotFound or Integrity => treat as miss
             let stdout_res = store.get_bytes(&stdout_d);
             let stderr_res = store.get_bytes(&stderr_d);
-            match (stdout_res, stderr_res) {
-                (Ok(stdout), Ok(stderr)) => {
-                    return Ok(RunOutcome {
-                        key,
-                        hit: true,
-                        exit_code,
-                        stdout,
-                        stderr,
-                    });
-                }
-                _ => {
-                    // Fall through to miss path
-                }
+            if let (Ok(stdout), Ok(stderr)) = (stdout_res, stderr_res) {
+                return Ok(RunOutcome {
+                    key,
+                    hit: true,
+                    exit_code,
+                    stdout,
+                    stderr,
+                });
             }
         }
-        // Corrupt record or fetch failure: treat as miss, fall through
     }
 
     // --- Miss path ---
+
+    // Hydrate mounts now (only on miss)
+    if !spec.mounts.is_empty() {
+        for mount in &spec.mounts {
+            let dest = spec.cwd.join(&mount.target);
+            lightr_index::hydrate(&dest, store, &mount.ref_name)?;
+        }
+    }
+
     if spec.command.is_empty() {
         return Err(LightrError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -182,7 +300,6 @@ pub fn run_memoized(spec: &RunSpec, store: &Store) -> Result<RunOutcome> {
     let output = std::process::Command::new(&spec.command[0])
         .args(&spec.command[1..])
         .current_dir(&spec.cwd)
-        // Full parent env passthrough (env_keys selects key material only)
         .output()
         .map_err(LightrError::Io)?;
 
@@ -204,9 +321,7 @@ pub fn run_memoized(spec: &RunSpec, store: &Store) -> Result<RunOutcome> {
     let stdout = output.stdout;
     let stderr = output.stderr;
 
-    // Memoize ONLY if exit_code == 0 AND both outputs <= OUTPUT_CAP_BYTES
     if exit_code == 0 && stdout.len() <= OUTPUT_CAP_BYTES && stderr.len() <= OUTPUT_CAP_BYTES {
-        // Store output objects and AC record
         let stdout_d = store.put_bytes(&stdout)?;
         let stderr_d = store.put_bytes(&stderr)?;
         let record = encode_ac_record(exit_code, &stdout_d, &stderr_d);
@@ -220,6 +335,616 @@ pub fn run_memoized(spec: &RunSpec, store: &Store) -> Result<RunOutcome> {
         stdout,
         stderr,
     })
+}
+
+/// Compute the memo key and whether the AC already has it — no execution.
+pub fn predict(spec: &RunSpec, store: &Store) -> Result<(lightr_core::Digest, bool)> {
+    // Validate mount targets (no hydration)
+    for mount in &spec.mounts {
+        validate_mount_target(&mount.target)?;
+    }
+    let key = if spec.mounts.is_empty() {
+        build_key(spec)?
+    } else {
+        assemble_key(spec, store, false)?
+    };
+    let hit = match store.ac_get(&key) {
+        Ok(Some(bytes)) => decode_ac_record(&bytes).is_some(),
+        _ => false,
+    };
+    Ok((key, hit))
+}
+
+// ---------------------------------------------------------------------------
+// R1 — run control types and helpers
+// ---------------------------------------------------------------------------
+
+pub struct RunHandle {
+    pub id: String,
+    pub dir: std::path::PathBuf,
+}
+
+pub struct RunInfo {
+    pub id: String,
+    pub running: bool,
+    pub exit_code: Option<i32>,
+    pub command: Vec<String>,
+    pub created_at_unix: u64,
+}
+
+pub enum LogStream {
+    Stdout,
+    Stderr,
+    Both,
+}
+
+// ---------------------------------------------------------------------------
+// SpecOnDisk — private serde mirror for spec.json
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+struct MountOnDisk {
+    ref_name: String,
+    target: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SpecOnDisk {
+    cwd: String,
+    command: Vec<String>,
+    env_keys: Vec<String>,
+    mounts: Vec<MountOnDisk>,
+    detached: bool,
+    created_at_unix: u64,
+}
+
+fn read_spec_on_disk(dir: &std::path::Path) -> Result<SpecOnDisk> {
+    let bytes = std::fs::read(dir.join("spec.json")).map_err(LightrError::Io)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| LightrError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+}
+
+fn lightr_home() -> PathBuf {
+    if let Ok(h) = std::env::var("LIGHTR_HOME") {
+        PathBuf::from(h)
+    } else {
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/tmp"));
+        home.join(".lightr")
+    }
+}
+
+fn run_dir_for_id(id: &str) -> PathBuf {
+    lightr_home().join("run").join(id)
+}
+
+fn new_run_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let pid = std::process::id();
+    format!("{nanos}-{pid}")
+}
+
+fn write_spec_json(dir: &std::path::Path, spec: &SpecOnDisk) -> Result<()> {
+    let bytes = serde_json::to_vec(spec).map_err(|e| LightrError::Io(std::io::Error::other(e)))?;
+    std::fs::write(dir.join("spec.json"), &bytes).map_err(LightrError::Io)
+}
+
+fn read_pid_file(dir: &std::path::Path) -> Option<i32> {
+    std::fs::read_to_string(dir.join("pid"))
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+}
+
+fn read_status_file(dir: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(dir.join("status"))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+fn parse_exit_code_from_status(status: &str) -> Option<i32> {
+    status
+        .strip_prefix("exited ")
+        .and_then(|s| s.parse::<i32>().ok())
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+fn ctl_sock_path(dir: &std::path::Path) -> PathBuf {
+    dir.join("ctl.sock")
+}
+
+fn send_ctl_op(dir: &std::path::Path, op: &str) -> Option<serde_json::Value> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let sock = ctl_sock_path(dir);
+    if !sock.exists() {
+        return None;
+    }
+    let mut stream = UnixStream::connect(&sock).ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+    stream.write_all(op.as_bytes()).ok()?;
+    stream.write_all(b"\n").ok()?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    serde_json::from_str(line.trim()).ok()
+}
+
+// ---------------------------------------------------------------------------
+// spawn_detached
+// ---------------------------------------------------------------------------
+
+pub fn spawn_detached(spec: &RunSpec, _store: &Store) -> Result<RunHandle> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let id = new_run_id();
+    let dir = run_dir_for_id(&id);
+    std::fs::create_dir_all(&dir).map_err(LightrError::Io)?;
+
+    let created_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let spec_on_disk = SpecOnDisk {
+        cwd: spec.cwd.to_string_lossy().into_owned(),
+        command: spec.command.clone(),
+        env_keys: spec.env_keys.clone(),
+        mounts: spec
+            .mounts
+            .iter()
+            .map(|m| MountOnDisk {
+                ref_name: m.ref_name.clone(),
+                target: m.target.clone(),
+            })
+            .collect(),
+        detached: true,
+        created_at_unix,
+    };
+    write_spec_json(&dir, &spec_on_disk)?;
+
+    let exe = std::env::current_exe().map_err(LightrError::Io)?;
+    let dir_str = dir.to_string_lossy().into_owned();
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(["__supervise", &dir_str]);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
+    cmd.spawn().map_err(LightrError::Io)?;
+
+    Ok(RunHandle { id, dir })
+}
+
+// ---------------------------------------------------------------------------
+// supervise
+// ---------------------------------------------------------------------------
+
+pub fn supervise(dir: &std::path::Path) -> Result<i32> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::time::Duration;
+
+    let spec = read_spec_on_disk(dir)?;
+    let cwd = PathBuf::from(&spec.cwd);
+
+    // Hydrate mounts (same law as run_memoized)
+    // We need a store for hydration — open from LIGHTR_HOME
+    let store_root = lightr_home().join("store");
+    let store = Store::open(&store_root)?;
+    for m in &spec.mounts {
+        validate_mount_target(&m.target)?;
+        let dest = cwd.join(&m.target);
+        lightr_index::hydrate(&dest, &store, &m.ref_name)?;
+    }
+
+    // Open log files
+    let stdout_log = std::fs::File::create(dir.join("stdout.log")).map_err(LightrError::Io)?;
+    let stderr_log = std::fs::File::create(dir.join("stderr.log")).map_err(LightrError::Io)?;
+
+    // Spawn child
+    let mut child = std::process::Command::new(&spec.command[0])
+        .args(&spec.command[1..])
+        .current_dir(&cwd)
+        .stdout(std::process::Stdio::from(stdout_log))
+        .stderr(std::process::Stdio::from(stderr_log))
+        .spawn()
+        .map_err(LightrError::Io)?;
+
+    let child_pid = child.id() as i32;
+
+    // Write pid file
+    std::fs::write(dir.join("pid"), format!("{child_pid}")).map_err(LightrError::Io)?;
+
+    // Write status = running
+    std::fs::write(dir.join("status"), "running").map_err(LightrError::Io)?;
+
+    // Bind ctl.sock
+    let sock_path = ctl_sock_path(dir);
+    let listener = UnixListener::bind(&sock_path).map_err(LightrError::Io)?;
+    listener.set_nonblocking(true).map_err(LightrError::Io)?;
+
+    // Main loop: serve ctl.sock + poll child
+    let exit_code = loop {
+        // Poll child
+        if let Some(status) = child.try_wait().map_err(LightrError::Io)? {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                let code = status
+                    .code()
+                    .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
+                break code;
+            }
+            #[cfg(not(unix))]
+            {
+                break status.code().unwrap_or(1);
+            }
+        }
+
+        // Accept ctl connections (non-blocking)
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
+                stream.set_write_timeout(Some(Duration::from_secs(1))).ok();
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_ok() {
+                    let line = line.trim();
+                    if let Ok(req) = serde_json::from_str::<serde_json::Value>(line) {
+                        let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                        let reply: serde_json::Value = match op {
+                            "status" => serde_json::json!({"status": "running"}),
+                            "signal" => {
+                                if let Some(sig) = req.get("sig").and_then(|v| v.as_i64()) {
+                                    #[cfg(unix)]
+                                    unsafe {
+                                        libc::kill(child_pid, sig as libc::c_int);
+                                    }
+                                    serde_json::json!({"ok": true})
+                                } else {
+                                    serde_json::json!({"ok": false})
+                                }
+                            }
+                            _ => serde_json::json!({"error": "unknown op"}),
+                        };
+                        let mut reply_bytes = serde_json::to_vec(&reply).unwrap_or_default();
+                        reply_bytes.push(b'\n');
+                        let mut w = &stream;
+                        let _ = w.write_all(&reply_bytes);
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => {}
+        }
+
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    // Write final status
+    std::fs::write(dir.join("status"), format!("exited {exit_code}")).map_err(LightrError::Io)?;
+
+    // Remove ctl.sock
+    let _ = std::fs::remove_file(&sock_path);
+
+    Ok(exit_code)
+}
+
+// ---------------------------------------------------------------------------
+// ps
+// ---------------------------------------------------------------------------
+
+pub fn ps(store_home: &std::path::Path) -> Result<Vec<RunInfo>> {
+    let run_dir = store_home.join("run");
+
+    if !run_dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut infos: Vec<RunInfo> = Vec::new();
+
+    let entries = std::fs::read_dir(&run_dir).map_err(LightrError::Io)?;
+    for entry in entries {
+        let entry = entry.map_err(LightrError::Io)?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let id = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        // Read spec.json
+        let spec = match read_spec_on_disk(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // Determine running state
+        let sock = ctl_sock_path(&path);
+        let running = if sock.exists() {
+            // Also check pid alive
+            if let Some(pid) = read_pid_file(&path) {
+                #[cfg(unix)]
+                {
+                    pid_alive(pid)
+                }
+                #[cfg(not(unix))]
+                {
+                    true
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let exit_code = read_status_file(&path)
+            .as_deref()
+            .and_then(parse_exit_code_from_status);
+
+        infos.push(RunInfo {
+            id,
+            running,
+            exit_code,
+            command: spec.command,
+            created_at_unix: spec.created_at_unix,
+        });
+    }
+
+    // Sort by id descending (newest first — id starts with unix_nanos)
+    infos.sort_by(|a, b| b.id.cmp(&a.id));
+
+    Ok(infos)
+}
+
+// ---------------------------------------------------------------------------
+// logs
+// ---------------------------------------------------------------------------
+
+pub fn logs(dir: &std::path::Path, stream: LogStream, follow: bool) -> Result<()> {
+    use std::io::Write;
+
+    fn print_file(path: &std::path::Path, offset: &mut u64) -> Result<bool> {
+        let data = std::fs::read(path).map_err(LightrError::Io)?;
+        let start = *offset as usize;
+        if start < data.len() {
+            std::io::stdout()
+                .write_all(&data[start..])
+                .map_err(LightrError::Io)?;
+            *offset = data.len() as u64;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    let stdout_path = dir.join("stdout.log");
+    let stderr_path = dir.join("stderr.log");
+
+    if !follow {
+        match stream {
+            LogStream::Stdout => {
+                let _ = print_file(&stdout_path, &mut 0u64);
+            }
+            LogStream::Stderr => {
+                let _ = print_file(&stderr_path, &mut 0u64);
+            }
+            LogStream::Both => {
+                let _ = print_file(&stdout_path, &mut 0u64);
+                let _ = print_file(&stderr_path, &mut 0u64);
+            }
+        }
+        return Ok(());
+    }
+
+    // Follow mode
+    let mut stdout_off = 0u64;
+    let mut stderr_off = 0u64;
+
+    loop {
+        let mut had_new = false;
+        match stream {
+            LogStream::Stdout => {
+                if stdout_path.exists() {
+                    had_new |= print_file(&stdout_path, &mut stdout_off)?;
+                }
+            }
+            LogStream::Stderr => {
+                if stderr_path.exists() {
+                    had_new |= print_file(&stderr_path, &mut stderr_off)?;
+                }
+            }
+            LogStream::Both => {
+                if stdout_path.exists() {
+                    had_new |= print_file(&stdout_path, &mut stdout_off)?;
+                }
+                if stderr_path.exists() {
+                    had_new |= print_file(&stderr_path, &mut stderr_off)?;
+                }
+            }
+        }
+        let _ = had_new;
+
+        // Check if exited and no new bytes
+        let status = read_status_file(dir).unwrap_or_default();
+        if status.starts_with("exited") {
+            // Drain any remaining
+            let mut drained = false;
+            match stream {
+                LogStream::Stdout => {
+                    if stdout_path.exists() {
+                        drained |= print_file(&stdout_path, &mut stdout_off)?;
+                    }
+                }
+                LogStream::Stderr => {
+                    if stderr_path.exists() {
+                        drained |= print_file(&stderr_path, &mut stderr_off)?;
+                    }
+                }
+                LogStream::Both => {
+                    if stdout_path.exists() {
+                        drained |= print_file(&stdout_path, &mut stdout_off)?;
+                    }
+                    if stderr_path.exists() {
+                        drained |= print_file(&stderr_path, &mut stderr_off)?;
+                    }
+                }
+            }
+            if !drained {
+                break;
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// stop
+// ---------------------------------------------------------------------------
+
+pub fn stop(dir: &std::path::Path, grace_secs: u64) -> Result<i32> {
+    use std::time::{Duration, Instant};
+
+    let sock = ctl_sock_path(dir);
+
+    if sock.exists() {
+        // Try sending SIGTERM via ctl.sock
+        send_ctl_op(dir, r#"{"op":"signal","sig":15}"#);
+    } else if let Some(pid) = read_pid_file(dir) {
+        // Direct kill
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
+
+    // Poll for grace_secs
+    let deadline = Instant::now() + Duration::from_secs(grace_secs);
+    loop {
+        if Instant::now() >= deadline {
+            break;
+        }
+        // Check if already exited
+        let status = read_status_file(dir).unwrap_or_default();
+        if status.starts_with("exited") {
+            if let Some(code) = parse_exit_code_from_status(&status) {
+                return Ok(code);
+            }
+        }
+        // Check pid alive
+        if let Some(pid) = read_pid_file(dir) {
+            #[cfg(unix)]
+            {
+                if !pid_alive(pid) {
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Check again after grace
+    let status = read_status_file(dir).unwrap_or_default();
+    if status.starts_with("exited") {
+        if let Some(code) = parse_exit_code_from_status(&status) {
+            return Ok(code);
+        }
+    }
+
+    // Still alive — SIGKILL
+    if let Some(pid) = read_pid_file(dir) {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+
+    // Wait a bit for status file update
+    let kill_deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let status = read_status_file(dir).unwrap_or_default();
+        if status.starts_with("exited") {
+            if let Some(code) = parse_exit_code_from_status(&status) {
+                return Ok(code);
+            }
+        }
+        if std::time::Instant::now() >= kill_deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    Ok(137)
+}
+
+// ---------------------------------------------------------------------------
+// exec_in
+// ---------------------------------------------------------------------------
+
+pub fn exec_in(dir: &std::path::Path, command: &[String]) -> Result<i32> {
+    let spec = read_spec_on_disk(dir)?;
+    let cwd = PathBuf::from(&spec.cwd);
+
+    if command.is_empty() {
+        return Err(LightrError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "command is empty",
+        )));
+    }
+
+    let mut child = std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .current_dir(&cwd)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(LightrError::Io)?;
+
+    let status = child.wait().map_err(LightrError::Io)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        Ok(status
+            .code()
+            .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(status.code().unwrap_or(1))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -564,45 +1289,331 @@ mod tests {
         let line_count = contents.lines().count();
         assert_eq!(line_count, 2, "command executed on miss and after corrupt");
     }
-}
 
-// ---------------------------------------------------------------------------
-// R1 additions — frozen contract: build-spec-r1.md §2 (bodies: WP-R1-W2)
-// ---------------------------------------------------------------------------
-pub struct RunHandle {
-    pub id: String,
-    pub dir: std::path::PathBuf,
-}
+    // -----------------------------------------------------------------------
+    // R1 tests
+    // -----------------------------------------------------------------------
 
-pub struct RunInfo {
-    pub id: String,
-    pub running: bool,
-    pub exit_code: Option<i32>,
-    pub command: Vec<String>,
-    pub created_at_unix: u64,
-}
+    // -----------------------------------------------------------------------
+    // Helper: create a run dir + spec.json and launch supervise() in a thread.
+    // Returns (home_path, run_dir, thread_handle).
+    // Unit tests cannot use spawn_detached (requires real `lightr` binary via
+    // current_exe) so we call supervise() directly in a thread instead.
+    // -----------------------------------------------------------------------
+    fn start_supervised(
+        home_path: &std::path::Path,
+        cwd: &std::path::Path,
+        command: Vec<String>,
+    ) -> (std::path::PathBuf, std::thread::JoinHandle<i32>) {
+        use std::time::{SystemTime, UNIX_EPOCH};
 
-pub enum LogStream {
-    Stdout,
-    Stderr,
-    Both,
-}
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let id = format!("{nanos}-test");
+        let run_dir = home_path.join("run").join(&id);
+        fs::create_dir_all(&run_dir).unwrap();
 
-pub fn spawn_detached(_spec: &RunSpec, _store: &Store) -> Result<RunHandle> {
-    todo!("R1-W2")
-}
-pub fn supervise(_dir: &std::path::Path) -> Result<i32> {
-    todo!("R1-W2")
-}
-pub fn ps(_store_home: &std::path::Path) -> Result<Vec<RunInfo>> {
-    todo!("R1-W2")
-}
-pub fn logs(_dir: &std::path::Path, _stream: LogStream, _follow: bool) -> Result<()> {
-    todo!("R1-W2")
-}
-pub fn stop(_dir: &std::path::Path, _grace_secs: u64) -> Result<i32> {
-    todo!("R1-W2")
-}
-pub fn exec_in(_dir: &std::path::Path, _command: &[String]) -> Result<i32> {
-    todo!("R1-W2")
+        let spec_on_disk = SpecOnDisk {
+            cwd: cwd.to_string_lossy().into_owned(),
+            command,
+            env_keys: vec![],
+            mounts: vec![],
+            detached: false,
+            created_at_unix: nanos / 1_000_000_000,
+        };
+        write_spec_json(&run_dir, &spec_on_disk).unwrap();
+
+        let run_dir_clone = run_dir.clone();
+        let t = std::thread::spawn(move || supervise(&run_dir_clone).unwrap_or(-1));
+        (run_dir, t)
+    }
+
+    // -----------------------------------------------------------------------
+    // detach_lifecycle: supervisor sleep 5 → ps shows running → stop → ps exited
+    // (uses supervise() directly in a thread — spawn_detached needs real binary)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn detach_lifecycle() {
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+
+        let (run_dir, _supervisor_thread) =
+            start_supervised(&home_path, cwd, vec!["sleep".to_string(), "10".to_string()]);
+
+        // Give supervisor time to write pid+status+ctl.sock
+        let startup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if ctl_sock_path(&run_dir).exists()
+                && read_status_file(&run_dir)
+                    .map(|s| s == "running")
+                    .unwrap_or(false)
+            {
+                break;
+            }
+            if std::time::Instant::now() >= startup_deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // ps should show it running
+        let infos = ps(&home_path).expect("ps");
+        let id = run_dir.file_name().unwrap().to_string_lossy().into_owned();
+        let found = infos.iter().find(|i| i.id == id);
+        assert!(found.is_some(), "run not found in ps output");
+        let info = found.unwrap();
+        assert!(info.running, "run should be running");
+
+        // stop it (grace=2s)
+        let exit_code = stop(&run_dir, 2).expect("stop");
+        // exit code after SIGTERM/SIGKILL: 143, 137, or 0 (if supervisor exited first)
+        assert!(
+            exit_code == 143 || exit_code == 137 || exit_code == 0,
+            "unexpected exit code: {exit_code}"
+        );
+
+        // ps should now show not running
+        let infos2 = ps(&home_path).expect("ps2");
+        let found2 = infos2.iter().find(|i| i.id == id);
+        // Either not found (dir removed) or found as not-running
+        if let Some(info2) = found2 {
+            assert!(!info2.running, "run should not be running after stop");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // logs_non_follow: write known content via supervisor, check log files
+    // (uses supervise() directly in a thread — spawn_detached needs real binary)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn logs_non_follow() {
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+
+        let (run_dir, supervisor_thread) = start_supervised(
+            &home_path,
+            cwd,
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo STDOUT_CONTENT; echo STDERR_CONTENT >&2".to_string(),
+            ],
+        );
+
+        // Wait for supervisor to finish (process is short-lived)
+        let _ = supervisor_thread.join();
+
+        // Check stdout.log content
+        let stdout_content = fs::read_to_string(run_dir.join("stdout.log")).unwrap_or_default();
+        assert!(
+            stdout_content.contains("STDOUT_CONTENT"),
+            "stdout.log missing STDOUT_CONTENT: {stdout_content:?}"
+        );
+
+        // Check stderr.log content
+        let stderr_content = fs::read_to_string(run_dir.join("stderr.log")).unwrap_or_default();
+        assert!(
+            stderr_content.contains("STDERR_CONTENT"),
+            "stderr.log missing STDERR_CONTENT: {stderr_content:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // exec_in_cwd: exec_in should run in the spec's cwd
+    // -----------------------------------------------------------------------
+    #[test]
+    fn exec_in_cwd_correctness() {
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().to_path_buf();
+        let store = make_store(&home_path);
+
+        let spec = RunSpec {
+            cwd: cwd.clone(),
+            inputs: vec![],
+            command: vec!["sleep".to_string(), "30".to_string()],
+            env_keys: vec![],
+            mounts: vec![],
+        };
+
+        let handle = spawn_detached(&spec, &store).expect("spawn_detached");
+        let run_dir = handle.dir.clone();
+
+        // Give supervisor time to write spec.json
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // exec_in with pwd — should print the run's cwd
+        // We capture by using a temp file
+        let out_file = tmp.path().join("pwd_output.txt");
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("pwd > {}", out_file.display()),
+        ];
+
+        let exit_code = exec_in(&run_dir, &cmd).expect("exec_in");
+        assert_eq!(exit_code, 0, "exec_in should exit 0");
+
+        let output = fs::read_to_string(&out_file).unwrap_or_default();
+        let canonical_cwd = cwd.canonicalize().unwrap();
+        assert!(
+            output.trim() == canonical_cwd.to_string_lossy().as_ref(),
+            "exec_in cwd mismatch: got {output:?}, expected {:?}",
+            canonical_cwd
+        );
+
+        // Clean up: stop the sleeper
+        let _ = stop(&run_dir, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // mount_escape_rejected: mount target with ".." rejected
+    // -----------------------------------------------------------------------
+    #[test]
+    fn mount_escape_rejected() {
+        let (_home, _env_guard) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+
+        let err = validate_mount_target("../escape");
+        assert!(err.is_err(), "mount target with '..' must be rejected");
+
+        let err2 = validate_mount_target("a/../../escape");
+        assert!(
+            err2.is_err(),
+            "mount target escaping via a/../../ must be rejected"
+        );
+
+        // Valid relative target
+        assert!(validate_mount_target("subdir").is_ok());
+        assert!(validate_mount_target("a/b/c").is_ok());
+
+        // Absolute path rejected
+        assert!(validate_mount_target("/abs").is_err());
+
+        let _ = cwd; // suppress unused
+    }
+
+    // -----------------------------------------------------------------------
+    // mounts_run: run with mount of snapshotted ref → file present in cwd/target
+    //             + key changes when mount ref repointed
+    // -----------------------------------------------------------------------
+    #[test]
+    fn mounts_run_and_key_change() {
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+        let store = make_store(&home_path);
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create a source dir with a file to snapshot
+        let src_v1 = tmp.path().join("src_v1");
+        fs::create_dir(&src_v1).unwrap();
+        fs::write(src_v1.join("hello.txt"), b"hello from v1").unwrap();
+
+        // Snapshot src_v1 as ref "testmount"
+        lightr_index::snapshot(&src_v1, &store, "testmount").expect("snapshot v1");
+
+        // Create cwd (separate from input)
+        let work = tmp.path().join("work");
+        fs::create_dir(&work).unwrap();
+
+        // Run with mount: ref=testmount, target=mounted
+        let spec = RunSpec {
+            cwd: work.clone(),
+            inputs: vec![],
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "cat mounted/hello.txt".to_string(),
+            ],
+            env_keys: vec![],
+            mounts: vec![Mount {
+                ref_name: "testmount".to_string(),
+                target: "mounted".to_string(),
+            }],
+        };
+
+        let out1 = run_memoized(&spec, &store).expect("run1 with mount");
+        assert_eq!(out1.exit_code, 0, "mounted run should exit 0");
+        assert!(
+            out1.stdout.starts_with(b"hello from v1"),
+            "stdout should contain file content"
+        );
+
+        // Verify file was hydrated
+        // (After run, the mounted dir should be present — it was hydrated for the miss)
+        // Key from first run
+        let key1 = out1.key;
+
+        // Now create v2 with different content, re-snapshot to "testmount"
+        let src_v2 = tmp.path().join("src_v2");
+        fs::create_dir(&src_v2).unwrap();
+        fs::write(src_v2.join("hello.txt"), b"hello from v2").unwrap();
+        lightr_index::snapshot(&src_v2, &store, "testmount").expect("snapshot v2");
+
+        // Remove the mounted dir so hydrate can succeed again
+        let mounted_dir = work.join("mounted");
+        if mounted_dir.exists() {
+            fs::remove_dir_all(&mounted_dir).unwrap();
+        }
+
+        // Re-run: key must change because mount ref's root digest changed
+        let out2 = run_memoized(&spec, &store).expect("run2 with mount v2");
+        assert_eq!(out2.exit_code, 0);
+        assert!(
+            out2.stdout.starts_with(b"hello from v2"),
+            "stdout should contain v2 content"
+        );
+        assert_ne!(
+            key1, out2.key,
+            "key must change when mount ref is repointed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // predict: miss → run → predict hit
+    // -----------------------------------------------------------------------
+    #[test]
+    fn predict_miss_run_hit() {
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+        let store = make_store(&home_path);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        fs::create_dir(&work).unwrap();
+
+        let spec = RunSpec {
+            cwd: work.clone(),
+            inputs: vec![],
+            command: vec!["/bin/echo".to_string(), "predict-test".to_string()],
+            env_keys: vec![],
+            mounts: vec![],
+        };
+
+        // predict before run: should be miss
+        let (key1, hit1) = predict(&spec, &store).expect("predict1");
+        assert!(!hit1, "predict before run must be miss");
+
+        // Run it
+        let out = run_memoized(&spec, &store).expect("run");
+        assert!(!out.hit, "first run must be miss");
+        assert_eq!(out.key, key1, "predict key must match run key");
+
+        // predict after run: should be hit
+        let (key2, hit2) = predict(&spec, &store).expect("predict2");
+        assert_eq!(key1, key2, "key must be stable");
+        assert!(hit2, "predict after run must be hit");
+    }
 }
