@@ -24,6 +24,11 @@ and Lightr deletes the container's costs.
 
 ## 1. The scene
 
+> **Aspirational scene** (working-backwards — this is the target, not a
+> recording). The Linux/microVM parts below are NOT yet runnable; see the
+> README "Honest status" box and `docs/spec/parity-audit.md` for what
+> executes today vs. what binds to Apple Silicon + the views layer.
+
 A laptop that has never seen the project:
 
 ```
