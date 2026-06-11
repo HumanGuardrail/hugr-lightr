@@ -1234,6 +1234,7 @@ fn a16_events() {
 // Shared tree comparison helper (reused from A11).
 // ---------------------------------------------------------------------------
 fn compare_trees(expected: &Path, actual: &Path) {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     for entry in walkdir(expected) {
@@ -1273,17 +1274,20 @@ fn compare_trees(expected: &Path, actual: &Path) {
                 "file content mismatch at {}",
                 rel.display()
             );
-            let exp_mode = exp_meta.permissions().mode() & 0o777;
-            let act_meta = fs::metadata(&act).unwrap();
-            let act_mode = act_meta.permissions().mode() & 0o777;
-            assert_eq!(
-                exp_mode,
-                act_mode,
-                "file mode mismatch at {}: expected {:o} got {:o}",
-                rel.display(),
-                exp_mode,
-                act_mode
-            );
+            #[cfg(unix)]
+            {
+                let exp_mode = exp_meta.permissions().mode() & 0o777;
+                let act_meta = fs::metadata(&act).unwrap();
+                let act_mode = act_meta.permissions().mode() & 0o777;
+                assert_eq!(
+                    exp_mode,
+                    act_mode,
+                    "file mode mismatch at {}: expected {:o} got {:o}",
+                    rel.display(),
+                    exp_mode,
+                    act_mode
+                );
+            }
         }
     }
 }
@@ -1728,7 +1732,10 @@ fn copy_dir_all(src: &Path, dst: &Path) {
         let dest = dst.join(entry.file_name());
         if meta.file_type().is_symlink() {
             let target = fs::read_link(&path).unwrap();
+            #[cfg(unix)]
             std::os::unix::fs::symlink(target, &dest).unwrap();
+            #[cfg(not(unix))]
+            let _ = target; // symlinks not created on non-unix; dest is absent
         } else if meta.file_type().is_dir() {
             fs::create_dir_all(&dest).unwrap();
             copy_dir_all(&path, &dest);

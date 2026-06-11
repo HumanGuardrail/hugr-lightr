@@ -25,6 +25,7 @@ use flate2::{write::GzEncoder, Compression};
 use sha2::{Digest as Sha2DigestTrait, Sha256};
 use std::collections::HashMap;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -331,12 +332,15 @@ fn a17_oci_import_roundtrip() {
     // bin/tool must be present with mode 0755.
     let tool_path = dest.path().join("bin/tool");
     assert!(tool_path.exists(), "bin/tool must be present after hydrate");
-    let tool_mode = fs::metadata(&tool_path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(
-        tool_mode, 0o755,
-        "bin/tool mode must be 0755; got {:o}",
-        tool_mode
-    );
+    #[cfg(unix)]
+    {
+        let tool_mode = fs::metadata(&tool_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            tool_mode, 0o755,
+            "bin/tool mode must be 0755; got {:o}",
+            tool_mode
+        );
+    }
 
     // app/hello must be present with content "hi" and mode 0755.
     let hello_path = dest.path().join("app/hello");
@@ -349,12 +353,15 @@ fn a17_oci_import_roundtrip() {
         b"hi",
         "app/hello content must be \"hi\""
     );
-    let hello_mode = fs::metadata(&hello_path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(
-        hello_mode, 0o755,
-        "app/hello mode must be 0755; got {:o}",
-        hello_mode
-    );
+    #[cfg(unix)]
+    {
+        let hello_mode = fs::metadata(&hello_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            hello_mode, 0o755,
+            "app/hello mode must be 0755; got {:o}",
+            hello_mode
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

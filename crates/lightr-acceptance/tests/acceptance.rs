@@ -9,6 +9,7 @@
 mod common;
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -86,17 +87,20 @@ fn compare_trees(expected: &Path, actual: &Path) {
                 rel.display()
             );
 
-            let exp_mode = exp_meta.permissions().mode() & 0o777;
-            let act_meta = fs::metadata(&act).unwrap();
-            let act_mode = act_meta.permissions().mode() & 0o777;
-            assert_eq!(
-                exp_mode,
-                act_mode,
-                "file mode mismatch at {}: expected {:o} got {:o}",
-                rel.display(),
-                exp_mode,
-                act_mode
-            );
+            #[cfg(unix)]
+            {
+                let exp_mode = exp_meta.permissions().mode() & 0o777;
+                let act_meta = fs::metadata(&act).unwrap();
+                let act_mode = act_meta.permissions().mode() & 0o777;
+                assert_eq!(
+                    exp_mode,
+                    act_mode,
+                    "file mode mismatch at {}: expected {:o} got {:o}",
+                    rel.display(),
+                    exp_mode,
+                    act_mode
+                );
+            }
         }
     }
 }
@@ -350,9 +354,11 @@ fn a4_no_daemon() {
     );
 
     // LIGHTR_HOME tree must contain only regular files, dirs, or symlinks
+    #[cfg(unix)]
     assert_no_sockets_or_pidfiles(home.path());
 }
 
+#[cfg(unix)]
 fn assert_no_sockets_or_pidfiles(root: &Path) {
     use std::os::unix::fs::FileTypeExt;
 
@@ -614,9 +620,11 @@ fn find_object_file(
 fn corrupt_in_place(object_file: &Path) {
     let mut content = fs::read(object_file).unwrap();
     assert!(!content.is_empty(), "object file must not be empty");
+    #[cfg(unix)]
     fs::set_permissions(object_file, fs::Permissions::from_mode(0o644)).unwrap();
     content[0] ^= 0xFF;
     fs::write(object_file, &content).unwrap();
+    #[cfg(unix)]
     fs::set_permissions(object_file, fs::Permissions::from_mode(0o444)).unwrap();
 }
 
