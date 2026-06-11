@@ -12,7 +12,7 @@
 | F | Feature | Status | Evidence |
 |---|---|---|---|
 | F-001 | File-level CAS objects | ✅ | A1, A7; lightr-store unit |
-| F-002 | CoW ladder + materialize | ✅ | A1; bench B3′ (rung=Clone on APFS) |
+| F-002 | CoW ladder + materialize | ✅ | A1; bench B3′ (rung=Clone on APFS). **+Windows ReFS rung** (`CowRung::RefsBlockClone`, FSCTL_DUPLICATE_EXTENTS_TO_FILE, best-effort → `std::fs::copy` fallback = required-correct path; WIN-PATH, runtime on a ReFS volume) |
 | F-003 | Binary mmap manifests (LMF1) | ✅ | lightr-core codec unit |
 | F-004 | Fail-closed integrity | ✅ | A7a/A7b; A17b (sha256) |
 | F-005 | Refs + lineage | ✅ | A12 undo, A18 reflog |
@@ -41,8 +41,8 @@
 | F-202 | exec/logs/ps/stop | ✅ | A9, A10, A9b, A9e |
 | F-203 | resource limits | ⏳ | reserved; honest — needs ns/vz (decisions-log) |
 | F-204 | ns engine (Linux) | 🟡 | code complete; probe honest on macOS (A19); CI-gated on Linux |
-| F-205 | vz engine boot-never | 🟡 | shim behind `vz` feature (compiles+lints w/ swiftc); real vsock exit-code receiver (no fake 0; silent-guest→255 backstop); **S5 boot runbook + harness ready (`spikes/s5-vz-boot/`)** — boot itself = run on a rented ARM Mac |
-| F-206 | Apple kernel + Rust PID1 | 🟡 | `lightr-init` PID1 (real exit, host-tested); **real kernel-pack pipeline (`scripts/build-linux-pack.sh`, kernel = Apple Containerization config, pinned) + `verify_pack` structural gate wired into `install-pack`**; boot = S5 |
+| F-205 | vz engine boot-never | 🟡 | shim behind `vz` feature **compiles + LINKS on Intel x86_64 — verified on this box (`cargo build --features vz`, exit 0)**; real vsock exit-code receiver (no fake 0; silent-guest→255 backstop); **S5 harness now arch-aware + ad-hoc codesigned with `packaging/vz.entitlements`** (`spikes/s5-vz-boot/run-s5.sh`). **NOT Apple-Silicon-gated** (ADR-0017): boot is validatable on THIS Intel Mac — pending an x86_64 kernel + the boot assertion |
+| F-206 | Apple kernel + Rust PID1 | 🟡 | `lightr-init` PID1 (real exit, host-tested); real kernel-pack pipeline (`scripts/build-linux-pack.sh`, Apple Containerization config, pinned, `--arch x86_64\|aarch64`) + `verify_pack` wired into `install-pack`; boot = S5 on ANY Mac (Intel→x86_64 / ASi→arm64, `spikes/s5-vz-boot-arm64/`) |
 | F-207 | guest views over store | ⏳ | with vz boot, future |
 | F-208 | Rosetta x86 | ⏳ | vz path, future |
 | F-209 | fc engine (cloud) | ⏳ | Runners fabric, future |
@@ -87,7 +87,7 @@
 | F-601 | single binary ≤10 MB | ✅ | release 1.9 MB (bench B7) |
 | F-602 | `bench --vs-docker` | ✅ | bench cmd; B1–B11 |
 | F-603 | microwave floor (1 core/512 MB/POSIX) | 🟡 | copy-rung fallback coded; not yet measured on constrained HW |
-| F-604 | brew/curl/gh-releases signed | 🟡 | **release pipeline live** (`.github/workflows/release.yml`: tag-triggered matrix build + checksums + GitHub Release; macOS signing gated behind owner secrets, unsigned clearly labeled); packaging/ + brew formula wired; **name verified FREE — crate `hugr-lightr`, binary `lightr` (`docs/NAMING.md`)**; license = Apache-2.0; publish ⏳ on GTM timing (after Runners M1) |
+| F-604 | brew/curl/gh-releases signed | 🟡 | **release pipeline = 5-target matrix** (`.github/workflows/release.yml`: macOS arm64+x86_64, Linux x86_64+aarch64 [cross-linked, CC+linker], Windows x86_64 [.zip via pwsh] → SHA256SUMS + GitHub Release; macOS signing gated behind owner secrets, applies the vz entitlement, unsigned clearly labeled); name verified FREE (crate `hugr-lightr`, binary `lightr`); license Apache-2.0; publish ⏳ on GTM timing |
 | F-605 | zero telemetry | ✅ | A6 + no network in core (ADR-0007) |
 
 ## Operational (production hardening phase, 2026-06-12)
@@ -98,6 +98,28 @@
 | CI gate | ✅ | `.github/workflows/ci.yml`: fmt/clippy -D/test + bench, honors rust-toolchain.toml |
 | Registry robustness | ✅ | private auth, retry/backoff, streaming, typed status, multi-arch |
 | Outward tense-discipline | ✅ | README "Honest status" box + whitepaper §1 aspirational marker match this ledger |
+
+## Platform coverage (omni wave, 2026-06-12 — ADR-0017)
+
+One codebase, every desktop. Engine per platform; the daemonless core is portable
+behind `cfg`. Honesty: "compiles + cross-checks clean" ≠ "runtime validated" — the
+latter is marked per platform, never assumed.
+
+| Platform | core (CAS/run/build) | isolation | build proof | runtime validated? |
+|---|---|---|---|---|
+| macOS Intel x86_64 | ✅ host 408/0 | vz (x86_64 guest) | host build+test green | vz **compiles+links here**; boot pending x86_64 kernel (S5 here) |
+| macOS Apple Silicon | ✅ same code | vz (arm64 guest) | darwin cross in CI | 🟡 runbook `spikes/s5-vz-boot-arm64/` |
+| Linux x86_64 | ✅ same code | ns (namespaces) | CI gate (native ubuntu) | 🟡 CI / target box |
+| Linux aarch64 | ✅ same code | ns | CI cross-check (CC+linker) | 🟡 CI / target box |
+| Windows x86_64 | 🟡 code-complete | wsl (ns in WSL2) | **cross-check x86_64-pc-windows-gnu: 0 errors (lib+bins+all-targets)** | 🟡 runbook (Windows box) |
+
+- **Verified on this Intel Mac:** host 408/0 + clippy -D + fmt clean; `--features
+  vz` compiles+links; full Windows cross-check (lib+bins + all-targets) 0 errors.
+- **Honest-gated (WIN-PATH / runbook):** Windows runtime (named-pipe supervisor,
+  WSL2 exec, ReFS block-clone), arm64 vz boot, Linux ns runtime — each has a
+  one-command runbook or a CI job; none is claimed validated.
+- `windows-sys` is target-gated (never pulled on unix builds); every Windows
+  runtime path is `// WIN-PATH` with an honest probe/error + a correct fallback.
 
 ## Summary
 - **✅ done + tested:** the entire local product — store, index, all R0 verbs,
