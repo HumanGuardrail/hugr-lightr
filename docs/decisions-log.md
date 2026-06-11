@@ -190,3 +190,35 @@ cross-check (lib+bins + all-targets) 0 errors; `--features vz` compiles+links on
 Intel. **Pending (honestly marked, hardware/CI-gated):** the vz boot assertion
 (x86_64 kernel building on this box), arm64 vz boot, Windows/Linux runtime — each
 runbook- or CI-gated, none claimed validated.
+
+## 2026-06-12 — Intel vz boot bring-up (real, on this Mac)
+
+Ran the vz boot path end-to-end on the owner's Intel Mac (long deferred as
+"ARM-gated"). Built a real x86_64 kernel (Linux 6.18.5, virtio/vsock/virtiofs) +
+`lightr-init` (musl) in docker; assembled + installed the pack → `vz available`.
+The bring-up FOUND + FIXED 4 latent bugs — none caught before because the path
+had literally never run:
+1. `pack_dir()` (engine) fell back to bare $HOME vs the CLI's ~/.lightr → the
+   installed pack was invisible to probe_vz. Aligned to ~/.lightr.
+2. `--features vz` binary crashed at startup (libswiftCore @rpath, no LC_RPATH)
+   → `.cargo/config.toml` adds the /usr/lib/swift rpath on macOS.
+3. `KERNEL_SHA256` pin in build-linux-pack.sh was wrong → corrected to kernel.org.
+4. `packaging/vz.entitlements` had an XML comment containing `--` (illegal) →
+   codesign rejected it, entitlement never attached → stripped to a clean plist.
+
+ARCHITECTURAL FINDING (the real blocker, arch-INDEPENDENT): the exit-code channel
+(F-206) uses a raw host `AF_VSOCK` listener (crates/lightr-engine/src/vsock.rs).
+**macOS has no host AF_VSOCK** — `socket(AF_VSOCK)` returns ENODEV on Intel AND
+Apple Silicon. Renting an ARM Mac would hit the SAME wall — vindicating the
+owner's "don't depend on ARM" instinct even harder. That raw-AF_VSOCK receiver is
+the LINUX-host mechanism (future `fc`/KVM). For the macOS `vz` engine the exit
+code must be brokered by the Swift shim's `VZVirtioSocketDevice`, OR carried as a
+small file on the shared (writable) virtiofs rootfs.
+
+DECISION PENDING (owner) — which exit-code rework for vz-on-macOS:
+- (a) file-on-virtiofs: `lightr-init` writes the exit code to a rootfs file; host
+  reads it after the VM stops. No vsock. Simpler (~1 init + 1 engine change).
+- (b) Swift `VZVirtioSocketDevice`: the "proper" vsock broker; more Swift.
+Lead recommends (a). Caveat: even with the channel fixed, the VM boot itself
+(kernel → virtiofs mount → pivot_root → exec → write) is NOT yet validated green —
+that is the next step, not the last. No boot is claimed as validated.
