@@ -17,3 +17,8 @@ target/
 
 # TechLead per-project state (never committed)
 .techlead/
+
+# build
+target/
+.worktrees/
+.spike-tmp/
