@@ -55,6 +55,7 @@ pub fn run(
         inputs: input_paths,
         command: command.to_vec(),
         env_keys: env_keys.to_vec(),
+        mounts: vec![],
     };
 
     if explain {

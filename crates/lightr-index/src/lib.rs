@@ -1171,3 +1171,36 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// R1 additions — frozen contract: build-spec-r1.md §3 (bodies: WP-R1-W3)
+// ---------------------------------------------------------------------------
+pub struct GcReport {
+    pub objects_total: u64,
+    pub reachable: u64,
+    pub swept: u64,
+    pub bytes_freed: u64,
+    pub run_dirs_removed: u64,
+}
+
+pub fn gc(_store: &Store, _dry_run: bool, _min_age_secs: u64) -> Result<GcReport> {
+    todo!("R1-W3")
+}
+
+pub struct DiffReport {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub changed: Vec<String>,
+}
+
+pub fn diff_manifests(_old: &Manifest, _new: &Manifest) -> DiffReport {
+    todo!("R1-W3")
+}
+
+pub fn undo(_store: &Store, _name: &str) -> Result<RefRecord> {
+    todo!("R1-W3")
+}
+
+pub fn bisect(_store: &Store, _name: &str, _cmd: &[String]) -> Result<(usize, RefRecord)> {
+    todo!("R1-W3")
+}

@@ -11,6 +11,14 @@ pub struct RunSpec {
     pub inputs: Vec<PathBuf>,
     pub command: Vec<String>,
     pub env_keys: Vec<String>,
+    // R1: mounts hydrated CoW into <cwd>/<target> pre-key/pre-exec
+    // (build-spec-r1 §2); part of the memo key in order.
+    pub mounts: Vec<Mount>,
+}
+
+pub struct Mount {
+    pub ref_name: String,
+    pub target: String,
 }
 
 pub struct RunOutcome {
@@ -246,6 +254,7 @@ mod tests {
             inputs: vec![],
             command: command.into_iter().map(|s| s.to_string()).collect(),
             env_keys: vec![],
+            mounts: vec![],
         }
     }
 
@@ -323,6 +332,7 @@ mod tests {
             inputs: vec![],
             command: vec!["/bin/echo".to_string(), "x".to_string()],
             env_keys: vec!["LIGHTR_TEST_VAR_KCW".to_string()],
+            mounts: vec![],
         };
         let k1 = build_key(&spec1).expect("k1");
 
@@ -364,6 +374,7 @@ mod tests {
             inputs: vec![],
             command: cmd,
             env_keys: vec![],
+            mounts: vec![],
         };
 
         // First run: miss
@@ -414,6 +425,7 @@ mod tests {
             inputs: vec![],
             command: cmd,
             env_keys: vec![],
+            mounts: vec![],
         };
 
         let out1 = run_memoized(&spec, &store).expect("run1");
@@ -470,6 +482,7 @@ mod tests {
             inputs: vec![],
             command: cmd,
             env_keys: vec![],
+            mounts: vec![],
         };
 
         // First run: miss (output too large)
@@ -523,6 +536,7 @@ mod tests {
             inputs: vec![],
             command: cmd,
             env_keys: vec![],
+            mounts: vec![],
         };
 
         // First run: miss, gets memoized
@@ -550,4 +564,45 @@ mod tests {
         let line_count = contents.lines().count();
         assert_eq!(line_count, 2, "command executed on miss and after corrupt");
     }
+}
+
+// ---------------------------------------------------------------------------
+// R1 additions — frozen contract: build-spec-r1.md §2 (bodies: WP-R1-W2)
+// ---------------------------------------------------------------------------
+pub struct RunHandle {
+    pub id: String,
+    pub dir: std::path::PathBuf,
+}
+
+pub struct RunInfo {
+    pub id: String,
+    pub running: bool,
+    pub exit_code: Option<i32>,
+    pub command: Vec<String>,
+    pub created_at_unix: u64,
+}
+
+pub enum LogStream {
+    Stdout,
+    Stderr,
+    Both,
+}
+
+pub fn spawn_detached(_spec: &RunSpec, _store: &Store) -> Result<RunHandle> {
+    todo!("R1-W2")
+}
+pub fn supervise(_dir: &std::path::Path) -> Result<i32> {
+    todo!("R1-W2")
+}
+pub fn ps(_store_home: &std::path::Path) -> Result<Vec<RunInfo>> {
+    todo!("R1-W2")
+}
+pub fn logs(_dir: &std::path::Path, _stream: LogStream, _follow: bool) -> Result<()> {
+    todo!("R1-W2")
+}
+pub fn stop(_dir: &std::path::Path, _grace_secs: u64) -> Result<i32> {
+    todo!("R1-W2")
+}
+pub fn exec_in(_dir: &std::path::Path, _command: &[String]) -> Result<i32> {
+    todo!("R1-W2")
 }
