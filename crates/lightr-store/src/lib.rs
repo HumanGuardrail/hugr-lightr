@@ -1088,5 +1088,4 @@ mod tests {
         // Must succeed without error.
         store.remove_object(&d).unwrap();
     }
-
 }

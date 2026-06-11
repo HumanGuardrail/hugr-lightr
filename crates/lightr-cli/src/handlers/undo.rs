@@ -5,7 +5,7 @@ use lightr_index::undo;
 use lightr_store::Store;
 use serde::Serialize;
 
-use crate::exit::die_internal;
+use crate::exit::die_lightr;
 
 #[derive(Serialize)]
 struct UndoJson {
@@ -19,7 +19,7 @@ struct UndoJson {
 pub fn run(name: &str, json: bool) -> i32 {
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     let rec = match undo(&store, name) {
@@ -28,7 +28,7 @@ pub fn run(name: &str, json: bool) -> i32 {
             eprintln!("lightr: ref not found: {name}");
             return 2;
         }
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     if json {

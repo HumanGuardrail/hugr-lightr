@@ -5,7 +5,7 @@ use lightr_index::diff_manifests;
 use lightr_store::Store;
 use serde::Serialize;
 
-use crate::exit::die_internal;
+use crate::exit::die_lightr;
 
 #[derive(Serialize)]
 struct DiffJson {
@@ -17,7 +17,7 @@ struct DiffJson {
 pub fn run(name: &str, at: usize, dir_opt: Option<&str>, json: bool) -> i32 {
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     // Get ref log for this name
@@ -31,16 +31,16 @@ pub fn run(name: &str, at: usize, dir_opt: Option<&str>, json: bool) -> i32 {
             eprintln!("lightr: ref not found: {name}");
             return 2;
         }
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     // Current manifest (index 0)
     let current_manifest = match store.get_bytes(&ref_log[0].root) {
         Ok(bytes) => match lightr_core::Manifest::decode(&bytes) {
             Ok(m) => m,
-            Err(e) => return die_internal(&e),
+            Err(e) => return die_lightr(&e),
         },
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     let report = if let Some(dir) = dir_opt {
@@ -48,11 +48,11 @@ pub fn run(name: &str, at: usize, dir_opt: Option<&str>, json: bool) -> i32 {
         let dir_path = std::path::Path::new(dir);
         let mut index = match lightr_index::Index::load_for(dir_path) {
             Ok(i) => i,
-            Err(e) => return die_internal(&e),
+            Err(e) => return die_lightr(&e),
         };
         let walk = match lightr_index::scan(dir_path, &mut index) {
             Ok(r) => r,
-            Err(e) => return die_internal(&e),
+            Err(e) => return die_lightr(&e),
         };
         diff_manifests(&current_manifest, &walk.manifest)
     } else {
@@ -67,9 +67,9 @@ pub fn run(name: &str, at: usize, dir_opt: Option<&str>, json: bool) -> i32 {
         let old_manifest = match store.get_bytes(&ref_log[at].root) {
             Ok(bytes) => match lightr_core::Manifest::decode(&bytes) {
                 Ok(m) => m,
-                Err(e) => return die_internal(&e),
+                Err(e) => return die_lightr(&e),
             },
-            Err(e) => return die_internal(&e),
+            Err(e) => return die_lightr(&e),
         };
         diff_manifests(&old_manifest, &current_manifest)
     };

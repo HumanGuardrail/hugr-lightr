@@ -186,15 +186,23 @@ fn a9_detach_lifecycle() {
         "ps must show running=false for {id} after stop"
     );
 
-    // No lightr processes remain.
-    let pgrep = std::process::Command::new("pgrep")
-        .args(["-x", "lightr"])
-        .output()
-        .expect("pgrep must be available");
+    // THIS run's processes are gone: supervisor pid dead + ctl.sock removed.
+    // (A global `pgrep -x lightr` races with parallel acceptance tests that
+    // legitimately spawn the binary — scope the no-daemon check to the run.)
+    let run_dir = home.path().join("run").join(&id);
+    let pid_str = fs::read_to_string(run_dir.join("pid")).unwrap_or_default();
+    let pid = pid_str.trim();
+    if !pid.is_empty() {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(!alive, "run child pid {pid} must be dead after stop");
+    }
     assert!(
-        !pgrep.status.success() || pgrep.stdout.trim_ascii().is_empty(),
-        "pgrep -x lightr must find nothing after stop; found: {}",
-        String::from_utf8_lossy(&pgrep.stdout)
+        !run_dir.join("ctl.sock").exists(),
+        "ctl.sock must be removed after the supervisor exits"
     );
 }
 
@@ -274,6 +282,13 @@ fn a11_gc() {
 
     fixture_tree(ws_live.path());
     fixture_tree(ws_junk.path());
+    // Content-addressing dedupes identical trees — junk must hold UNIQUE
+    // bytes or its objects stay reachable through @t/live's identical tree.
+    fs::write(
+        ws_junk.path().join("junk-unique.bin"),
+        b"a11 junk unique payload 0xdeadbeef",
+    )
+    .unwrap();
 
     // Snapshot a live ref (@t/live).
     lightr_cmd(home.path())
@@ -334,20 +349,15 @@ fn a11_gc() {
         String::from_utf8_lossy(&gc_dry.stderr)
     );
     let gc_dry_stdout = String::from_utf8_lossy(&gc_dry.stdout);
-    // Must mention ≥1 sweepable — look for a non-zero count anywhere in output.
-    let sweepable_reported =
-        gc_dry_stdout.contains("sweepable") || gc_dry_stdout.contains("unreachable") || {
-            // Fallback: parse JSON if present.
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&gc_dry_stdout) {
-                v.get("objects_total")
-                    .and_then(|t| t.as_u64())
-                    .zip(v.get("reachable").and_then(|r| r.as_u64()))
-                    .map(|(t, r)| t > r)
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        };
+    // Spec §4 wording: "would sweep N objects (X bytes), M run dirs — pass
+    // --force". Parse N and require ≥1.
+    let sweepable_reported = gc_dry_stdout
+        .split("would sweep ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse::<u64>().ok())
+        .map(|n| n >= 1)
+        .unwrap_or(false);
     assert!(
         sweepable_reported,
         "gc dry-run stdout must report ≥1 sweepable object; got: {gc_dry_stdout}"
@@ -710,6 +720,7 @@ fn a15_mcp() {
     // Spawn `lightr mcp` with piped stdio.
     use assert_cmd::cargo::cargo_bin;
     let mut child = std::process::Command::new(cargo_bin("lightr"))
+        .arg("mcp")
         .env("LIGHTR_HOME", home.path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

@@ -3,7 +3,10 @@
 use lightr_run::ps;
 use serde::Serialize;
 
-use crate::{exit::die_internal, lightr_home};
+use crate::{
+    exit::{die_internal, die_lightr},
+    lightr_home,
+};
 
 #[derive(Serialize)]
 struct RunInfoJson {
@@ -19,7 +22,7 @@ pub fn run(json: bool) -> i32 {
 
     let runs = match ps(&home) {
         Ok(r) => r,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     if json {

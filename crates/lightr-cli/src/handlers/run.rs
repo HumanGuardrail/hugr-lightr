@@ -24,7 +24,7 @@ use lightr_run::{run_memoized, spawn_detached, Mount, RunSpec};
 use lightr_store::Store;
 use serde::Serialize;
 
-use crate::exit::die_internal;
+use crate::exit::die_lightr;
 
 #[derive(Serialize)]
 struct RunJson {
@@ -75,7 +75,7 @@ pub fn run(
 ) -> i32 {
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     // Parse mounts
@@ -110,7 +110,7 @@ pub fn run(
                 println!("id={}", handle.id);
                 return 0;
             }
-            Err(e) => return die_internal(&e),
+            Err(e) => return die_lightr(&e),
         }
     }
 
@@ -127,7 +127,7 @@ pub fn run(
 
     let outcome = match run_memoized(&spec, &store) {
         Ok(o) => o,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     let hex = outcome.key.to_hex();

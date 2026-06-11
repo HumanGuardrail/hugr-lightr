@@ -5,7 +5,7 @@ use lightr_index::bisect;
 use lightr_store::Store;
 use serde::Serialize;
 
-use crate::exit::die_internal;
+use crate::exit::die_lightr;
 
 #[derive(Serialize)]
 struct BisectJson {
@@ -18,7 +18,7 @@ struct BisectJson {
 pub fn run(name: &str, command: &[String], json: bool) -> i32 {
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     match bisect(&store, name, command) {
@@ -46,6 +46,6 @@ pub fn run(name: &str, command: &[String], json: bool) -> i32 {
             eprintln!("lightr: bisect endpoints not bad/good: {msg}");
             1
         }
-        Err(e) => die_internal(&e),
+        Err(e) => die_lightr(&e),
     }
 }

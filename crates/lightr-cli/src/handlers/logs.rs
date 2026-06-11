@@ -2,7 +2,10 @@
 
 use lightr_run::{logs, LogStream};
 
-use crate::{exit::die_internal, lightr_home};
+use crate::{
+    exit::{die_internal, die_lightr},
+    lightr_home,
+};
 
 pub fn run(id: &str, stderr: bool, both: bool, follow: bool) -> i32 {
     let home = lightr_home();
@@ -23,6 +26,6 @@ pub fn run(id: &str, stderr: bool, both: bool, follow: bool) -> i32 {
 
     match logs(&run_dir, stream, follow) {
         Ok(()) => 0,
-        Err(e) => die_internal(&e),
+        Err(e) => die_lightr(&e),
     }
 }

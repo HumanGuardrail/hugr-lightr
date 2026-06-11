@@ -10,7 +10,7 @@ use lightr_index::snapshot;
 use lightr_store::Store;
 use serde::Serialize;
 
-use crate::exit::die_internal;
+use crate::exit::die_lightr;
 
 #[derive(Serialize)]
 struct SnapshotJson {
@@ -23,13 +23,13 @@ struct SnapshotJson {
 pub fn run(dir: &str, name: &str, json: bool, explain: bool) -> i32 {
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     let dir_path = std::path::Path::new(dir);
     let report = match snapshot(dir_path, &store, name) {
         Ok(r) => r,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     if explain {
