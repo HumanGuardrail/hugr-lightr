@@ -17,7 +17,16 @@ import Foundation
 import Virtualization
 
 /// Boot a Linux microVM, run the supplied command as the guest init, and
-/// return its exit code.  Called from Rust via C ABI.
+/// report the VM's LIFECYCLE status.  Called from Rust via C ABI.
+///
+/// IMPORTANT (WP-B-vsock honesty contract): this function does NOT return the
+/// guest process's exit code.  Apple's Virtualization framework never surfaces
+/// the guest exit code to the host, so any value invented here would be a lie.
+/// Instead, the guest's PID1 (`lightr-init`) writes its REAL exit code over an
+/// AF_VSOCK channel, and the RUST host (`VsockExitReceiver`, see
+/// crates/lightr-engine/src/vsock.rs) reads it.  This shim therefore reports
+/// only whether the VM booted and stopped cleanly; `VzEngine::run` combines
+/// that with the vsock frame to produce the real exit code.
 ///
 /// - Parameters:
 ///   - kernel:  NUL-terminated path to a Linux kernel image (vmlinuz / bzImage).
@@ -29,7 +38,8 @@ import Virtualization
 ///   - argc:    Number of arguments in argv.
 ///   - argv:    C argv array (argv[0] = program, …).
 ///
-/// - Returns: Guest exit code, or -1 on configuration / boot failure.
+/// - Returns: VM-lifecycle status — `0` = booted and stopped cleanly,
+///            `-1` = configuration / boot failure.  NEVER the guest exit code.
 @_cdecl("lightr_vz_run")
 public func lightr_vz_run(
     kernel:  UnsafePointer<CChar>,
@@ -112,24 +122,28 @@ public func lightr_vz_run(
 
     // ── 7. Boot + wait ──────────────────────────────────────────────────────
     // BOOT-PATH: VZVirtualMachine must be started on the main queue.
+    //
+    // `vmStatus` is a LIFECYCLE status, never the guest exit code. The guest's
+    // real exit code is delivered to the Rust host over AF_VSOCK by PID1 (see
+    // the function doc + crates/lightr-engine/src/vsock.rs); this shim only
+    // signals whether the VM reached a clean stop. The old fabricated-success
+    // assignment that pinned the result to zero on stop has been removed.
     let vm        = VZVirtualMachine(configuration: config, queue: .main)
     let semaphore = DispatchSemaphore(value: 0)
-    var exitCode: Int32 = -1
+    var vmStatus: Int32 = -1
 
-    // Observe stop (guest exit)
+    // Observe stop (guest powered the VM down).
     let observation = vm.observe(\.state, options: [.new]) { machine, _ in
         switch machine.state {
         case .stopped:
-            // VZ does not surface the guest exit code directly; the guest
-            // PID1 must encode it via a virtio-vsock channel or the kernel
-            // command line echo back.  For R2, return 0 on clean stop.
-            // TODO (S5): wire a vsock channel from PID1 → host to return the
-            // actual guest process exit code.
-            exitCode = 0
+            // BOOT-PATH: the VM stopped cleanly. We report lifecycle success
+            // ONLY; the actual guest exit code already flowed to the Rust host
+            // over vsock. We do NOT invent a process exit code here.
+            vmStatus = 0
             semaphore.signal()
         case .error:
             fputs("lightr-vz-shim: VM error\n", stderr)
-            exitCode = -1
+            vmStatus = -1
             semaphore.signal()
         default:
             break
@@ -140,12 +154,12 @@ public func lightr_vz_run(
     vm.start { result in
         if case .failure(let error) = result {
             fputs("lightr-vz-shim: boot failed: \(error)\n", stderr)
-            exitCode = -1
+            vmStatus = -1
             semaphore.signal()
         }
     }
 
-    // Block until the VM stops (or fails).
+    // Block until the VM stops (or fails), then hand the lifecycle status back.
     semaphore.wait()
-    return exitCode
+    return vmStatus
 }
