@@ -1083,4 +1083,10 @@ mod tests {
         // Must succeed without error.
         store.remove_object(&d).unwrap();
     }
+
+    /// Returns the store's root path (needed by gc to walk the objects tree).
+    /// Added in R1 alongside the other gc-support methods.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 }
