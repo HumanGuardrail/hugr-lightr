@@ -514,6 +514,118 @@ pub mod nfsloopback {
     }
 }
 
+/// ProjFS / ReFS-overlay view backend skeleton for Windows.
+///
+/// On Windows, views are surfaced via the Windows Projected File System (ProjFS)
+/// API, which allows a provider process to present a virtual directory tree whose
+/// content is faulted in on demand from the CAS store.  A ReFS block-clone
+/// (FSCTL_DUPLICATE_EXTENTS_TO_FILE) backs solidification on ReFS volumes; NTFS
+/// falls back to a copy.  Neither ProjFS nor ReFS is available inside WSL2 from
+/// the guest side, so the Windows isolation model runs the engine natively and the
+/// view provider runs as a user-mode Windows process.
+///
+/// **VIEW-PATH (S1/S3):** this is a compile-only skeleton.  Every runtime method
+/// is marked `// VIEW-PATH (S1/S3)`; the real ProjFS/FFI work lands with the
+/// S1/S3 spike on a Windows target box.  NO fake mount, NO fabricated success —
+/// every method returns an explicit "unsupported/unvalidated" error so callers
+/// always see the honest not-yet-validated state.
+#[cfg(target_os = "windows")]
+pub mod projfs {
+    use super::{ViewBackend, ViewPlan};
+    use std::path::Path;
+
+    /// ProjFS-backed view for Windows.  Holds the virtualization root handle and
+    /// the active plan once the real implementation lands.
+    ///
+    /// **VIEW-PATH (S1/S3):** skeleton — no ProjFS handle is opened until the
+    /// S1/S3 spike validates this path on a Windows box.
+    #[derive(Debug, Default)]
+    pub struct ProjFsBackend {
+        // Skeleton: real fields (HVIRTUAL_STORAGE_VIRTUAL_DISK handle,
+        // notification callbacks, async task handle) land with S1/S3.
+        _seam: (),
+    }
+
+    impl ProjFsBackend {
+        /// Construct an unmounted ProjFS backend.
+        pub fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    /// VIEW-PATH (S1/S3): initialise the ProjFS virtualization root at `root`
+    /// and register the provider callbacks that fault content from the store on
+    /// demand.  Real PrjStartVirtualizing / callback registration work; not yet
+    /// implemented, not runtime-validated.
+    // VIEW-PATH (S1/S3)
+    fn start_projfs_provider(_plan: &ViewPlan, _root: &Path) -> std::io::Result<()> {
+        // VIEW-PATH (S1/S3): call PrjMarkDirectoryAsPlaceholder, then
+        // PrjStartVirtualizing with GET_FILE_DATA / NOTIFY callbacks that read
+        // chunk data from the lightr-store CAS.  Not validated.
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "projfs start_projfs_provider: VIEW-PATH (S1/S3) skeleton — not implemented, \
+             not runtime-validated on Windows",
+        ))
+    }
+
+    /// VIEW-PATH (S1/S3): stop the ProjFS virtualization root and release the
+    /// provider handle.  Real PrjStopVirtualizing work; not yet implemented.
+    // VIEW-PATH (S1/S3)
+    fn stop_projfs_provider() -> std::io::Result<()> {
+        // VIEW-PATH (S1/S3): call PrjStopVirtualizing on the stored handle.
+        // Not validated.
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "projfs stop_projfs_provider: VIEW-PATH (S1/S3) skeleton — not implemented, \
+             not runtime-validated on Windows",
+        ))
+    }
+
+    impl ViewBackend for ProjFsBackend {
+        // VIEW-PATH (S1/S3)
+        fn mount(&mut self, plan: &ViewPlan, at: &Path) -> std::io::Result<()> {
+            // VIEW-PATH (S1/S3): mark `at` as a ProjFS placeholder root and
+            // start the provider.  PrjMarkDirectoryAsPlaceholder +
+            // PrjStartVirtualizing.  Not runtime-validated on Windows.
+            let _ = start_projfs_provider(plan, at);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "projfs mount: VIEW-PATH (S1/S3) skeleton — not implemented, \
+                 not runtime-validated on Windows",
+            ))
+        }
+
+        // VIEW-PATH (S1/S3)
+        fn fault_in(&mut self, _path: &str) -> std::io::Result<()> {
+            // VIEW-PATH (S1/S3): convert the placeholder at `path` to a
+            // hydrated file by writing its content via PrjWriteFileData.
+            // This is the provider's GET_FILE_DATA callback path — called
+            // lazily by the kernel when the application first reads the entry.
+            // Not runtime-validated on Windows.
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "projfs fault_in: VIEW-PATH (S1/S3) skeleton — not implemented, \
+                 not runtime-validated on Windows",
+            ))
+        }
+
+        // VIEW-PATH (S1/S3)
+        fn unmount(&mut self, _at: &Path) -> std::io::Result<()> {
+            // VIEW-PATH (S1/S3): stop the ProjFS provider once the solidifier
+            // reports fully-solid (the mount can evaporate because every file
+            // is now a real on-disk CoW clone).  PrjStopVirtualizing.
+            // Not runtime-validated on Windows.
+            let _ = stop_projfs_provider();
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "projfs unmount: VIEW-PATH (S1/S3) skeleton — not implemented, \
+                 not runtime-validated on Windows",
+            ))
+        }
+    }
+}
+
 // ── Tests (host, runnable — the proof of the pure O(1)-plan + solidifier) ────
 
 #[cfg(test)]
