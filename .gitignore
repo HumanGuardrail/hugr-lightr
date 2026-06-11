@@ -22,3 +22,6 @@ target/
 target/
 .worktrees/
 .spike-tmp/
+
+# packaging build output (release tarballs — never committed)
+packaging/dist/
