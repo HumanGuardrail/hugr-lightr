@@ -343,7 +343,7 @@ fn a19_engine_probes_honest() {
     let caps: HashMap<&str, &serde_json::Value> = arr
         .iter()
         .filter_map(|entry| {
-            let name = entry.get("name").and_then(|n| n.as_str())?;
+            let name = entry.get("kind").and_then(|n| n.as_str())?;
             Some((name, entry))
         })
         .collect();
