@@ -7,11 +7,24 @@ use lightr_store::{CowRung, Store};
 use rayon::prelude::*;
 use std::{
     collections::HashMap,
+    fs::File,
     io::{self, Write as _},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+// ---------------------------------------------------------------------------
+// fsync helper
+// ---------------------------------------------------------------------------
+
+/// fsync the parent directory so the rename (directory entry change) is
+/// crash-durable on macOS/Linux. Mirrors the same helper in lightr-store.
+fn fsync_dir(dir: &Path) -> io::Result<()> {
+    let f = File::open(dir)?;
+    f.sync_all()?;
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Index file path helper
@@ -225,13 +238,15 @@ impl Index {
         {
             let mut f = std::fs::File::create(&tmp_path).map_err(LightrError::Io)?;
             f.write_all(&buf).map_err(LightrError::Io)?;
-            f.flush().map_err(LightrError::Io)?;
-            // f dropped (closed) here before rename
+            f.sync_all().map_err(LightrError::Io)?; // fsync data before rename
+                                                    // f dropped (closed) here before rename
         }
         std::fs::rename(&tmp_path, &index_path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp_path);
             LightrError::Io(e)
         })?;
+        // fsync parent dir so the rename (directory entry update) is crash-durable.
+        fsync_dir(dir).map_err(LightrError::Io)?;
 
         Ok(())
     }
@@ -760,18 +775,20 @@ fn entries_differ(remote: &Entry, local: &Entry) -> bool {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Process-global lock shared by ALL test modules that mutate LIGHTR_HOME.
+/// Lives at crate level so both `tests` and `r1_tests` modules share the
+/// same Mutex instance (each module's own static would be a separate lock).
+#[cfg(test)]
+static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
 
-    // LIGHTR_HOME is process-global: serialize every test that sets it and
-    // hold the guard for the test's whole duration.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn with_lightr_home(tmp: &TempDir) -> std::sync::MutexGuard<'static, ()> {
-        let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("LIGHTR_HOME", tmp.path());
         guard
     }
@@ -1523,6 +1540,17 @@ pub fn bisect(store: &Store, name: &str, cmd: &[String]) -> Result<(usize, RefRe
 mod r1_tests {
     use super::*;
     use lightr_core::{Digest, Entry, Manifest};
+    use lightr_store::Store;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // Share the process-global lock defined at crate level so this module and
+    // the `tests` module serialize all LIGHTR_HOME mutations together.
+    fn with_lightr_home(tmp: &TempDir) -> std::sync::MutexGuard<'static, ()> {
+        let guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("LIGHTR_HOME", tmp.path());
+        guard
+    }
 
     // -----------------------------------------------------------------------
     // Pure tests — diff_manifests (run now: cargo test -p lightr-index -- diff)
@@ -1749,23 +1777,112 @@ mod r1_tests {
     }
 
     // -----------------------------------------------------------------------
-    // Store-dependent tests (correct but deferred — run post-merge when
-    // lightr-store R1 stubs are implemented by W1).
-    // These are #[ignore]d so `cargo test -p lightr-index` passes now but
-    // `cargo test -p lightr-index -- --include-ignored` runs them post-merge.
+    // Store-dependent gc end-to-end tests
     // -----------------------------------------------------------------------
 
+    /// dry_run_reachable: snapshot a tree twice (two ref-log versions) →
+    /// gc(dry_run=true, 0) must report swept==0 and objects_total≥2 (both
+    /// manifest objects are reachable via the ref-log).
     #[test]
     fn gc_end_to_end_dry_run_reachable() {
-        // Snapshot twice → both manifest objects reachable via reflog
-        // → gc dry-run reports swept=0, objects_total≥2.
-        // Full test runs post-merge.
+        let home = TempDir::new().unwrap();
+        let _env_guard = with_lightr_home(&home);
+
+        // Store lives under LIGHTR_HOME/store; the snapshot fn writes the index
+        // under LIGHTR_HOME/index — both use the same LIGHTR_HOME.
+        let store_root = home.path().join("store");
+        let store = Store::open(&store_root).unwrap();
+
+        // Root tree: two files.
+        let root = TempDir::new().unwrap();
+        fs::write(root.path().join("a.txt"), b"content-v1").unwrap();
+        fs::write(root.path().join("b.txt"), b"shared").unwrap();
+
+        // Version 1
+        snapshot(root.path(), &store, "main").unwrap();
+
+        // Mutate a file to produce a second manifest with a different digest.
+        fs::write(root.path().join("a.txt"), b"content-v2").unwrap();
+
+        // Version 2
+        snapshot(root.path(), &store, "main").unwrap();
+
+        // Dry-run gc: nothing should be swept because all objects are reachable
+        // via the ref-log (both manifest objects + all file objects).
+        let report = gc(&store, true, 0).unwrap();
+
+        assert_eq!(
+            report.swept, 0,
+            "dry-run gc must not sweep any reachable object (swept={})",
+            report.swept
+        );
+        // We have at least 2 manifest blobs + at least 2 file blobs (a.txt v1 + v2)
+        // + 1 shared b.txt blob = at least 5 objects, but ≥2 is the contract minimum.
+        assert!(
+            report.objects_total >= 2,
+            "expected objects_total≥2 after two snapshots, got {}",
+            report.objects_total
+        );
+        // reachable + swept == objects_total
+        assert_eq!(
+            report.reachable + report.swept,
+            report.objects_total,
+            "reachable+swept must equal objects_total"
+        );
+        // bytes_freed must be 0 in dry-run (no mutations).
+        assert_eq!(report.bytes_freed, 0, "dry-run must free no bytes");
     }
 
+    /// sweep_orphan: put_bytes an orphan blob not referenced by any ref/AC;
+    /// gc(dry_run=false, 0) → orphan !exists() afterward, AND the live ref
+    /// still hydrates byte-identical.
     #[test]
     fn gc_end_to_end_sweep_orphan() {
-        // put_bytes an orphan object, then gc --force → orphan gone,
-        // live ref roundtrip still passes.
+        let home = TempDir::new().unwrap();
+        let _env_guard = with_lightr_home(&home);
+
+        let store_root = home.path().join("store");
+        let store = Store::open(&store_root).unwrap();
+
+        // Snapshot a live tree.
+        let root = TempDir::new().unwrap();
+        let live_content = b"live-file-content";
+        fs::write(root.path().join("live.txt"), live_content).unwrap();
+        let snap = snapshot(root.path(), &store, "main").unwrap();
+        let manifest_digest = snap.root;
+
+        // Put an orphan blob — NOT referenced by any ref, AC, or manifest.
+        let orphan_data = b"orphan-blob-unreachable";
+        let orphan_digest = store.put_bytes(orphan_data).unwrap();
+        assert!(store.exists(&orphan_digest), "orphan must exist before gc");
+
+        // Run real gc sweep.
+        let report = gc(&store, false, 0).unwrap();
+
+        // The orphan must have been swept.
+        assert!(
+            !store.exists(&orphan_digest),
+            "gc must have removed the orphan blob"
+        );
+        assert!(report.swept >= 1, "gc must report ≥1 swept object");
+
+        // The live manifest and file objects must still be intact.
+        assert!(
+            store.exists(&manifest_digest),
+            "live manifest object must survive gc"
+        );
+
+        // Mini roundtrip: hydrate into a fresh dir and verify byte-identity.
+        let dest = TempDir::new().unwrap();
+        let hr = hydrate(dest.path(), &store, "main").unwrap();
+        assert_eq!(hr.root, manifest_digest, "hydrated root digest must match");
+
+        let got = fs::read(dest.path().join("live.txt")).unwrap();
+        assert_eq!(
+            got.as_slice(),
+            live_content,
+            "hydrated file content must be byte-identical"
+        );
     }
 
     #[test]
