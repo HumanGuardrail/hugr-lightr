@@ -1,6 +1,8 @@
 # The bar — obliterate, don't improve
 
 - **Status:** Owner directive, 2026-06-11. This document outranks comfort.
+- **Companion:** `feature-parity.md` (directive #2: full Docker parity ×
+  zero weight — "every feature exists; no feature weighs until invoked").
 - **Owner's words (verbatim, pt-BR):** "essa porra precisa ser warp speed,
   não é eficiente e melhor que o docker, é humilhar e obliterar o docker em
   todos os indicadores […] precisa ser muito leve, muito rápido, precisa
