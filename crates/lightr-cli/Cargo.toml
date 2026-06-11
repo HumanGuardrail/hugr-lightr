@@ -1,0 +1,19 @@
+[package]
+name = "lightr-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lightr"
+path = "src/main.rs"
+
+[dependencies]
+lightr-core = { workspace = true }
+lightr-store = { workspace = true }
+lightr-index = { workspace = true }
+lightr-run = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
