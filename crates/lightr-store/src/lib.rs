@@ -390,15 +390,22 @@ fn cow_refs_block_clone(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
     let file_size = std_info.EndOfFile;
 
-    // Create / truncate dst.
+    // Create / truncate dst, then PRE-SIZE it: FSCTL_DUPLICATE_EXTENTS_TO_FILE
+    // requires the destination region to already exist — a length-0 dst is
+    // rejected, which is why this fast path never engaged before.
     let dst_file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(dst)?;
+    dst_file.set_len(file_size as u64)?;
     let dst_handle = dst_file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
 
-    // Build DUPLICATE_EXTENTS_DATA — clone entire file from offset 0.
+    // Build DUPLICATE_EXTENTS_DATA — clone the whole file from offset 0.
+    // NOTE: the FSCTL also wants ByteCount cluster-aligned; modern ReFS accepts a
+    // non-aligned final (EOF) extent, older volumes do not. This path is
+    // best-effort + WIN-PATH (unvalidated here): any rejection returns Err and
+    // the caller falls back to std::fs::copy (the required-correct path).
     let dup_data = DUPLICATE_EXTENTS_DATA {
         FileHandle: src_handle,
         SourceFileOffset: 0,

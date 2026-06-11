@@ -828,6 +828,13 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
 
         let done = Arc::new(AtomicBool::new(false));
         let done_srv = Arc::clone(&done);
+        // `server_exited` lets shutdown retry the nudge until the server thread
+        // actually leaves its loop. A single best-effort nudge can MISS — if the
+        // server is between its `done` check and CreateNamedPipeW there is no
+        // instance to connect to, and the next ConnectNamedPipe would then block
+        // forever and hang join(). The server sets this the instant its loop ends.
+        let server_exited = Arc::new(AtomicBool::new(false));
+        let server_exited_srv = Arc::clone(&server_exited);
         let pipe_name_srv = pipe_name.clone();
 
         // Pipe-server thread: blocking accept loop. Handles the SAME ops as the
@@ -836,6 +843,7 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
         // 128+sig convention so callers observe 143 (SIGTERM) / 137 (SIGKILL).
         let server = std::thread::spawn(move || {
             win_pipe_server_loop(&pipe_name_srv, child_pid, &done_srv);
+            server_exited_srv.store(true, Ordering::SeqCst);
         });
 
         // Now that the server thread is up and will create the first pipe
@@ -851,10 +859,15 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
             std::thread::sleep(Duration::from_millis(100));
         };
 
-        // Tell the server thread to stop, then unblock its pending
-        // ConnectNamedPipe by connecting to our own pipe once.
+        // Tell the server thread to stop, then keep nudging until it actually
+        // leaves its loop. Retrying closes the race where a single nudge lands
+        // before the server has created a pipe instance — after which the next
+        // ConnectNamedPipe would block forever and join() would hang.
         done.store(true, Ordering::SeqCst);
-        win_pipe_nudge(&pipe_name);
+        while !server_exited.load(Ordering::SeqCst) {
+            win_pipe_nudge(&pipe_name);
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let _ = server.join();
 
         // Write final status
