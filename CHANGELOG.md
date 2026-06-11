@@ -1,5 +1,40 @@
 # Changelog — hugr-lightr
 
+## [Unreleased] — Ship + VM + Views wave (2026-06-12)
+
+Three parallel tracks toward true SOTA, all code-complete + host-tested
+(runtime validation packaged/gated where it needs an ARM target).
+
+**Ship (Product A):**
+- **Release pipeline** — `.github/workflows/release.yml`: tag-triggered
+  (`v*`) matrix build (macOS arm64/x86_64, Linux x86_64) → tarballs +
+  SHA256SUMS → GitHub Release. macOS signing/notarization steps present but
+  gated behind owner secrets; unsigned artifacts clearly labeled `-unsigned`,
+  never fake-signed. Nothing publishes without a deliberate tag.
+- **Naming resolved** (`docs/NAMING.md`): `lightr` and `hugr-lightr` both
+  FREE on crates.io; no brew/CLI collision → crate `hugr-lightr`, binary
+  `lightr`. (Apache-2.0 already set, ADR-0008.)
+
+**VM foundation (Product B, ARM-validatable):**
+- **Kernel-pack pipeline** — `scripts/build-linux-pack.sh` (kernel = Apple
+  Containerization config, pinned + sha-verified; builds `lightr-init` for
+  the guest target; assembles kernel+initrd+pack.json). `verify_pack`
+  structurally validates a pack (cpio initrd, `/init` executable, non-empty
+  kernel) and is now **wired into `engine install-pack`** — malformed packs
+  rejected loudly.
+- **S5 boot runbook** — `spikes/s5-vz-boot/` (README provisioning + `run-s5.sh`
+  harness + EXPECTED): on a rented ARM Mac, build `--features vz`, install a
+  pack, `lightr run --engine vz alpine` and assert the REAL exit code flows
+  via vsock (0 on success, 7 on `exit 7` — never the 255 fallback, never a
+  fake 0). Closes F-205/F-206 when green on ARM.
+
+**Views (the O(1) materialization headline):**
+- **`lightr-views` crate** — `ViewPlan` + `Solidifier` (promote-on-access:
+  hot entries first, manifest order tiebreak, `is_fully_solid` only after all
+  files confirmed) are pure and **fully host-tested**; composefs (Linux) /
+  NFS-loopback (macOS, EdenFS-proven) backends are compile-only skeletons
+  marked `// VIEW-PATH (S1/S3)` — runtime validation on a target box.
+
 ## [Unreleased] — Production hardening + VM foundation (2026-06-12)
 
 379 tests, 0 failures, clippy -D clean. Two parallel tracks.

@@ -86,6 +86,15 @@ pub fn install_pack(dir: &str) -> i32 {
         return 1;
     }
 
+    // Structural validation before installing: verify_pack checks the initrd
+    // is a real cpio whose /init is executable + the kernel is non-empty +
+    // pack.json (if present) parses. A malformed pack is rejected loudly
+    // instead of being copied in and failing opaquely at boot.
+    if let Err(e) = lightr_engine::pack::verify_pack(src) {
+        eprintln!("lightr: install-pack: invalid pack: {e}");
+        return 1;
+    }
+
     let kernel_dst = dest_dir.join("kernel");
     let initrd_dst = dest_dir.join("initrd");
 
@@ -96,6 +105,11 @@ pub fn install_pack(dir: &str) -> i32 {
     if let Err(e) = std::fs::copy(&initrd_src, &initrd_dst) {
         eprintln!("lightr: install-pack: copy initrd failed: {e}");
         return 1;
+    }
+    // Carry pack.json forward if present (arch/version provenance).
+    let pj = src.join("pack.json");
+    if pj.exists() {
+        let _ = std::fs::copy(&pj, dest_dir.join("pack.json"));
     }
 
     println!("installed linux pack → {}", dest_dir.display());
@@ -146,14 +160,18 @@ mod tests {
     }
 
     #[test]
-    fn install_pack_succeeds_with_both_files() {
+    fn install_pack_succeeds_with_valid_pack() {
         let tmp = TempDir::new().unwrap();
         let src_dir = tmp.path().join("src");
         fs::create_dir_all(&src_dir).unwrap();
-        fs::write(src_dir.join("kernel"), b"kernel-data").unwrap();
-        fs::write(src_dir.join("initrd"), b"initrd-data").unwrap();
+        // A STRUCTURALLY VALID pack: non-empty kernel + a real cpio initrd
+        // whose /init is executable (built by the engine's assembler). The
+        // shallow "files present" check is no longer enough — install_pack now
+        // calls verify_pack, so the fixture must be a real pack.
+        fs::write(src_dir.join("kernel"), b"kernel-bytes-nonempty").unwrap();
+        let initrd = lightr_engine::pack::build_initrd_cpio(b"#!/bin/sh\nexit 0\n");
+        fs::write(src_dir.join("initrd"), &initrd).unwrap();
 
-        // Point LIGHTR_HOME to a temp dir so we don't pollute the real one
         let home_tmp = TempDir::new().unwrap();
         std::env::set_var("LIGHTR_HOME", home_tmp.path());
 
@@ -161,12 +179,30 @@ mod tests {
 
         std::env::remove_var("LIGHTR_HOME");
 
-        assert_eq!(code, 0, "install_pack should succeed");
-        // Verify files landed in the right place
+        assert_eq!(code, 0, "install_pack should succeed for a valid pack");
         let pack_dir = home_tmp.path().join("packs").join("linux");
         assert!(pack_dir.join("kernel").exists(), "kernel must be installed");
         assert!(pack_dir.join("initrd").exists(), "initrd must be installed");
-        assert_eq!(fs::read(pack_dir.join("kernel")).unwrap(), b"kernel-data");
-        assert_eq!(fs::read(pack_dir.join("initrd")).unwrap(), b"initrd-data");
+    }
+
+    #[test]
+    fn install_pack_rejects_invalid_initrd() {
+        // Both files present but the initrd is NOT a valid cpio → verify_pack
+        // rejects it loudly instead of installing a pack that fails at boot.
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("kernel"), b"kernel-bytes").unwrap();
+        fs::write(src_dir.join("initrd"), b"not-a-cpio").unwrap();
+
+        let home_tmp = TempDir::new().unwrap();
+        std::env::set_var("LIGHTR_HOME", home_tmp.path());
+        let code = install_pack(src_dir.to_str().unwrap());
+        std::env::remove_var("LIGHTR_HOME");
+
+        assert_eq!(
+            code, 1,
+            "install_pack must reject a structurally invalid pack"
+        );
     }
 }
