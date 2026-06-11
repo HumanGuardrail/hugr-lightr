@@ -19,7 +19,7 @@ $ lightr bench --vs-docker                         # run the table yourself
 
 > **Honest status (read this first).** What ships today is the **local**
 > engine — store, memoized `run`/`build`, OCI import, the time-axis verbs,
-> and the agent/MCP surface — genuinely fast and fully tested (362 tests).
+> and the agent/MCP surface — genuinely fast and fully tested (379 tests).
 > What is **NOT yet real**: running a Linux container on a Mac via a microVM
 > (the `vz` engine is built behind a feature flag, boot path unvalidated —
 > needs Apple-Silicon validation, spike S5), the O(1) "views" materialization
@@ -52,7 +52,7 @@ staged (`CAP-DEDUP-CROSS-TENANT`).
 ## Status
 
 **R0–R4 + prod hardening delivered (2026-06-12).** A ~4 MB release binary;
-362 tests green (A1–A30) end-to-end; `lightr bench --check` green on the
+379 tests green (A1–A30 + prod hardening) end-to-end; `lightr bench --check` green on the
 Intel dev box (snapshot warm 233 ms, status 34 ms, memo HIT 51 ms — see
 `spikes/RESULTS.md`; ~ms targets bind to R2 views + Apple Silicon, tense
 law). Whitepaper v2 (working backwards) is canon. The platform it

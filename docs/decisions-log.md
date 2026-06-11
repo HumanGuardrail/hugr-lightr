@@ -104,3 +104,25 @@ target; missing sources a sentinel. Regression covered at both levels:
 `step_key_dir_copy_changes_when_contained_file_changes` (unit) +
 `a22b_dir_copy_invalidates_on_nested_change` (e2e). Cosmetic: whitepaper
 "315 cases" → 338. Final: 340 tests / 0 failures, clippy -D clean.
+
+## 2026-06-12 — Prod-hardening cold critic + H2 fixes (all 6 closed)
+
+Prod-phase critic (opus) verdict: core REAL, but GAPS — 3 honest
+overstatements, 1 durability hole, 1 vacuous test, 1 real hang. All closed
+at root (no waivers):
+1. OCI "streaming kills OOM" was half-real (apply did `fs::read` whole layer)
+   → `apply_layers` now streams from the temp file through GzDecoder+tar
+   (`LayerBlob::open_reader`, 2-byte peek + chain-back); no whole-layer Vec.
+2. `test_streaming_large_layer_import` vacuous → rewritten to a ≥64 MiB
+   incompressible plain-tar through the file/streaming path.
+3. `Index::save_for` not fsync'd → now sync_all + parent-dir fsync (matches
+   store durability). 4. README "362 tests" stale → 379. 5.
+   `gc_does_not_sweep_live_writers` non-adversarial → real concurrent
+   index::gc-vs-writer; fails if the flock were a no-op. (+ the two empty
+   `gc_end_to_end_*` bodies filled with real assertions.)
+6. vz silent-guest infinite `accept(2)` hang → generous SO_RCVTIMEO backstop
+   (default 24h, env LIGHTR_VZ_EXIT_TIMEOUT_SECS) → timed-out accept maps to
+   GUEST_NO_REPORT_CODE (255), never a hang or a fabricated 0. Window is
+   generous on purpose (legit guest connects only at job-end); precise
+   cancel-on-VM-stop remains S5 (BOOT-PATH, can't validate on Intel).
+Final: 379 tests/0, clippy -D clean, `--features vz` compiles+lints clean.

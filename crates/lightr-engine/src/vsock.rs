@@ -138,6 +138,40 @@ mod vsock_listener {
             if unsafe { libc::listen(fd.as_raw_fd(), 1) } != 0 {
                 return Err(std::io::Error::last_os_error());
             }
+
+            // BOOT-PATH (S5): backstop against an infinite `accept(2)` hang
+            // when the VM stops but the guest never connected (PID1 died before
+            // reaching the vsock report). SO_RCVTIMEO makes accept return
+            // EAGAIN after the window → recv() Err → VzEngine maps to
+            // GUEST_NO_REPORT_CODE (255), never a fabricated 0 and never a hang.
+            //
+            // The window is DELIBERATELY generous (default 24h, env
+            // LIGHTR_VZ_EXIT_TIMEOUT_SECS) because a legit guest connects only
+            // when its job COMMAND exits — which may be hours into a long run;
+            // a short timeout would be a lie that kills long jobs. The precise
+            // fix (cancel accept the instant the VM stops, via shutdown on a
+            // dup'd fd) is S5 work; this backstop only fires when the guest
+            // genuinely never reported for the whole window.
+            let secs: libc::time_t = std::env::var("LIGHTR_VZ_EXIT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(86_400);
+            let tv = libc::timeval {
+                tv_sec: secs,
+                tv_usec: 0,
+            };
+            // Safety: valid fd; tv is a fully-initialized timeval of the given
+            // size. A setsockopt failure is non-fatal (the backstop is
+            // best-effort) — we proceed with a blocking accept in that case.
+            unsafe {
+                libc::setsockopt(
+                    fd.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVTIMEO,
+                    &tv as *const libc::timeval as *const libc::c_void,
+                    std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+                );
+            }
             Ok(Listener { fd })
         }
 
