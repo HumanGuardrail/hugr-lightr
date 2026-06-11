@@ -29,9 +29,10 @@ local dev, namespaces on trusted Linux, Firecracker microVMs for hostile
 multi-tenant cloud.
 
 The isolation primitives are commodity (~5% of the value). The
-content-addressed substrate underneath — instant pulls, cross-tenant dedup,
+content-addressed substrate underneath — instant pulls, chunk-level dedup,
 memoized execution — is CoreLink, and it is already in production (~95% of
-the value).
+the value). Dedup is intra-tenant at GA; cross-tenant is designed-in and
+staged (`CAP-DEDUP-CROSS-TENANT`).
 
 ## Status
 

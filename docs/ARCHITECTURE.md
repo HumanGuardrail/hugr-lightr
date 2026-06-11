@@ -57,7 +57,7 @@ fault in chunks from CoreLink on first access (FUSE locally; virtio-blk /
 virtiofs backed by a chunk store inside the microVM). This is the
 architecture AWS published for Lambda ("on-demand container loading") and
 what Nydus/eStargz/SOCI approximate for OCI — but anchored on a CAS that
-already exists and dedups cross-tenant. Most workloads touch a small
+already exists (dedup intra-tenant at GA; cross-tenant staged). Most workloads touch a small
 fraction of their rootfs; lazy loading converts "pull 1.2 GB" into "fault
 in the ~80 MB actually read".
 

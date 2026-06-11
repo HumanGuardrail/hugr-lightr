@@ -50,9 +50,10 @@ Cache hit returns in milliseconds without instantiating anything.
 Honesty clause: Docker is not garbage on a Linux server — there it is thin.
 It is garbage **on the Mac** and **as a distribution/economic model**. The
 defensible advantage is not "a faster container"; it is that nobody else
-ships a production CAS with cross-tenant dedup to anchor this. Modal, Fly
-and Depot built closed versions of this machinery for internal use; Cell is
-that machinery as a product.
+ships a production CAS with chunk-level dedup and a memoizing Action Cache
+to anchor this (cross-tenant dedup is designed-in, staged post-GA). Modal,
+Fly and Depot built closed versions of this machinery for internal use;
+Cell is that machinery as a product.
 
 ## The funnel
 
@@ -98,14 +99,15 @@ the Runners pitch writes itself, and the same argument covers agent
 sandboxes (Workspaces).
 
 **Economics.** Stage 1 touches no servers — COGS ≈ 0. On conversion, FastCDC
-dedup does the work: the thousandth user uploading the same `node_modules`
-costs a HEAD request, not storage. CoreLink already documents ~80% margin on
-the Solo tier, and margin improves with scale (fuller cache = more dedup =
-lower COGS per tenant). Stage 3 anchors LTV on the same trick: a cache hit
-is a job that consumes no core-second. The compounding moat: every new user
-warms the public-deps cache, which makes the product faster for everyone,
-which attracts more users — Docker Hub's network effect, but with per-chunk
-instead of per-layer economics.
+dedup does the work: within a tenant, the same `node_modules` re-uploaded by
+the team costs HEAD requests, not storage. CoreLink already documents ~80%
+margin on the Solo tier, and margin improves with scale (fuller cache = more
+dedup = lower COGS per tenant). Stage 3 anchors LTV on the same trick: a
+cache hit is a job that consumes no core-second. The compounding moat —
+every new user warming a shared public-deps cache, Docker Hub's network
+effect with per-chunk economics — **depends on cross-tenant dedup, which is
+designed-in but staged** (`CAP-DEDUP-CROSS-TENANT`); unit economics at GA
+must close on intra-tenant dedup + memoization alone.
 
 ## Funnel health metrics
 
