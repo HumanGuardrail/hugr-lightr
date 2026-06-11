@@ -3,16 +3,31 @@
 > **So light it isn't there.**
 
 HuGR Lightr is a daemonless, imageless runtime: a single static binary that
-materializes workspaces from CoreLink's content-addressed store in seconds,
-runs them with near-zero overhead — native on macOS, microVMs in the cloud —
-and skips execution entirely when the result is already cached.
+materializes workspaces from a content-addressed store, runs them with
+near-zero overhead, and skips execution entirely when the result is already
+cached.
 
 ```
-$ brew install hugr-lightr         # bin: lightr
-$ lightr run @hugr/web -- pnpm dev
-⚡ hydrated 1.2 GB in 3.1s (94% local cache)
-▶ running native — 0 MB overhead
+# What runs today (build from source — see Quickstart):
+$ lightr snapshot --dir . --name @me/proj
+$ lightr hydrate /tmp/fresh --name @me/proj       # content-addressed, CoW
+$ lightr run --input src -- make test             # memoized: 2nd run = HIT
+$ lightr oci import alpine.tar --name @img/alpine # OCI image → store
+$ lightr build -t @app/web .                      # Dockerfile, step-memoized
+$ lightr bench --vs-docker                         # run the table yourself
 ```
+
+> **Honest status (read this first).** What ships today is the **local**
+> engine — store, memoized `run`/`build`, OCI import, the time-axis verbs,
+> and the agent/MCP surface — genuinely fast and fully tested (362 tests).
+> What is **NOT yet real**: running a Linux container on a Mac via a microVM
+> (the `vz` engine is built behind a feature flag, boot path unvalidated —
+> needs Apple-Silicon validation, spike S5), the O(1) "views" materialization
+> layer (designed, not built), and public distribution (`brew`/release —
+> license-gated, ADR-0008). The headline perf numbers (~ms materialize,
+> boot-never) bind to Apple Silicon + the views layer and are **targets, not
+> measurements**. Full feature-by-feature truth ledger:
+> [`docs/spec/parity-audit.md`](docs/spec/parity-audit.md).
 
 ## The bet
 
@@ -36,10 +51,9 @@ staged (`CAP-DEDUP-CROSS-TENANT`).
 
 ## Status
 
-**R0 delivered (2026-06-11, overnight wave): the warp core works.**
-A 1.9 MB release binary; 90 tests green incl. the A1–A8 acceptance suite
-end-to-end; `lightr bench --check` green on the Intel dev box (snapshot
-warm 233 ms, status 34 ms, memo HIT 51 ms k files — see
+**R0–R4 + prod hardening delivered (2026-06-12).** A ~4 MB release binary;
+362 tests green (A1–A30) end-to-end; `lightr bench --check` green on the
+Intel dev box (snapshot warm 233 ms, status 34 ms, memo HIT 51 ms — see
 `spikes/RESULTS.md`; ~ms targets bind to R2 views + Apple Silicon, tense
 law). Whitepaper v2 (working backwards) is canon. The platform it
 converges with already exists across three sibling repos:
@@ -57,7 +71,7 @@ tier creates has somewhere to convert.
 ## Quickstart (today, on this machine)
 
 ```
-$ cargo build --release          # bin: target/release/lightr (1.9 MB)
+$ cargo build --release          # bin: target/release/lightr (~4 MB)
 $ lightr snapshot --dir . --name @me/proj
 $ lightr hydrate /tmp/fresh --name @me/proj     # CoW, instant-ish
 $ lightr run --input src -- make test           # memoized: 2nd run = HIT
@@ -66,7 +80,8 @@ $ lightr bench --vs-docker                      # run the table yourself
 ```
 
 Nothing runs between invocations (`pgrep lightr` proves it). No daemon,
-no images, no network code in the binary.
+no images. The local verbs touch no network; only `oci pull` reaches a
+registry (the quarantined bridge — ADR-0011).
 
 ## Docs
 
