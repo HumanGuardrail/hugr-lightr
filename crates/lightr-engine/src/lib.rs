@@ -548,13 +548,14 @@ mod vz_impl {
             // BOOT-PATH (S5): the frame the guest wrote (parsed by the tested
             // vsock::read_exit_frame) is the SOLE source of the exit code.
             //
-            // BOOT-PATH (S5) follow-up: if the VM stops cleanly but the guest
-            // never connected at all, accept(2) blocks and this join() hangs.
-            // The S5 owner must add an accept/read timeout (e.g. SO_RCVTIMEO or
-            // a poll(2)) so a silent guest maps to GUEST_NO_REPORT_CODE too. We
-            // do NOT add a timeout here because it cannot be validated without
-            // a live boot, and a wrong timeout would itself be a lie about the
-            // exit code. The short-read/EOF case below is already handled.
+            // BOOT-PATH (S5): a silent guest (VM stops but PID1 never connected)
+            // no longer hangs — the listener carries a generous SO_RCVTIMEO
+            // backstop (default 24h, env LIGHTR_VZ_EXIT_TIMEOUT_SECS; see
+            // vsock::Listener::bind), so a timed-out accept returns Err and maps
+            // to GUEST_NO_REPORT_CODE below, never a fabricated 0. The window is
+            // generous on purpose (a legit guest connects only when its job
+            // command exits, possibly hours in); the precise "cancel accept the
+            // instant the VM stops" fix is S5 work. Short-read/EOF also → 255.
             match recv_handle.join() {
                 Ok(Ok(code)) => Ok(code),
                 // VM stopped but the guest never delivered a (full) frame:
