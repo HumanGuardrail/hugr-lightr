@@ -11,3 +11,5 @@ publish.workspace = true
 assert_cmd = { workspace = true }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
