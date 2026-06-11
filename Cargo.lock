@@ -667,6 +667,9 @@ dependencies = [
  "lightr-core",
  "lightr-index",
  "lightr-store",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
 ]
 
