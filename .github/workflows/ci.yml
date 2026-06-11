@@ -1,0 +1,12 @@
+# CI gate (WP-A-ci). GitHub-hosted runners: rustup honors rust-toolchain.toml
+# (1.96.0) normally — the founder-Mac proxy workaround is NOT needed here.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "WP-A-ci fills this: fmt --check, clippy -D, test --workspace"'
