@@ -10,7 +10,7 @@ use lightr_index::snapshot;
 use lightr_store::Store;
 use serde::Serialize;
 
-use crate::exit::{die_from_error, exit_ok};
+use crate::exit::die_internal;
 
 #[derive(Serialize)]
 struct SnapshotJson {
@@ -20,16 +20,16 @@ struct SnapshotJson {
     objects_new: u64,
 }
 
-pub fn run(dir: &str, name: &str, json: bool, explain: bool) -> ! {
+pub fn run(dir: &str, name: &str, json: bool, explain: bool) -> i32 {
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
-        Err(e) => die_from_error(&e),
+        Err(e) => return die_internal(&e),
     };
 
     let dir_path = std::path::Path::new(dir);
     let report = match snapshot(dir_path, &store, name) {
         Ok(r) => r,
-        Err(e) => die_from_error(&e),
+        Err(e) => return die_internal(&e),
     };
 
     if explain {
@@ -59,5 +59,5 @@ pub fn run(dir: &str, name: &str, json: bool, explain: bool) -> ! {
         );
     }
 
-    exit_ok()
+    0
 }
