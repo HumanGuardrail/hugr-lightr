@@ -560,7 +560,9 @@ name = "lightr-acceptance"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "flate2",
  "serde_json",
+ "tar",
  "tempfile",
 ]
 
