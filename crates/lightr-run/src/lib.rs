@@ -229,7 +229,6 @@ mod tests {
     // each one in a tempdir home so ~ is never touched.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    #[must_use]
     fn isolated_home() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
         let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let home = tempfile::tempdir().unwrap();

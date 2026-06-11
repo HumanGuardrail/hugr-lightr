@@ -487,40 +487,32 @@ fn a7_integrity_fail_closed() {
         .assert()
         .success();
 
-    // find one object file under LIGHTR_HOME/store/objects
+    // find one NON-manifest object file under LIGHTR_HOME/store/objects
+    // (the manifest object starts with the LMF1 magic)
     let objects_root = home.path().join("store/objects");
-    let object_file = find_one_object_file(&objects_root)
-        .expect("must have at least one object in store after snapshot");
+    let object_file = find_object_file(&objects_root, |bytes| !bytes.starts_with(b"LMF1"))
+        .expect("must have at least one non-manifest object in store after snapshot");
+    corrupt_in_place(&object_file);
 
-    // record the original permissions and content
-    let original_mode = fs::metadata(&object_file).unwrap().permissions().mode();
-    let mut content = fs::read(&object_file).unwrap();
-    assert!(!content.is_empty(), "object file must not be empty");
-
-    // chmod to writable, flip one byte, restore 0o444
-    fs::set_permissions(&object_file, fs::Permissions::from_mode(0o644)).unwrap();
-    content[0] ^= 0xFF;
-    fs::write(&object_file, &content).unwrap();
-    fs::set_permissions(
-        &object_file,
-        fs::Permissions::from_mode(original_mode & 0o777),
-    )
-    .unwrap();
-    // spec says restore 0o444
-    fs::set_permissions(&object_file, fs::Permissions::from_mode(0o444)).unwrap();
-
-    // hydrate must exit 1 and stderr must contain "integrity"
+    // A7a — paranoid path: `hydrate --verify` re-hashes every object and
+    // must fail closed on the corrupt one.
     let out = lightr_cmd(home.path())
-        .args(["hydrate", dest.path().to_str().unwrap(), "--name", "@t/ws"])
+        .args([
+            "hydrate",
+            dest.path().to_str().unwrap(),
+            "--name",
+            "@t/ws",
+            "--verify",
+        ])
         .output()
         .unwrap();
     let code = out.status.code().unwrap_or(-1);
-    assert_eq!(code, 1, "hydrate must exit 1 on integrity failure");
+    assert_eq!(code, 1, "hydrate --verify must exit 1 on integrity failure");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("integrity"),
-        "hydrate stderr must contain 'integrity', got: {stderr}"
+        "hydrate --verify stderr must contain 'integrity', got: {stderr}"
     );
 
     // corrupt object file must still exist (not deleted by the binary)
@@ -529,27 +521,73 @@ fn a7_integrity_fail_closed() {
         "corrupt object file must still exist after failed hydrate: {}",
         object_file.display()
     );
+
+    // A7b — default path stays fail-closed where bytes are READ: the
+    // manifest object is always re-hashed, so corrupting IT breaks a
+    // default hydrate too (CoW materialization itself trusts the sealed
+    // store by design — ADR-0009).
+    let manifest_file = find_object_file(&objects_root, |bytes| bytes.starts_with(b"LMF1"))
+        .expect("must find the manifest object (LMF1)");
+    corrupt_in_place(&manifest_file);
+
+    let dest2 = TempDir::new().unwrap();
+    let out2 = lightr_cmd(home.path())
+        .args([
+            "hydrate",
+            dest2.path().join("x").to_str().unwrap(),
+            "--name",
+            "@t/ws",
+        ])
+        .output()
+        .unwrap();
+    let code2 = out2.status.code().unwrap_or(-1);
+    assert_eq!(
+        code2, 1,
+        "default hydrate must exit 1 when the manifest object is corrupt"
+    );
+    let stderr2 = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        stderr2.contains("integrity"),
+        "default hydrate stderr must contain 'integrity', got: {stderr2}"
+    );
 }
 
 /// Walk `objects_root` and return the path to one regular file (any).
-fn find_one_object_file(objects_root: &Path) -> Option<std::path::PathBuf> {
-    fn recurse(dir: &Path) -> Option<std::path::PathBuf> {
+fn find_object_file(
+    objects_root: &Path,
+    pred: impl Fn(&[u8]) -> bool + Copy,
+) -> Option<std::path::PathBuf> {
+    fn recurse(dir: &Path, pred: &(impl Fn(&[u8]) -> bool + Copy)) -> Option<std::path::PathBuf> {
         let rd = fs::read_dir(dir).ok()?;
         for entry in rd {
             let entry = entry.ok()?;
             let path = entry.path();
             let meta = fs::symlink_metadata(&path).ok()?;
             if meta.file_type().is_file() {
-                return Some(path);
+                if let Ok(bytes) = fs::read(&path) {
+                    if !bytes.is_empty() && pred(&bytes) {
+                        return Some(path);
+                    }
+                }
             } else if meta.file_type().is_dir() {
-                if let Some(found) = recurse(&path) {
+                if let Some(found) = recurse(&path, pred) {
                     return Some(found);
                 }
             }
         }
         None
     }
-    recurse(objects_root)
+    recurse(objects_root, &pred)
+}
+
+/// chmod writable, flip the first byte, reseal to 0o444 (spec: evidence kept).
+fn corrupt_in_place(object_file: &Path) {
+    let mut content = fs::read(object_file).unwrap();
+    assert!(!content.is_empty(), "object file must not be empty");
+    fs::set_permissions(object_file, fs::Permissions::from_mode(0o644)).unwrap();
+    content[0] ^= 0xFF;
+    fs::write(object_file, &content).unwrap();
+    fs::set_permissions(object_file, fs::Permissions::from_mode(0o444)).unwrap();
 }
 
 // ---------------------------------------------------------------------------

@@ -594,7 +594,17 @@ pub struct HydrateReport {
     pub rung: CowRung,
 }
 
+/// Verified hydrate: re-hash every object before materializing (paranoid
+/// path; default `hydrate` trusts the sealed store — see ADR-0009).
+pub fn hydrate_verified(dest: &Path, store: &Store, name: &str) -> Result<HydrateReport> {
+    hydrate_impl(dest, store, name, true)
+}
+
 pub fn hydrate(dest: &Path, store: &Store, name: &str) -> Result<HydrateReport> {
+    hydrate_impl(dest, store, name, false)
+}
+
+fn hydrate_impl(dest: &Path, store: &Store, name: &str, verify: bool) -> Result<HydrateReport> {
     let rec = store
         .ref_get(name)?
         .ok_or_else(|| LightrError::RefNotFound(name.to_string()))?;
@@ -649,20 +659,23 @@ pub fn hydrate(dest: &Path, store: &Store, name: &str) -> Result<HydrateReport> 
         .filter(|e| matches!(e, Entry::Symlink { .. }))
         .collect();
 
-    // Parallel materialize files
-    let _: Vec<Result<()>> = file_entries
-        .par_iter()
-        .map(|e| {
-            if let Entry::File {
-                path, mode, digest, ..
-            } = e
-            {
-                store.materialize_file(digest, &dest.join(path), *mode)
-            } else {
-                Ok(())
+    // Parallel materialize files — fail closed: first error aborts the report.
+    // With `verify`, re-hash object bytes before materializing (the paranoid
+    // path; the default trusts the sealed store — corruption is owned by
+    // read paths, `--verify`, and fs-verity in R2).
+    file_entries.par_iter().try_for_each(|e| {
+        if let Entry::File {
+            path, mode, digest, ..
+        } = e
+        {
+            if verify {
+                store.get_bytes(digest).map(|_| ())?;
             }
-        })
-        .collect();
+            store.materialize_file(digest, &dest.join(path), *mode)
+        } else {
+            Ok(())
+        }
+    })?;
 
     // Symlinks (sequential, cheap)
     for entry in &symlink_entries {
@@ -804,7 +817,6 @@ mod tests {
     // hold the guard for the test's whole duration.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    #[must_use]
     fn with_lightr_home(tmp: &TempDir) -> std::sync::MutexGuard<'static, ()> {
         let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("LIGHTR_HOME", tmp.path());
