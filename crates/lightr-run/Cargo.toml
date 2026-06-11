@@ -12,7 +12,17 @@ lightr-store = { workspace = true }
 lightr-index = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Inherit the workspace windows-sys (version + base features) and additively
+# enable Win32_Security: in windows-sys 0.59 the CreateFileW / CreateNamedPipeW
+# bindings are #[cfg(feature = "Win32_Security")] because their signatures name
+# SECURITY_ATTRIBUTES. Feature unification is additive, so this only adds to the
+# workspace set and never touches the lead-owned root Cargo.toml.
+windows-sys = { workspace = true, features = ["Win32_Security"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
