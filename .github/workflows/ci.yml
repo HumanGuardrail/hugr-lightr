@@ -1,12 +1,75 @@
-# CI gate (WP-A-ci). GitHub-hosted runners: rustup honors rust-toolchain.toml
-# (1.96.0) normally — the founder-Mac proxy workaround is NOT needed here.
+# CI gate — mirrors scripts/gate.sh exactly.
+# GitHub-hosted runners: rustup honors rust-toolchain.toml (1.96.0) normally.
+# The founder-Mac proxy workaround is NOT needed here; do not add it.
+
 name: ci
+
 on:
   push:
     branches: [main]
   pull_request:
+
+# Cancel superseded runs on the same ref so queue doesn't pile up.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gate:
+    name: gate (fmt / clippy / test)
     runs-on: ubuntu-latest
+
     steps:
-      - run: 'echo "WP-A-ci fills this: fmt --check, clippy -D, test --workspace"'
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # rustup reads rust-toolchain.toml at repo root and installs 1.96.0
+      # including the rustfmt + clippy components declared there.
+      # No explicit toolchain action needed; `rustup show` forces the install.
+      - name: Install toolchain (honor rust-toolchain.toml)
+        run: |
+          rustup show         # triggers rust-toolchain.toml resolution + component install
+          rustup component add rustfmt clippy  # idempotent; ensures components present
+
+      - name: Cache cargo registry + build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      # --- gate commands identical to scripts/gate.sh ---
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+        # LIGHTR_NET_TESTS is intentionally NOT set; network tests are excluded.
+
+  bench:
+    name: bench (perf-regression visibility)
+    runs-on: ubuntu-latest
+    needs: gate
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain (honor rust-toolchain.toml)
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+
+      - name: Cache cargo registry + build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      # NOTE: bench budgets are tuned to the dev box (founder Mac).
+      # GitHub-hosted runners are a different machine class — a failure here
+      # indicates a possible regression but MUST be investigated before blocking
+      # a merge; it does not automatically mean the code is broken.
+      # The job still runs unconditionally for visibility.
+      - name: Run bench --check
+        run: ./target/release/lightr bench --check
