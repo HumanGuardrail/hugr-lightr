@@ -55,3 +55,20 @@ review. All gates green after each amendment.
 3. **Test-isolation law (all crates):** env-mutating tests serialize on a
    static lock and isolate LIGHTR_HOME in tempdirs; index temp-files are
    per-thread unique (PID alone collided under the parallel test runner).
+
+## 2026-06-12 — R1→R4 sequential execution mandate
+
+**Authorized-by:** Gustavo (owner), verbatim: "Entao marcha familia, pode
+especificar, planejar e executar r1 a r4 em sequencia, mantendo rigor e
+padrao sota."
+
+**Lead interpretation:** spec→plan→execute each ring in sequence under the
+standing rigor; rings claimed only on green acceptance+bench (tense law).
+Known platform constraints logged up front: this dev box is Intel x86_64 —
+VZ save/restore (boot-never resume) and Apple's arm64 Containerization
+kernel require Apple Silicon, so R2's vz tier is built capability-probed
+and validated to the extent this hardware allows (boot path), with resume
+budgets binding to AS hardware. Honest degradations are documented, never
+silent. R1 scope cut logged: native-tier resource limits are NOT
+enforceable honestly on macOS without VM/ns tiers — flags reserved,
+enforcement lands with ns/vz (feature-tree F-203 note).
