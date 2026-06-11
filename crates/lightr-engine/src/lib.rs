@@ -89,7 +89,11 @@ pub struct EngineCaps {
 
 // ── pack_dir helper ───────────────────────────────────────────────────────────
 
-/// Returns the linux pack directory: $LIGHTR_LINUX_PACK, else $LIGHTR_HOME/packs/linux.
+/// Returns the linux pack directory: $LIGHTR_LINUX_PACK, else
+/// $LIGHTR_HOME/packs/linux, else ~/.lightr/packs/linux — the SAME root the
+/// CLI's `lightr_home()` installs into, so install-pack (writer) and
+/// probe_vz/vz_impl (readers) agree. (Bare $HOME mismatched ~/.lightr and hid
+/// the installed pack — surfaced by the Intel vz boot bring-up.)
 // Used by probe_vz (cfg macos+vz) and vz_impl — suppress dead_code on non-vz builds.
 #[allow(dead_code)]
 fn pack_dir() -> PathBuf {
@@ -98,7 +102,11 @@ fn pack_dir() -> PathBuf {
     }
     let base = std::env::var("LIGHTR_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs_home().unwrap_or_else(|| PathBuf::from("/tmp/lightr")));
+        .unwrap_or_else(|_| {
+            dirs_home()
+                .map(|h| h.join(".lightr"))
+                .unwrap_or_else(|| PathBuf::from("/tmp/lightr"))
+        });
     base.join("packs").join("linux")
 }
 

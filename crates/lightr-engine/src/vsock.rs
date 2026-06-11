@@ -59,10 +59,16 @@ pub struct VsockExitReceiver {
 impl VsockExitReceiver {
     /// Bind the host vsock listener on [`CID_HOST`]:[`EXIT_PORT`].
     ///
-    /// BOOT-PATH (S5): the real `AF_VSOCK` bind only succeeds when the VM
-    /// subsystem is live (Apple Silicon spike S5). On other hosts this returns
-    /// an `Io` error from `bind`, which is the honest outcome — there is no VM
-    /// to report a code, so there is nothing to fake.
+    /// ARCHITECTURE NOTE (Intel vz boot bring-up, 2026-06-12): macOS has NO host
+    /// `AF_VSOCK` socket family — `socket(AF_VSOCK)` returns ENODEV on macOS
+    /// regardless of arch (Intel AND Apple Silicon — renting an ARM Mac hits the
+    /// SAME error). This raw-`AF_VSOCK` receiver is thus the LINUX-host mechanism
+    /// (future `fc`/KVM engine). For the macOS `vz` engine the guest→host exit
+    /// channel must instead be brokered by the Swift shim's `VZVirtioSocketDevice`
+    /// OR carried as a small file on the shared (writable) virtiofs rootfs — that
+    /// rework is the remaining vz-on-macOS exit-code work (see decisions-log
+    /// 2026-06-12). Until then `bind()` honestly errors on macOS — never a fake
+    /// code, never a hang.
     #[cfg(target_os = "macos")]
     pub fn bind() -> std::io::Result<Self> {
         // BOOT-PATH (S5)
