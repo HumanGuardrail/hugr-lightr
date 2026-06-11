@@ -14,3 +14,6 @@ target/
 # Local env/secrets
 .env
 .env.*
+
+# TechLead per-project state (never committed)
+.techlead/
