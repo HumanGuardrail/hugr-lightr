@@ -296,6 +296,12 @@ enum Cmd {
         #[command(subcommand)]
         subcmd: PlanCmd,
     },
+    /// Print JSON Schema for verb --json output (build-spec-r4 §2)
+    Schema {
+        /// Show schema for a specific verb only
+        #[arg(long)]
+        verb: Option<String>,
+    },
     /// Serve MCP protocol on stdio
     Mcp {},
     /// Build an image from a Dockerfile (step-memoized)
@@ -362,6 +368,7 @@ fn main() {
         Cmd::Diff { .. } => "diff",
         Cmd::Bisect { .. } => "bisect",
         Cmd::Plan { .. } => "plan",
+        Cmd::Schema { .. } => "schema",
         Cmd::Mcp { .. } => "mcp",
         Cmd::Build { .. } => "build",
         Cmd::Compose { subcmd } => match subcmd {
@@ -450,6 +457,7 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
             json: bisect_json,
         } => handlers::bisect::run(&name, &command, bisect_json),
         Cmd::Plan { subcmd } => handlers::plan::run(subcmd),
+        Cmd::Schema { verb } => handlers::schema::run(verb.as_deref()),
         Cmd::Mcp {} => handlers::mcp::run(),
         Cmd::Build {
             context,
@@ -913,6 +921,33 @@ mod tests {
     #[test]
     fn plan_run() {
         parse(&["plan", "run", "--", "echo"]);
+    }
+
+    // ── schema ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn schema_no_verb_parses() {
+        let cli = parse(&["schema"]);
+        match &cli.cmd {
+            super::Cmd::Schema { verb } => assert!(verb.is_none()),
+            _ => panic!("expected Schema"),
+        }
+    }
+
+    #[test]
+    fn schema_with_verb_parses() {
+        let cli = parse(&["schema", "--verb", "run"]);
+        match &cli.cmd {
+            super::Cmd::Schema { verb } => assert_eq!(verb.as_deref(), Some("run")),
+            _ => panic!("expected Schema"),
+        }
+    }
+
+    #[test]
+    fn schema_unknown_verb_exits_2() {
+        use super::handlers::schema::run as schema_run;
+        let code = schema_run(Some("notaverb"));
+        assert_eq!(code, 2, "unknown verb must exit 2");
     }
 
     // ── mcp ───────────────────────────────────────────────────────────────
