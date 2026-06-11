@@ -50,16 +50,44 @@ brew tap hugr/tap
 brew install lightr
 ```
 
-### 3. GitHub Releases
+### 3. GitHub Releases (automated — `.github/workflows/release.yml`)
 
-`packaging/release.sh` builds a release tarball (`lightr-<version>-<os>-<arch>.tar.gz`)
-into `packaging/dist/` (gitignored) and prints the sha256 needed for the
-Homebrew formula and install.sh. The script intentionally does **not** upload
-anything — uploading is a manual step gated on ADR-0008 acceptance.
+**CI release workflow:** `.github/workflows/release.yml` is triggered
+exclusively by a `v*` tag push. No tag → no publish; nothing can accidentally
+land in GitHub Releases from a branch push or PR.
+
+Matrix: `macos-14` (arm64), `macos-13` (x86_64), `ubuntu-latest` (linux-x86_64).
+Each job: `cargo build --release`, strip, package
+`lightr-<version>-<os>-<arch>.tar.gz`, compute sha256. A final `release` job
+assembles all tarballs + a `SHA256SUMS` file and uploads them to a GitHub
+Release via `softprops/action-gh-release@v2`.
+
+**Signing and notarization (macOS):** the signing steps are present but GATED.
+When the secrets listed below are absent, the step prints:
+
+```
+signing skipped — Apple Developer secrets not set (owner provides)
+```
+
+and the artifact is named with an **`-unsigned`** suffix so it is never
+labelled as signed. An unsigned artifact is _never_ silently mislabelled.
+
+Required repository secrets (owner must provision before signing runs):
+
+| Secret | Purpose |
+|---|---|
+| `APPLE_CERT` | Base64-encoded `.p12` Developer ID Application certificate |
+| `APPLE_CERT_PASSWORD` | Passphrase for the `.p12` |
+| `AC_API_KEY` | App Store Connect API key (JSON) for notarytool |
+| `AC_API_KEY_ID` | Key ID component of the API key |
+
+`packaging/release.sh` remains the **local equivalent** of the workflow's
+build+package steps (no upload; used for local verification and for computing
+sha256 values before a tag is cut).
 
 ---
 
-## Building a release artifact (local, gated)
+## Building a release artifact (local, for verification)
 
 ```sh
 bash packaging/release.sh
@@ -68,7 +96,8 @@ bash packaging/release.sh
 Output: `packaging/dist/lightr-<version>-<os>-<arch>.tar.gz` + sha256 printed
 to stdout.
 
-**Do not upload until ADR-0008 is Accepted.**
+The script does **not** upload anything. Uploading is triggered only by
+pushing a `v*` tag, which runs the CI workflow above.
 
 ---
 
@@ -77,7 +106,8 @@ to stdout.
 | File | Purpose |
 |---|---|
 | `packaging/README.md` | This file |
-| `packaging/install.sh` | curl\|sh installer (license-gated, fails loudly until released) |
-| `packaging/lightr.rb` | Homebrew formula template (TODOs for url/sha256) |
-| `packaging/release.sh` | Local release-build recipe (no upload) |
+| `packaging/install.sh` | curl\|sh installer (fails loudly until a real release URL is set) |
+| `packaging/lightr.rb` | Homebrew formula template (TODOs for url/sha256 — filled after a tag) |
+| `packaging/release.sh` | Local release-build recipe (no upload; mirrors workflow build steps) |
 | `packaging/dist/` | Gitignored build output |
+| `.github/workflows/release.yml` | Tag-triggered automated release pipeline |
