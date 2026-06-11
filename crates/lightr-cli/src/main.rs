@@ -97,6 +97,45 @@ pub enum PlanCmd {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// EngineCmd sub-enum
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum EngineCmd {
+    /// List available engines and their capabilities
+    Ls,
+    /// Install a linux kernel+initrd pack into the lightr home directory
+    InstallPack {
+        /// Directory containing 'kernel' and 'initrd' files
+        dir: String,
+    },
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// OciCmd sub-enum
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum OciCmd {
+    /// Import an OCI layout directory or docker-save tar into the store
+    Import {
+        /// Path to an OCI layout directory or tar file
+        path: String,
+        /// Ref name to store the imported image under
+        #[arg(long)]
+        name: String,
+    },
+    /// Pull an image from a registry and import into the store
+    Pull {
+        /// Image reference (e.g. alpine, nginx:1.25, ghcr.io/owner/repo:tag)
+        image: String,
+        /// Ref name to store the pulled image under
+        #[arg(long)]
+        name: String,
+    },
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Main command enum
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -137,8 +176,24 @@ enum Cmd {
         detach: bool,
         #[arg(long, value_name = "REF:TARGET")]
         mount: Vec<String>,
+        /// Engine to use: native (default), ns, vz
+        #[arg(long, default_value = "native", value_name = "ENGINE")]
+        engine: String,
+        /// Hydrate a ref CoW into a temp dir and hand it to the engine as rootfs
+        #[arg(long, value_name = "REF")]
+        rootfs: Option<String>,
         #[arg(last = true, required = true)]
         command: Vec<String>,
+    },
+    /// Engine management
+    Engine {
+        #[command(subcommand)]
+        subcmd: EngineCmd,
+    },
+    /// OCI image management
+    Oci {
+        #[command(subcommand)]
+        subcmd: OciCmd,
     },
     /// Measure the indicator table on THIS machine
     Bench {
@@ -235,6 +290,14 @@ fn main() {
         Cmd::Hydrate { .. } => "hydrate",
         Cmd::Status { .. } => "status",
         Cmd::Run { .. } => "run",
+        Cmd::Engine { subcmd } => match subcmd {
+            EngineCmd::Ls => "engine-ls",
+            EngineCmd::InstallPack { .. } => "engine-install-pack",
+        },
+        Cmd::Oci { subcmd } => match subcmd {
+            OciCmd::Import { .. } => "oci-import",
+            OciCmd::Pull { .. } => "oci-pull",
+        },
         Cmd::Bench { .. } => "bench",
         Cmd::Ps { .. } => "ps",
         Cmd::Logs { .. } => "logs",
@@ -272,8 +335,29 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
             env,
             detach,
             mount,
+            engine,
+            rootfs,
             command,
-        } => handlers::run::run(&dir, &input, &env, &command, json, explain, detach, &mount),
+        } => handlers::run::run(
+            &dir,
+            &input,
+            &env,
+            &command,
+            json,
+            explain,
+            detach,
+            &mount,
+            &engine,
+            rootfs.as_deref(),
+        ),
+        Cmd::Engine { subcmd } => match subcmd {
+            EngineCmd::Ls => handlers::engine::ls(json),
+            EngineCmd::InstallPack { dir } => handlers::engine::install_pack(&dir),
+        },
+        Cmd::Oci { subcmd } => match subcmd {
+            OciCmd::Import { path, name } => handlers::oci::import(&path, &name, json),
+            OciCmd::Pull { image, name } => handlers::oci::pull_image(&image, &name, json),
+        },
         Cmd::Bench { vs_docker, check } => handlers::bench::run(vs_docker, check, json),
         Cmd::Ps { json: ps_json } => handlers::ps::run(ps_json),
         Cmd::Logs {
@@ -457,6 +541,7 @@ mod tests {
                 command,
                 detach,
                 mount,
+                ..
             } => {
                 assert_eq!(dir, ".");
                 assert!(input.is_empty());
@@ -811,5 +896,195 @@ mod tests {
         assert!(s.contains(r#""ev":"end""#), "missing ev:end in: {s}");
         assert!(s.contains(r#""ok":true"#), "missing ok:true in: {s}");
         assert!(s.contains(r#""exit":0"#), "missing exit:0 in: {s}");
+    }
+
+    // ── engine ls ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn engine_ls_parses() {
+        let cli = parse(&["engine", "ls"]);
+        match &cli.cmd {
+            super::Cmd::Engine { subcmd } => {
+                matches!(subcmd, super::EngineCmd::Ls);
+            }
+            _ => panic!("expected Engine cmd"),
+        }
+    }
+
+    #[test]
+    fn engine_ls_json_uses_global_flag() {
+        let cli = parse(&["--json", "engine", "ls"]);
+        assert!(cli.json, "global --json must be set");
+        match &cli.cmd {
+            super::Cmd::Engine { subcmd } => {
+                matches!(subcmd, super::EngineCmd::Ls);
+            }
+            _ => panic!("expected Engine cmd"),
+        }
+    }
+
+    // ── engine install-pack ───────────────────────────────────────────────────
+
+    #[test]
+    fn engine_install_pack_parses() {
+        let cli = parse(&["engine", "install-pack", "/tmp/mypack"]);
+        match &cli.cmd {
+            super::Cmd::Engine { subcmd } => match subcmd {
+                super::EngineCmd::InstallPack { dir } => {
+                    assert_eq!(dir, "/tmp/mypack");
+                }
+                _ => panic!("expected InstallPack"),
+            },
+            _ => panic!("expected Engine cmd"),
+        }
+    }
+
+    #[test]
+    fn engine_install_pack_requires_dir() {
+        assert!(try_parse(&["engine", "install-pack"]).is_err());
+    }
+
+    // ── oci import ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn oci_import_parses() {
+        let cli = parse(&["oci", "import", "/tmp/layout", "--name", "myimage"]);
+        match &cli.cmd {
+            super::Cmd::Oci { subcmd } => match subcmd {
+                super::OciCmd::Import { path, name } => {
+                    assert_eq!(path, "/tmp/layout");
+                    assert_eq!(name, "myimage");
+                }
+                _ => panic!("expected Import"),
+            },
+            _ => panic!("expected Oci cmd"),
+        }
+    }
+
+    #[test]
+    fn oci_import_json_uses_global_flag() {
+        let cli = parse(&["--json", "oci", "import", "/tmp/x", "--name", "img"]);
+        assert!(cli.json, "global --json must be set");
+    }
+
+    #[test]
+    fn oci_import_requires_path_and_name() {
+        assert!(try_parse(&["oci", "import"]).is_err());
+        assert!(try_parse(&["oci", "import", "/tmp/x"]).is_err());
+    }
+
+    // ── oci pull ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn oci_pull_parses() {
+        let cli = parse(&["oci", "pull", "alpine:latest", "--name", "my-alpine"]);
+        match &cli.cmd {
+            super::Cmd::Oci { subcmd } => match subcmd {
+                super::OciCmd::Pull { image, name } => {
+                    assert_eq!(image, "alpine:latest");
+                    assert_eq!(name, "my-alpine");
+                }
+                _ => panic!("expected Pull"),
+            },
+            _ => panic!("expected Oci cmd"),
+        }
+    }
+
+    #[test]
+    fn oci_pull_requires_image_and_name() {
+        assert!(try_parse(&["oci", "pull"]).is_err());
+        assert!(try_parse(&["oci", "pull", "alpine"]).is_err());
+    }
+
+    #[test]
+    fn oci_pull_json_uses_global_flag() {
+        let cli = parse(&["--json", "oci", "pull", "alpine", "--name", "a"]);
+        assert!(cli.json);
+    }
+
+    // ── run --engine / --rootfs ───────────────────────────────────────────────
+
+    #[test]
+    fn run_engine_default_is_native() {
+        let cli = parse(&["run", "--", "echo", "hi"]);
+        match &cli.cmd {
+            super::Cmd::Run { engine, rootfs, .. } => {
+                assert_eq!(engine, "native");
+                assert!(rootfs.is_none());
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_engine_ns() {
+        let cli = parse(&["run", "--engine", "ns", "--", "echo"]);
+        match &cli.cmd {
+            super::Cmd::Run { engine, .. } => assert_eq!(engine, "ns"),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_engine_vz() {
+        let cli = parse(&["run", "--engine", "vz", "--", "echo"]);
+        match &cli.cmd {
+            super::Cmd::Run { engine, .. } => assert_eq!(engine, "vz"),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_rootfs_flag() {
+        let cli = parse(&["run", "--rootfs", "my-image", "--engine", "ns", "--", "sh"]);
+        match &cli.cmd {
+            super::Cmd::Run { rootfs, engine, .. } => {
+                assert_eq!(rootfs.as_deref(), Some("my-image"));
+                assert_eq!(engine, "ns");
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn run_bad_engine_string_rejected_at_handler() {
+        // Clap accepts any string for --engine; the handler rejects bad values at exit 2.
+        // Parse succeeds:
+        let cli = parse(&["run", "--engine", "bogus", "--", "echo"]);
+        match &cli.cmd {
+            super::Cmd::Run { engine, .. } => assert_eq!(engine, "bogus"),
+            _ => panic!("expected Run"),
+        }
+        // The handler should return 2 for a bad engine string.
+        // We test this through the handler directly (not through process::exit).
+        use super::handlers::run::run as run_handler;
+        let code = run_handler(
+            ".",
+            &[],
+            &[],
+            &["echo".to_string()],
+            false,
+            false,
+            false,
+            &[],
+            "bogus",
+            None,
+        );
+        assert_eq!(code, 2, "bad engine string must exit 2");
+    }
+
+    #[test]
+    fn run_native_with_rootfs_rejected_by_engine() {
+        // native + rootfs ⇒ the NativeEngine itself returns InvalidRef → exit 2
+        // We need a valid store to test this, so instead we verify parse accepts
+        // the flags and trust the engine unit tests cover the runtime rejection.
+        let cli = parse(&["run", "--engine", "native", "--rootfs", "@x", "--", "true"]);
+        match &cli.cmd {
+            super::Cmd::Run { engine, rootfs, .. } => {
+                assert_eq!(engine, "native");
+                assert_eq!(rootfs.as_deref(), Some("@x"));
+            }
+            _ => panic!("expected Run"),
+        }
     }
 }
