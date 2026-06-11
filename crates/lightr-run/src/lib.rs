@@ -606,3 +606,8 @@ pub fn stop(_dir: &std::path::Path, _grace_secs: u64) -> Result<i32> {
 pub fn exec_in(_dir: &std::path::Path, _command: &[String]) -> Result<i32> {
     todo!("R1-W2")
 }
+
+/// Predict HIT/MISS without executing. Returns (key, hit).
+pub fn predict(_spec: &RunSpec, _store: &Store) -> Result<(Digest, bool)> {
+    todo!("R1-W2")
+}
