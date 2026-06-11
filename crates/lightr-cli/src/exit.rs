@@ -44,6 +44,14 @@ pub fn exit_child(code: i32) -> ! {
 }
 
 /// Print error to stderr and return exit code 2 (internal helper for R1 handlers).
+/// Print the error and return ITS mapped exit code (R0 contract:
+/// RefNotFound|InvalidRef ⇒ 2, everything else ⇒ 1).
+pub fn die_lightr(e: &lightr_core::LightrError) -> i32 {
+    eprintln!("lightr: {e}");
+    error_exit_code(e)
+}
+
+/// Usage-class failures only (unknown id, bad grammar): always 2.
 pub fn die_internal(e: &dyn std::fmt::Display) -> i32 {
     eprintln!("lightr: {e}");
     2

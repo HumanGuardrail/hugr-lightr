@@ -2,7 +2,10 @@
 
 use lightr_run::stop;
 
-use crate::{exit::die_internal, lightr_home};
+use crate::{
+    exit::{die_internal, die_lightr},
+    lightr_home,
+};
 
 pub fn run(id: &str, grace: u64) -> i32 {
     let home = lightr_home();
@@ -15,6 +18,6 @@ pub fn run(id: &str, grace: u64) -> i32 {
 
     match stop(&run_dir, grace) {
         Ok(exit_code) => exit_code,
-        Err(e) => die_internal(&e),
+        Err(e) => die_lightr(&e),
     }
 }

@@ -4,7 +4,7 @@ use lightr_index::{scan, Index};
 use lightr_run::{predict, Mount, RunSpec};
 use lightr_store::Store;
 
-use crate::exit::die_internal;
+use crate::exit::die_lightr;
 use crate::{lightr_home, PlanCmd};
 
 pub fn run(subcmd: PlanCmd) -> i32 {
@@ -24,18 +24,18 @@ pub fn run(subcmd: PlanCmd) -> i32 {
 fn plan_snapshot(dir: &str) -> i32 {
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     let dir_path = std::path::Path::new(dir);
     let mut index = match Index::load_for(dir_path) {
         Ok(i) => i,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     let walk = match scan(dir_path, &mut index) {
         Ok(r) => r,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     let manifest = &walk.manifest;
@@ -68,7 +68,7 @@ fn plan_snapshot(dir: &str) -> i32 {
 fn plan_hydrate(dest: &str, name: &str) -> i32 {
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     let rec = match store.ref_get(name) {
@@ -77,17 +77,17 @@ fn plan_hydrate(dest: &str, name: &str) -> i32 {
             eprintln!("lightr: ref not found: {name}");
             return 2;
         }
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     let manifest_bytes = match store.get_bytes(&rec.root) {
         Ok(b) => b,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     let manifest = match lightr_core::Manifest::decode(&manifest_bytes) {
         Ok(m) => m,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     let files = manifest
@@ -110,7 +110,7 @@ fn plan_run(
 ) -> i32 {
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
-        Err(e) => return die_internal(&e),
+        Err(e) => return die_lightr(&e),
     };
 
     // Parse mounts (same logic as run handler)
@@ -167,6 +167,6 @@ fn plan_run(
             println!("key={short} predict={predict_str}");
             0
         }
-        Err(e) => die_internal(&e),
+        Err(e) => die_lightr(&e),
     }
 }

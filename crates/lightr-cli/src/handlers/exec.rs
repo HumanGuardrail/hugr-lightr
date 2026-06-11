@@ -2,7 +2,10 @@
 
 use lightr_run::exec_in;
 
-use crate::{exit::die_internal, lightr_home};
+use crate::{
+    exit::{die_internal, die_lightr},
+    lightr_home,
+};
 
 pub fn run(id: &str, command: &[String]) -> i32 {
     let home = lightr_home();
@@ -15,6 +18,6 @@ pub fn run(id: &str, command: &[String]) -> i32 {
 
     match exec_in(&run_dir, command) {
         Ok(exit_code) => exit_code,
-        Err(e) => die_internal(&e),
+        Err(e) => die_lightr(&e),
     }
 }
