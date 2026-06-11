@@ -2,11 +2,13 @@
 pub mod bench;
 pub mod bisect;
 pub mod diff;
+pub mod engine;
 pub mod exec;
 pub mod gc;
 pub mod hydrate;
 pub mod logs;
 pub mod mcp;
+pub mod oci;
 pub mod plan;
 pub mod ps;
 pub mod run;

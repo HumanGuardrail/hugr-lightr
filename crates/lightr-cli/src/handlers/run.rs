@@ -1,4 +1,4 @@
-//! `lightr run` handler — build-spec v2 §7 + build-spec-r1 §4.
+//! `lightr run` handler — build-spec v2 §7 + build-spec-r1 §4 + build-spec-r2 §4.
 //!
 //! Exit = child's exit code.
 //!
@@ -16,10 +16,19 @@
 //!
 //! --detach: spawn a detached run; print id=<handle.id>; exit 0.
 //! --mount REF:TARGET: mount a ref into the run's cwd at TARGET (relative).
+//!
+//! --engine native|ns|vz (default native): pick the execution engine.
+//! --rootfs <ref>: hydrate the named ref CoW into a temp dir and hand it
+//!   to the engine as the rootfs. Incompatible with native (exit 2).
+//!
+//! NOTE: Engine runs (engine != native OR rootfs given) are NOT memoized.
+//! Only the default path (native + no rootfs) uses run_memoized.
 
 use std::io::Write;
 
 use lightr_core::validate_ref_name;
+use lightr_engine::{engine_for, EngineKind, ExecSpec};
+use lightr_index;
 use lightr_run::{run_memoized, spawn_detached, Mount, RunSpec};
 use lightr_store::Store;
 use serde::Serialize;
@@ -72,7 +81,19 @@ pub fn run(
     explain: bool,
     detach: bool,
     mounts_raw: &[String],
+    engine_str: &str,
+    rootfs_ref: Option<&str>,
 ) -> i32 {
+    // Parse engine kind — bad value ⇒ exit 2
+    let engine_kind = match engine_str.parse::<EngineKind>() {
+        Ok(k) => k,
+        Err(e) => return die_lightr(&e),
+    };
+
+    // Decide path: native + no rootfs ⇒ memoized path (unchanged R0/R1 behaviour).
+    // Any other combination ⇒ engine path (NOT memoized, per §4).
+    let use_engine_path = engine_kind != EngineKind::Native || rootfs_ref.is_some();
+
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
         Err(e) => return die_lightr(&e),
@@ -88,6 +109,54 @@ pub fn run(
     }
 
     let cwd = std::path::PathBuf::from(dir);
+
+    if use_engine_path {
+        // ── Engine path (non-memoized) ────────────────────────────────────────
+        // Hydrate rootfs ref into a temp dir if provided
+        let rootfs_tmp: Option<tempfile::TempDir>;
+        let rootfs_path: Option<std::path::PathBuf>;
+
+        if let Some(ref_name) = rootfs_ref {
+            let tmp = match tempfile::TempDir::new() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("lightr: run: cannot create temp dir for rootfs: {e}");
+                    return 1;
+                }
+            };
+            if let Err(e) = lightr_index::hydrate(tmp.path(), &store, ref_name) {
+                return die_lightr(&e);
+            }
+            rootfs_path = Some(tmp.path().to_path_buf());
+            rootfs_tmp = Some(tmp);
+        } else {
+            rootfs_tmp = None;
+            rootfs_path = None;
+        }
+
+        let engine = match engine_for(engine_kind) {
+            Ok(e) => e,
+            Err(e) => return die_lightr(&e),
+        };
+
+        let spec = ExecSpec {
+            cwd: &cwd,
+            command,
+            rootfs: rootfs_path.as_deref(),
+        };
+
+        let code = match engine.run(&spec) {
+            Ok(c) => c,
+            Err(e) => return die_lightr(&e),
+        };
+
+        // Keep temp dir alive until after engine.run completes
+        drop(rootfs_tmp);
+
+        return code;
+    }
+
+    // ── Memoized path (native + no rootfs — unchanged R0/R1 behaviour) ────────
 
     let input_paths: Vec<std::path::PathBuf> = if inputs.is_empty() {
         vec![cwd.clone()]
