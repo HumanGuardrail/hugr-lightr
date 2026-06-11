@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  vz.entitlements — the entitlement Apple's Virtualization.framework requires to
+  create a VZVirtualMachine. Attach it with an AD-HOC signature for LOCAL use,
+  no paid Apple Developer account needed:
+
+      codesign --sign - --entitlements packaging/vz.entitlements --force \
+          target/release/lightr
+
+  Verify it landed:
+
+      codesign -d --entitlements - target/release/lightr | grep virtualization
+
+  For notarized public releases the same entitlement is applied with a real
+  Developer ID signature (gated behind owner secrets in .github/workflows/
+  release.yml). This file is the single source of the entitlement set.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.virtualization</key>
+    <true/>
+</dict>
+</plist>
