@@ -7,12 +7,14 @@ use lightr_store::{CowRung, Store};
 use rayon::prelude::*;
 use std::{
     collections::HashMap,
-    fs::File,
     io::{self, Write as _},
-    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 // ---------------------------------------------------------------------------
 // fsync helper
@@ -20,9 +22,21 @@ use std::{
 
 /// fsync the parent directory so the rename (directory entry change) is
 /// crash-durable on macOS/Linux. Mirrors the same helper in lightr-store.
+///
+/// On Windows: NTFS has no portable directory fsync API. This is a documented
+/// no-op on Windows — data durability relies on FlushFileBuffers called on the
+/// file itself before rename (done in save_for). The directory entry update may
+/// not be crash-synced; a crash between rename and a hypothetical dir-fsync
+/// means re-scan on next open, not corruption (the index is a cache).
 fn fsync_dir(dir: &Path) -> io::Result<()> {
-    let f = File::open(dir)?;
-    f.sync_all()?;
+    #[cfg(unix)]
+    {
+        let f = File::open(dir)?;
+        f.sync_all()?;
+    }
+    // Windows: documented no-op — see function doc above.
+    #[cfg(windows)]
+    let _ = dir;
     Ok(())
 }
 
@@ -238,8 +252,11 @@ impl Index {
         {
             let mut f = std::fs::File::create(&tmp_path).map_err(LightrError::Io)?;
             f.write_all(&buf).map_err(LightrError::Io)?;
-            f.sync_all().map_err(LightrError::Io)?; // fsync data before rename
-                                                    // f dropped (closed) here before rename
+            // fsync data before rename for crash durability.
+            // On Windows, File::sync_all() maps to FlushFileBuffers internally.
+            // WIN-PATH: this is a best-effort sync before rename on Windows.
+            f.sync_all().map_err(LightrError::Io)?;
+            // f dropped (closed) here before rename
         }
         std::fs::rename(&tmp_path, &index_path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp_path);
@@ -287,10 +304,19 @@ fn stat_fields(meta: &std::fs::Metadata) -> (u64, u64, u64, u32) {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
+    // inode number: unix-only. On Windows, use 0 (index uses mtime+size for
+    // change detection; ino is an optimization hint, not required for correctness).
+    #[cfg(unix)]
     let ino = meta.ino();
+    #[cfg(windows)]
+    let ino = 0u64;
     let size = meta.len();
-    // full mode including type bits masked to permissions
+    // full mode including type bits masked to permissions (unix).
+    // On Windows, mode bits are not meaningful — use a conventional default.
+    #[cfg(unix)]
     let mode = meta.permissions().mode() & 0o7777;
+    #[cfg(windows)]
+    let mode = if meta.permissions().readonly() { 0o444 } else { 0o644 };
     (mtime_ns, ino, size, mode)
 }
 
@@ -696,7 +722,27 @@ fn hydrate_impl(dest: &Path, store: &Store, name: &str, verify: bool) -> Result<
     for entry in &symlink_entries {
         if let Entry::Symlink { path, target } = entry {
             let link_path = dest.join(path);
+            #[cfg(unix)]
             std::os::unix::fs::symlink(target, &link_path).map_err(LightrError::Io)?;
+            // WIN-PATH: symlink creation on Windows requires Developer Mode or admin.
+            // Best-effort: attempt symlink_file; fall back to fs::copy on error so
+            // hydrate never hard-fails on a standard Windows installation.
+            #[cfg(windows)]
+            {
+                let result = std::os::windows::fs::symlink_file(target, &link_path);
+                if result.is_err() {
+                    // Fall back: copy the target file if it exists.
+                    let abs_target = if std::path::Path::new(target).is_absolute() {
+                        std::path::PathBuf::from(target)
+                    } else {
+                        link_path.parent().unwrap_or(dest).join(target)
+                    };
+                    if abs_target.exists() {
+                        std::fs::copy(&abs_target, &link_path).map_err(LightrError::Io)?;
+                    }
+                    // If target doesn't exist yet, skip silently (dangling symlink).
+                }
+            }
         }
     }
 
@@ -1484,7 +1530,23 @@ pub fn bisect(store: &Store, name: &str, cmd: &[String]) -> Result<(usize, RefRe
                     if let Some(parent) = link.parent() {
                         std::fs::create_dir_all(parent).map_err(LightrError::Io)?;
                     }
+                    #[cfg(unix)]
                     std::os::unix::fs::symlink(target, &link).map_err(LightrError::Io)?;
+                    // WIN-PATH: best-effort symlink; fall back to copy on failure.
+                    #[cfg(windows)]
+                    {
+                        let result = std::os::windows::fs::symlink_file(target, &link);
+                        if result.is_err() {
+                            let abs_target = if std::path::Path::new(target).is_absolute() {
+                                std::path::PathBuf::from(target)
+                            } else {
+                                link.parent().unwrap_or(&tmp_path).join(target)
+                            };
+                            if abs_target.exists() {
+                                std::fs::copy(&abs_target, &link).map_err(LightrError::Io)?;
+                            }
+                        }
+                    }
                 }
                 Entry::Dir { path } => {
                     std::fs::create_dir_all(tmp_path.join(path)).map_err(LightrError::Io)?;
