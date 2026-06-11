@@ -708,3 +708,25 @@ mod tests {
         assert_eq!(d1, d2);
     }
 }
+
+// ---------------------------------------------------------------------------
+// R1 additions — frozen contract: build-spec-r1.md §1 (bodies: WP-R1-W1)
+// ---------------------------------------------------------------------------
+impl Store {
+    /// Ref history, newest-first (index 0 = current).
+    pub fn ref_log(&self, _name: &str) -> Result<Vec<RefRecord>> {
+        todo!("R1-W1")
+    }
+    /// Enumerate all ref names ever written.
+    pub fn list_refs(&self) -> Result<Vec<String>> {
+        todo!("R1-W1")
+    }
+    /// Enumerate all raw AC values.
+    pub fn list_ac(&self) -> Result<Vec<Vec<u8>>> {
+        todo!("R1-W1")
+    }
+    /// gc sweep only: chmod + remove one object.
+    pub fn remove_object(&self, _d: &Digest) -> Result<()> {
+        todo!("R1-W1")
+    }
+}
