@@ -145,3 +145,48 @@ rented ARM Mac):
    build→install→verify order.
 Product code untouched (Rust 403/0 holds); fixes are shell+README, bash -n +
 shellcheck clean.
+
+## 2026-06-12 — Omni cross-platform wave (Windows + mac Intel/ASi + Linux)
+
+**Authorized-by:** Gustavo (owner), in session.
+
+**Verbatim (trigger — challenged the ARM dependency):** "Eu nao entendo, porque
+voce depende de um mac silicon pra seguir? nao tem logica isso"
+
+**Verbatim (mandate):** "Fecha logo tudo irmao, windows, mac intel e mac
+silicon. Ai eu posos ate pedir pra amigos ou provisionar maquinas. Mas tu tem
+que entregar o produto full, nao ficar me enchendo o saco"
+
+**Effect (lead):**
+1. Correction logged: vz was NEVER Apple-Silicon-gated — Virtualization.framework
+   runs Linux guests on Intel Macs (guest arch = host arch). Only VZ save/restore
+   (F-406) + Rosetta-in-VM (F-208) are genuinely arm64-only. ADR-0017 records it.
+2. Reframe: validation on hardware the lead lacks is a one-command runbook the
+   owner triggers, NOT a blocker. Lead delivers code-complete + host-green +
+   cross-compile-clean + per-platform runbook.
+3. Windows tier built from zero (no cfg(windows) existed): native core port
+   (locks/fsync/ctl-socket/CoW-ReFS/symlinks/perms), wsl isolation engine,
+   5-target CI/release matrix. ADR-0017 + build-spec-omni frozen.
+4. Delivered via a 7-WP disjoint-by-crate fleet (git worktrees, zero merge
+   conflicts), model-routed (sonnet mechanical; opus for RUN named-pipes +
+   ENGINE WSL2).
+
+**Cold critic (opus) — verdict GAPS, all fixed at root (no waivers):**
+- BLOCKER: wsl engine invoked a nonexistent `lightr __ns-exec` → rewired to the
+  real `wsl.exe -- lightr run --engine ns --rootfs <wsl-path> -- <cmd>` (reuses
+  NsEngine in-distro) + win_path_to_wsl translation; overclaiming comment removed.
+- SHOULD-FIX: Windows supervisor shutdown deadlock (a single nudge could miss) →
+  retry-nudge until `server_exited`.
+- SHOULD-FIX: ReFS FSCTL never engaged (dst length 0) → `set_len` pre-size +
+  honest cluster-alignment caveat; copy fallback guarantees correctness.
+- Doc overclaim: virtualization entitlement on a notarized release softened
+  (restricted entitlement, needs Apple provisioning) in ADR-0017 + release.yml.
+- Nit: aarch64 cross-check → `--all-targets`; windows-msvc noted natively gated.
+Critic AFFIRMED: no vacuous tests, no `todo!()` in non-test code, honest
+probes/skeletons, unix path untouched, cross-crate exhaustiveness complete.
+
+**Gates:** host `cargo test --workspace` 408/0, clippy -D, fmt clean; Windows
+cross-check (lib+bins + all-targets) 0 errors; `--features vz` compiles+links on
+Intel. **Pending (honestly marked, hardware/CI-gated):** the vz boot assertion
+(x86_64 kernel building on this box), arm64 vz boot, Windows/Linux runtime — each
+runbook- or CI-gated, none claimed validated.
