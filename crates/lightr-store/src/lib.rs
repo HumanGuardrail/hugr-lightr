@@ -729,4 +729,10 @@ impl Store {
     pub fn remove_object(&self, _d: &Digest) -> Result<()> {
         todo!("R1-W1")
     }
+
+    /// Returns the store's root path (needed by gc to walk the objects tree).
+    /// Added in R1 alongside the other gc-support methods.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 }
