@@ -19,18 +19,15 @@ struct EngineEntry {
 }
 
 pub fn ls(json: bool) -> i32 {
-    let kinds = [EngineKind::Native, EngineKind::Ns, EngineKind::Vz];
-    let entries: Vec<EngineEntry> = kinds
+    // EngineKind::all() + as_str() keep this variant-proof: a new engine
+    // (e.g. Wsl on Windows) shows up here automatically, no array/match to
+    // forget. Each kind probes itself; engine ls reports honest availability.
+    let entries: Vec<EngineEntry> = EngineKind::all()
         .iter()
         .map(|&kind| {
             let caps = probe(kind);
-            let kind_str = match kind {
-                EngineKind::Native => "native",
-                EngineKind::Ns => "ns",
-                EngineKind::Vz => "vz",
-            };
             EngineEntry {
-                kind: kind_str.to_string(),
+                kind: kind.as_str().to_string(),
                 available: caps.available,
                 detail: caps.detail,
             }

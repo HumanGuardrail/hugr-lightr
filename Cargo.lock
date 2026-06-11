@@ -683,6 +683,7 @@ dependencies = [
  "memmap2",
  "rayon",
  "tempfile",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -732,6 +733,7 @@ dependencies = [
  "libc",
  "lightr-core",
  "tempfile",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

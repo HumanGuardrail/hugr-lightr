@@ -533,7 +533,8 @@ fn apply_layers(tempdir: &Path, blobs: &[LayerBlob]) -> Result<u64> {
                         // All other permission semantics are skipped on Windows.
                         let readonly = (*mode & 0o200) == 0;
                         if readonly {
-                            let mut perms = fs::metadata(dest).map_err(LightrError::Io)?.permissions();
+                            let mut perms =
+                                fs::metadata(dest).map_err(LightrError::Io)?.permissions();
                             perms.set_readonly(true);
                             let _ = fs::set_permissions(dest, perms);
                         }

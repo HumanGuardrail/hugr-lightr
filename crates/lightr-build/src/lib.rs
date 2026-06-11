@@ -1276,13 +1276,18 @@ pub fn compose_down(stack_dir: &Path) -> Result<()> {
     let stop_file = stack_dir.join("stop");
     let _ = std::fs::write(&stop_file, b"");
 
-    // Kill supervisor by pid file if still running
-    let pid_file = stack_dir.join("pid");
-    if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    // Kill supervisor by pid file if still running.
+    // WIN-PATH: on Windows the supervisor is signalled via the stop file above;
+    // pid-based termination (TerminateProcess) is a future ring, so this
+    // unix-only kill is cfg-gated rather than left half-implemented.
+    #[cfg(unix)]
+    {
+        let pid_file = stack_dir.join("pid");
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                }
             }
         }
     }

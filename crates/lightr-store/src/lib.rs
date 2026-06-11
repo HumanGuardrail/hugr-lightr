@@ -4,9 +4,9 @@
 use lightr_core::{Digest, LightrError, RefRecord, Result};
 #[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
-use std::fs::{self, File};
 #[cfg(unix)]
 use std::fs::Permissions;
+use std::fs::{self, File};
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -364,10 +364,10 @@ fn cow_refs_block_clone(src: &Path, dst: &Path) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::FALSE;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandleEx, FileStandardInfo, FILE_STANDARD_INFO,
+        FileStandardInfo, GetFileInformationByHandleEx, FILE_STANDARD_INFO,
     };
     use windows_sys::Win32::System::Ioctl::{
-        FSCTL_DUPLICATE_EXTENTS_TO_FILE, DUPLICATE_EXTENTS_DATA,
+        DUPLICATE_EXTENTS_DATA, FSCTL_DUPLICATE_EXTENTS_TO_FILE,
     };
     use windows_sys::Win32::System::IO::DeviceIoControl;
 
@@ -546,9 +546,8 @@ impl Store {
             use windows_sys::Win32::System::IO::OVERLAPPED;
             // Flags = 0: shared, blocking.
             let mut ol: OVERLAPPED = unsafe { std::mem::zeroed() };
-            let ret = unsafe {
-                LockFileEx(f.as_raw_handle() as _, 0, 0, u32::MAX, u32::MAX, &mut ol)
-            };
+            let ret =
+                unsafe { LockFileEx(f.as_raw_handle() as _, 0, 0, u32::MAX, u32::MAX, &mut ol) };
             if ret == FALSE {
                 return Err(LightrError::Io(std::io::Error::last_os_error()));
             }

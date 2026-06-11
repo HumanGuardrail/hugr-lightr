@@ -770,9 +770,10 @@ mod wsl_impl {
             // WSL2 + a registered distro. Probe (probe_wsl) gates `engine_for`
             // before we get here, so reaching this with no WSL is not expected;
             // we still fail closed if `wsl.exe` cannot be spawned.
-            let (prog, args) = spec.command.split_first().ok_or_else(|| {
-                LightrError::InvalidRef("empty command".to_string())
-            })?;
+            let (prog, args) = spec
+                .command
+                .split_first()
+                .ok_or_else(|| LightrError::InvalidRef("empty command".to_string()))?;
 
             let mut cmd = std::process::Command::new("wsl.exe");
 

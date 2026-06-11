@@ -877,11 +877,7 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
 // supervisor unblocks the final ConnectNamedPipe via `win_pipe_nudge`.
 // Validatable only on a real Windows box.
 #[cfg(windows)]
-fn win_pipe_server_loop(
-    pipe_name: &str,
-    child_pid: i32,
-    done: &std::sync::atomic::AtomicBool,
-) {
+fn win_pipe_server_loop(pipe_name: &str, child_pid: i32, done: &std::sync::atomic::AtomicBool) {
     use std::fs::File;
     use std::io::{BufRead, BufReader, Write};
     use std::os::windows::io::FromRawHandle;
@@ -893,10 +889,7 @@ fn win_pipe_server_loop(
         PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
 
-    let wide: Vec<u16> = pipe_name
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
 
     loop {
         if done.load(Ordering::SeqCst) {
@@ -991,10 +984,7 @@ fn win_pipe_nudge(pipe_name: &str) {
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
 
-    let wide: Vec<u16> = pipe_name
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
