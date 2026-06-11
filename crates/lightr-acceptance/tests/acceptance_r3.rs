@@ -99,7 +99,7 @@ fn a22_build_memoizes() {
     let dockerfile_content = format!(
         "FROM scratch\n\
          COPY data.txt /src/data.txt\n\
-         RUN /bin/sh -c 'echo built >> {counter_str} && echo ran > /built.txt'\n"
+         RUN /bin/sh -c 'echo built >> {counter_str} && echo ran > built.txt'\n"
     );
     let df_path = ctx.path().join("Dockerfile");
     fs::write(&df_path, &dockerfile_content).unwrap();
@@ -218,7 +218,7 @@ fn a22_build_memoizes() {
 // After A22's third build the ref @t/b is the final state (data.txt=v2-changed,
 // /built.txt="ran"). Run a fresh build in its own home, then hydrate and assert:
 //   - dest/src/data.txt exists and has the last data.txt content
-//   - dest/built.txt exists with content "ran\n" (from `echo ran > /built.txt`)
+//   - dest/built.txt exists with content "ran\n" (from `echo ran > built.txt`)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -236,7 +236,7 @@ fn a23_build_hydrate() {
     let dockerfile_content = format!(
         "FROM scratch\n\
          COPY data.txt /src/data.txt\n\
-         RUN /bin/sh -c 'echo built >> {counter_str} && echo ran > /built.txt'\n"
+         RUN /bin/sh -c 'echo built >> {counter_str} && echo ran > built.txt'\n"
     );
     let df_path = ctx.path().join("Dockerfile");
     fs::write(&df_path, &dockerfile_content).unwrap();
@@ -256,7 +256,7 @@ fn a23_build_hydrate() {
     // Hydrate the built ref into a destination directory.
     let dest = TempDir::new().unwrap();
     let hydrate_out = lightr_cmd(home.path())
-        .args(["hydrate", "@t/b", dest.path().to_str().unwrap()])
+        .args(["hydrate", dest.path().to_str().unwrap(), "--name", "@t/b"])
         .output()
         .expect("hydrate must not fail to spawn");
     assert_eq!(
@@ -282,13 +282,13 @@ fn a23_build_hydrate() {
     let hydrated_built = dest.path().join("built.txt");
     assert!(
         hydrated_built.exists(),
-        "dest/built.txt must exist (created by RUN `echo ran > /built.txt`)"
+        "dest/built.txt must exist (created by RUN `echo ran > built.txt`)"
     );
     let built_content = fs::read_to_string(&hydrated_built).unwrap();
     assert_eq!(
         built_content.trim(),
         "ran",
-        "dest/built.txt must contain 'ran' (echo ran > /built.txt); got: {:?}",
+        "dest/built.txt must contain 'ran' (echo ran > built.txt); got: {:?}",
         built_content
     );
 }
@@ -574,7 +574,7 @@ fn a25_docker_compat() {
 // ─────────────────────────────────────────────────────────────────────────────
 // A26 — build determinism flag
 //
-// A Dockerfile with `RUN /bin/sh -c 'date > /ts.txt'`.
+// A Dockerfile with `RUN /bin/sh -c 'date > ts.txt'`.
 // `build -t @t/c --explain <ctx>` → exit 0 (build still succeeds) and
 // stderr flags the RUN as non-reproducible (contains "date" or "non-reprodu").
 // The `step_reads_clock_or_net` heuristic in lightr-build flags the `date`
@@ -589,7 +589,7 @@ fn a26_build_determinism_flag() {
     // Dockerfile with a RUN that reads the clock.
     fs::write(
         ctx.path().join("Dockerfile"),
-        "FROM scratch\nRUN /bin/sh -c 'date > /ts.txt'\n",
+        "FROM scratch\nRUN /bin/sh -c 'date > ts.txt'\n",
     )
     .unwrap();
 
