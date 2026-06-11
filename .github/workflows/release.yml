@@ -71,12 +71,15 @@ jobs:
         run: rustup target add ${{ matrix.rust-target }}
 
       # aarch64 Linux is cross-linked from an x86_64 runner.
-      - name: Install aarch64 Linux cross linker
+      - name: Install aarch64 Linux cross toolchain
         if: ${{ matrix.cross-linux }}
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+          # Linker for the Rust link step + CC for cc-rs build scripts
+          # (blake3/ring compile C for the target).
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry + build artefacts
         uses: Swatinem/rust-cache@v2
