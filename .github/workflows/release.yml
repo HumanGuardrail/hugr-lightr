@@ -1,23 +1,19 @@
 # release.yml — tag-triggered release pipeline for lightr.
 #
-# TRIGGER: tag push matching v* ONLY.
-# Nothing is published unless the owner pushes a deliberate version tag.
+# TRIGGER: tag push matching v* ONLY. Nothing publishes without a deliberate tag.
 #
-# MATRIX:
-#   macos-14   → arm64  (darwin-arm64)
-#   macos-13   → x86_64 (darwin-x86_64)
-#   ubuntu-latest → x86_64-unknown-linux-gnu (linux-x86_64)
+# MATRIX (5 targets — full desktop coverage):
+#   macos-14       → aarch64-apple-darwin      (darwin-arm64)
+#   macos-14       → x86_64-apple-darwin       (darwin-x86_64, cross from arm64)
+#   ubuntu-latest  → x86_64-unknown-linux-gnu  (linux-x86_64)
+#   ubuntu-latest  → aarch64-unknown-linux-gnu (linux-aarch64, cross-linked)
+#   windows-latest → x86_64-pc-windows-msvc    (windows-x86_64, .zip)
 #
-# SIGNING/NOTARIZATION (macOS):
-#   Steps are present but GATED. When the secrets below are absent the step
-#   prints a clear "signing skipped" message and the artifact is renamed with
-#   an -unsigned suffix so it is NEVER labelled as signed.
-#   Owner must supply all four secrets to the repository before signing runs:
-#
-#     APPLE_CERT            — base64-encoded .p12 Developer ID certificate
-#     APPLE_CERT_PASSWORD   — passphrase for the .p12
-#     AC_API_KEY            — App Store Connect API key (JSON)
-#     AC_API_KEY_ID         — The key ID component of the API key
+# SIGNING/NOTARIZATION (macOS): present but GATED on secrets; unsigned artifacts
+# are clearly suffixed -unsigned and NEVER labelled as signed. macOS release
+# binaries are signed WITH the virtualization entitlement (packaging/
+# vz.entitlements) so `vz` works for end users out of the box. Owner supplies:
+# APPLE_CERT, APPLE_CERT_PASSWORD, AC_API_KEY, AC_API_KEY_ID.
 #
 # CONCURRENCY: superseded tag runs on the same ref are cancelled.
 
@@ -33,9 +29,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # build — one job per matrix target; produces a signed (or -unsigned) tarball
-  # ---------------------------------------------------------------------------
   build:
     name: build (${{ matrix.os-tag }}-${{ matrix.arch-tag }})
     runs-on: ${{ matrix.runner }}
@@ -48,7 +41,7 @@ jobs:
             os-tag: darwin
             arch-tag: arm64
             rust-target: aarch64-apple-darwin
-          - runner: macos-13
+          - runner: macos-14
             os-tag: darwin
             arch-tag: x86_64
             rust-target: x86_64-apple-darwin
@@ -56,39 +49,44 @@ jobs:
             os-tag: linux
             arch-tag: x86_64
             rust-target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-latest
+            os-tag: linux
+            arch-tag: aarch64
+            rust-target: aarch64-unknown-linux-gnu
+            cross-linux: true
+          - runner: windows-latest
+            os-tag: windows
+            arch-tag: x86_64
+            rust-target: x86_64-pc-windows-msvc
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # rustup reads rust-toolchain.toml (channel = 1.96.0) and installs the
-      # pinned toolchain.  No explicit toolchain action needed.
+      # rustup reads rust-toolchain.toml (channel = 1.96.0).
       - name: Install toolchain (honor rust-toolchain.toml)
         run: rustup show
+
+      - name: Add rust target
+        run: rustup target add ${{ matrix.rust-target }}
+
+      # aarch64 Linux is cross-linked from an x86_64 runner.
+      - name: Install aarch64 Linux cross linker
+        if: ${{ matrix.cross-linux }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry + build artefacts
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --release -p lightr-cli
-
-      # ── strip ──────────────────────────────────────────────────────────────
-      - name: Strip binary
-        run: |
-          BINARY="target/release/lightr"
-          if command -v strip > /dev/null 2>&1; then
-            strip "$BINARY"
-            echo "=> strip complete"
-          else
-            echo "=> strip not found; skipping"
-          fi
+        run: cargo build --release -p lightr-cli --target ${{ matrix.rust-target }}
+      # [profile.release] strip = true in Cargo.toml — the binary is already
+      # stripped by cargo; no separate strip step needed.
 
       # ── macOS signing + notarization (GATED on secrets) ───────────────────
-      #
-      # When APPLE_CERT is not set in the repository secrets the step echoes
-      # a clear advisory and the artifact keeps its -unsigned suffix.
-      # When secrets ARE set the step signs and notarizes the binary so that
-      # Gatekeeper accepts it without any quarantine prompt.
       - name: Sign and notarize (macOS)
         if: ${{ runner.os == 'macOS' }}
         env:
@@ -97,124 +95,100 @@ jobs:
           AC_API_KEY: ${{ secrets.AC_API_KEY }}
           AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
         run: |
+          BINARY="target/${{ matrix.rust-target }}/release/lightr"
           if [ -z "${APPLE_CERT}" ]; then
             echo "signing skipped — Apple Developer secrets not set (owner provides)"
             echo "SIGNING_DONE=false" >> "$GITHUB_ENV"
           else
-            BINARY="target/release/lightr"
-
-            # Import Developer ID certificate into a temporary keychain.
             KEYCHAIN_PATH="$RUNNER_TEMP/lightr-signing.keychain-db"
             KEYCHAIN_PASSWORD="$(openssl rand -base64 20)"
             security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
             security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
             security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
             security list-keychains -d user -s "$KEYCHAIN_PATH" "$(security list-keychains -d user | sed s/\"//g)"
-
-            # Decode and import the .p12.
             CERT_PATH="$RUNNER_TEMP/certificate.p12"
             printf '%s' "$APPLE_CERT" | base64 --decode -o "$CERT_PATH"
-            security import "$CERT_PATH" -P "$APPLE_CERT_PASSWORD" \
-              -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-            security set-key-partition-list -S apple-tool:,apple:,codesign: \
-              -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-            # Sign with hardened runtime (required for notarization).
-            codesign --sign "Developer ID Application" \
-              --options runtime --timestamp \
-              --verbose "$BINARY"
-
-            # Notarize — submit and wait.
+            security import "$CERT_PATH" -P "$APPLE_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            # Hardened runtime + virtualization entitlement (so vz runs for users).
+            codesign --sign "Developer ID Application" --options runtime --timestamp \
+              --entitlements packaging/vz.entitlements --verbose "$BINARY"
             AC_KEY_PATH="$RUNNER_TEMP/ac_api_key.json"
             printf '%s' "$AC_API_KEY" > "$AC_KEY_PATH"
             DMG_PATH="$RUNNER_TEMP/lightr-notarize.dmg"
             hdiutil create -srcfolder "$BINARY" -volname lightr "$DMG_PATH"
-            xcrun notarytool submit "$DMG_PATH" \
-              --key "$AC_KEY_PATH" \
-              --key-id "$AC_API_KEY_ID" \
-              --wait
-
+            xcrun notarytool submit "$DMG_PATH" --key "$AC_KEY_PATH" --key-id "$AC_API_KEY_ID" --wait
             echo "SIGNING_DONE=true" >> "$GITHUB_ENV"
           fi
 
-      # ── package tarball ────────────────────────────────────────────────────
-      - name: Package tarball
-        id: package
+      # ── package: unix tarball ──────────────────────────────────────────────
+      - name: Package tarball (unix)
+        id: package_unix
+        if: ${{ runner.os != 'Windows' }}
         run: |
-          TAG="${GITHUB_REF_NAME}"          # e.g. v0.1.0
-          VERSION="${TAG#v}"                # strip leading 'v'
-          OS_TAG="${{ matrix.os-tag }}"
-          ARCH_TAG="${{ matrix.arch-tag }}"
-          BINARY="target/release/lightr"
-
-          # Determine the suffix: -unsigned when signing was skipped on macOS.
+          TAG="${GITHUB_REF_NAME}"; VERSION="${TAG#v}"
+          OS_TAG="${{ matrix.os-tag }}"; ARCH_TAG="${{ matrix.arch-tag }}"
+          BINARY="target/${{ matrix.rust-target }}/release/lightr"
           UNSIGNED_SUFFIX=""
           if [ "${{ runner.os }}" = "macOS" ] && [ "${SIGNING_DONE:-false}" = "false" ]; then
             UNSIGNED_SUFFIX="-unsigned"
           fi
-
-          TARBALL_NAME="lightr-${VERSION}-${OS_TAG}-${ARCH_TAG}${UNSIGNED_SUFFIX}.tar.gz"
-
+          TARBALL="lightr-${VERSION}-${OS_TAG}-${ARCH_TAG}${UNSIGNED_SUFFIX}.tar.gz"
           STAGE_DIR="$(mktemp -d)"
-          cp "$BINARY" "$STAGE_DIR/lightr"
-          chmod 755 "$STAGE_DIR/lightr"
-
-          tar -czf "$TARBALL_NAME" -C "$STAGE_DIR" lightr
-
-          # Compute sha256 (cross-platform).
+          cp "$BINARY" "$STAGE_DIR/lightr"; chmod 755 "$STAGE_DIR/lightr"
+          tar -czf "$TARBALL" -C "$STAGE_DIR" lightr
           if command -v sha256sum > /dev/null 2>&1; then
-            SHA256="$(sha256sum "$TARBALL_NAME" | awk '{print $1}')"
+            SHA256="$(sha256sum "$TARBALL" | awk '{print $1}')"
           else
-            SHA256="$(shasum -a 256 "$TARBALL_NAME" | awk '{print $1}')"
+            SHA256="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
           fi
+          echo "$SHA256  $TARBALL" > "${TARBALL}.sha256"
+          echo "artifact=${TARBALL}" >> "$GITHUB_OUTPUT"
 
-          echo "$SHA256  $TARBALL_NAME" > "${TARBALL_NAME}.sha256"
+      # ── package: windows zip ───────────────────────────────────────────────
+      - name: Package zip (windows)
+        id: package_win
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $TAG = "${env:GITHUB_REF_NAME}"; $VERSION = $TAG.TrimStart('v')
+          $BINARY = "target/${{ matrix.rust-target }}/release/lightr.exe"
+          $ZIP = "lightr-$VERSION-windows-${{ matrix.arch-tag }}.zip"
+          Compress-Archive -Path $BINARY -DestinationPath $ZIP -Force
+          $HASH = (Get-FileHash -Path $ZIP -Algorithm SHA256).Hash.ToLower()
+          "$HASH  $ZIP" | Out-File -FilePath "$ZIP.sha256" -Encoding ascii -NoNewline
+          "artifact=$ZIP" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
 
-          echo "tarball=${TARBALL_NAME}" >> "$GITHUB_OUTPUT"
-          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      # ── upload per-matrix artifact for the release job ────────────────────
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.os-tag }}-${{ matrix.arch-tag }}
           path: |
-            ${{ steps.package.outputs.tarball }}
-            ${{ steps.package.outputs.tarball }}.sha256
+            ${{ steps.package_unix.outputs.artifact || steps.package_win.outputs.artifact }}
+            ${{ steps.package_unix.outputs.artifact || steps.package_win.outputs.artifact }}.sha256
           if-no-files-found: error
           retention-days: 1
 
-  # ---------------------------------------------------------------------------
-  # release — download all matrix artifacts, assemble SHA256SUMS, publish
-  # ---------------------------------------------------------------------------
   release:
     name: publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: release-*
           path: dist/
           merge-multiple: true
-
       - name: Assemble SHA256SUMS
         run: |
           cd dist/
-          # Merge all per-tarball .sha256 sidecar files into one SHA256SUMS.
-          cat *.sha256 > SHA256SUMS
-          echo "=== SHA256SUMS ==="
-          cat SHA256SUMS
-
+          cat ./*.sha256 > SHA256SUMS
+          echo "=== SHA256SUMS ==="; cat SHA256SUMS
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -225,4 +199,5 @@ jobs:
           generate_release_notes: true
           files: |
             dist/*.tar.gz
+            dist/*.zip
             dist/SHA256SUMS

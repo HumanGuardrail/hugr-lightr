@@ -1,6 +1,7 @@
-# CI gate — mirrors scripts/gate.sh exactly.
-# GitHub-hosted runners: rustup honors rust-toolchain.toml (1.96.0) normally.
-# The founder-Mac proxy workaround is NOT needed here; do not add it.
+# CI gate — fmt / clippy / test across the OS matrix, plus cross-typecheck for
+# the targets without a native runner. Mirrors scripts/gate.sh on each host.
+# GitHub-hosted runners honor rust-toolchain.toml (1.96.0); the founder-Mac
+# proxy workaround is NOT needed here.
 
 name: ci
 
@@ -9,47 +10,19 @@ on:
     branches: [main]
   pull_request:
 
-# Cancel superseded runs on the same ref so queue doesn't pile up.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # fmt (once, platform-agnostic) + clippy + test on each native host OS.
   gate:
-    name: gate (fmt / clippy / test)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # rustup reads rust-toolchain.toml at repo root and installs 1.96.0
-      # including the rustfmt + clippy components declared there.
-      # No explicit toolchain action needed; `rustup show` forces the install.
-      - name: Install toolchain (honor rust-toolchain.toml)
-        run: |
-          rustup show         # triggers rust-toolchain.toml resolution + component install
-          rustup component add rustfmt clippy  # idempotent; ensures components present
-
-      - name: Cache cargo registry + build artefacts
-        uses: Swatinem/rust-cache@v2
-
-      # --- gate commands identical to scripts/gate.sh ---
-
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy -D warnings
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: cargo test
-        run: cargo test --workspace
-        # LIGHTR_NET_TESTS is intentionally NOT set; network tests are excluded.
-
-  bench:
-    name: bench (perf-regression visibility)
-    runs-on: ubuntu-latest
-    needs: gate
+    name: gate (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-14, windows-latest]
 
     steps:
       - name: Checkout
@@ -63,13 +36,62 @@ jobs:
       - name: Cache cargo registry + build artefacts
         uses: Swatinem/rust-cache@v2
 
+      - name: cargo fmt --check
+        if: ${{ matrix.runner == 'ubuntu-latest' }}
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+        # LIGHTR_NET_TESTS intentionally unset; network tests excluded.
+
+  # Cross-typecheck targets with no native runner above (linux/aarch64), so a
+  # cfg break is caught. macOS-arm64 + windows-x86_64 are natively gated above.
+  cross-check:
+    name: cross-check (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-unknown-linux-gnu]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain (honor rust-toolchain.toml)
+        run: rustup show
+
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo registry + build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (cross)
+        run: cargo check --workspace --target ${{ matrix.target }}
+
+  bench:
+    name: bench (perf-regression visibility)
+    runs-on: ubuntu-latest
+    needs: gate
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain (honor rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo registry + build artefacts
+        uses: Swatinem/rust-cache@v2
+
       - name: Build release binary
         run: cargo build --release
 
-      # NOTE: bench budgets are tuned to the dev box (founder Mac).
-      # GitHub-hosted runners are a different machine class — a failure here
-      # indicates a possible regression but MUST be investigated before blocking
-      # a merge; it does not automatically mean the code is broken.
-      # The job still runs unconditionally for visibility.
+      # Bench budgets are tuned to the dev box; a failure here is a regression
+      # signal to investigate, not an automatic merge block. Runs for visibility.
       - name: Run bench --check
         run: ./target/release/lightr bench --check
