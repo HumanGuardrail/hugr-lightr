@@ -35,3 +35,23 @@ rigor sota. Tudo impecavel."
 4. Spikes that require external downloads/new VMs (S1–S3, S5) are NOT run
    tonight; only S4 (clonefile storm, local, read-safe) informs the wave.
    R0 scope deliberately excludes spike-dependent features (views/vz).
+
+## 2026-06-11 (overnight) — Lead amendments during R0 integration
+
+**Authorized-by:** lead under the overnight mandate; flagged for morning
+review. All gates green after each amendment.
+
+1. **Integrity law refined (spec §4/§7/§8, A7 split).** CoW materialization
+   is metadata-only and cannot re-hash; the frozen A7 contradicted the
+   O(metadata) bar. Resolution: verification lives where bytes are READ —
+   manifests/refs/AC are always re-hashed (default fail-closed; A7b) — and
+   the paranoid full re-hash is explicit: `lightr hydrate --verify` /
+   `lightr_index::hydrate_verified` (A7a). fs-verity (R2, ADR-0009) closes
+   the kernel-side gap. Also fixed: parallel materialize silently discarded
+   errors (now fail-closed, first error aborts).
+2. **Dep-list amendments (spec §2):** `blake3` allowed in lightr-run (key
+   assembly needs a streaming hasher); `tempfile` allowed as a lightr-cli
+   runtime dep (bench fixtures).
+3. **Test-isolation law (all crates):** env-mutating tests serialize on a
+   static lock and isolate LIGHTR_HOME in tempdirs; index temp-files are
+   per-thread unique (PID alone collided under the parallel test runner).

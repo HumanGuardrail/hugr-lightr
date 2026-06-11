@@ -38,6 +38,9 @@ enum Cmd {
         dest: String,
         #[arg(long)]
         name: String,
+        /// Re-hash every object before materializing (paranoid path)
+        #[arg(long)]
+        verify: bool,
     },
     /// Compare a directory against a ref (exit 0 clean, 1 dirty)
     Status {
@@ -74,7 +77,9 @@ fn main() {
 fn dispatch(cli: Cli) -> ! {
     match cli.cmd {
         Cmd::Snapshot { dir, name } => handlers::snapshot::run(&dir, &name, cli.json, cli.explain),
-        Cmd::Hydrate { dest, name } => handlers::hydrate::run(&dest, &name, cli.json, cli.explain),
+        Cmd::Hydrate { dest, name, verify } => {
+            handlers::hydrate::run(&dest, &name, verify, cli.json, cli.explain)
+        }
         Cmd::Status { dir, name } => handlers::status::run(&dir, &name, cli.json, cli.explain),
         Cmd::Run {
             dir,
@@ -154,9 +159,10 @@ mod tests {
     fn hydrate_minimal() {
         let cli = parse(&["hydrate", "/dest", "--name", "v1"]);
         match cli.cmd {
-            super::Cmd::Hydrate { dest, name } => {
+            super::Cmd::Hydrate { dest, name, verify } => {
                 assert_eq!(dest, "/dest");
                 assert_eq!(name, "v1");
+                assert!(!verify);
             }
             _ => panic!("wrong cmd"),
         }

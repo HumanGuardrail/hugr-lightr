@@ -6,7 +6,7 @@
 //! --explain (≤4 lines to stderr):
 //!   lightr: explain hydrate: rung=<rung> files=<n>
 
-use lightr_index::hydrate;
+use lightr_index::{hydrate, hydrate_verified};
 use lightr_store::{CowRung, Store};
 use serde::Serialize;
 
@@ -38,14 +38,19 @@ fn rung_lower(r: CowRung) -> &'static str {
     }
 }
 
-pub fn run(dest: &str, name: &str, json: bool, explain: bool) -> ! {
+pub fn run(dest: &str, name: &str, verify: bool, json: bool, explain: bool) -> ! {
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
         Err(e) => die_from_error(&e),
     };
 
     let dest_path = std::path::Path::new(dest);
-    let report = match hydrate(dest_path, &store, name) {
+    let result = if verify {
+        hydrate_verified(dest_path, &store, name)
+    } else {
+        hydrate(dest_path, &store, name)
+    };
+    let report = match result {
         Ok(r) => r,
         Err(e) => die_from_error(&e),
     };
