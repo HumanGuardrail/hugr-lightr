@@ -41,8 +41,8 @@
 | F-202 | exec/logs/ps/stop | ✅ | A9, A10, A9b, A9e |
 | F-203 | resource limits | ⏳ | reserved; honest — needs ns/vz (decisions-log) |
 | F-204 | ns engine (Linux) | 🟡 | code complete; probe honest on macOS (A19); CI-gated on Linux |
-| F-205 | vz engine boot-never | 🟡 | shim+kernel behind `vz` feature; probe honest (A19); boot = spike S5 (Apple Silicon) |
-| F-206 | Apple kernel + Rust PID1 | 🟡 | shim authored; validated by S5 |
+| F-205 | vz engine boot-never | 🟡 | shim behind `vz` feature (compiles+lints clean w/ swiftc); **real vsock exit-code receiver — fake exitCode=0 KILLED** (prod phase); boot itself = spike S5 (Apple Silicon) |
+| F-206 | Apple kernel + Rust PID1 | 🟡 | **`lightr-init` crate: guest PID1 with real exit reporting, host-tested**; cpio pack assembly real+tested; kernel sourcing + boot = S5 |
 | F-207 | guest views over store | ⏳ | with vz boot, future |
 | F-208 | Rosetta x86 | ⏳ | vz path, future |
 | F-209 | fc engine (cloud) | ⏳ | Runners fabric, future |
@@ -51,7 +51,7 @@
 | F | Feature | Status | Evidence |
 |---|---|---|---|
 | F-301 | oci import (layout/tar) | ✅ | A17, A17b/c/d (sha256, whiteout, hardlink) |
-| F-302 | registry push/pull | 🟡 | pull ✅ (A21 liveness; sha256 verify); push ⏳ (Stage 2) |
+| F-302 | registry push/pull | 🟡 | pull ✅ **hardened** (private-registry auth via ~/.docker/config.json, retry/backoff on 429/5xx, streaming blobs, typed HTTP status, multi-arch — prod phase); push ⏳ (Stage 2) |
 | F-303 | volumes/binds (--mount) | ✅ | A9c grammar; mount unit |
 | F-304 | networking (DNS/VPN/-p) | 🟡 | compose port-binding (A24); full DNS/VPN parity = vz networking, future |
 | F-305 | compose lazy | ✅ | A24 (0 services until connect; down cleans) |
@@ -87,8 +87,17 @@
 | F-601 | single binary ≤10 MB | ✅ | release 1.9 MB (bench B7) |
 | F-602 | `bench --vs-docker` | ✅ | bench cmd; B1–B11 |
 | F-603 | microwave floor (1 core/512 MB/POSIX) | 🟡 | copy-rung fallback coded; not yet measured on constrained HW |
-| F-604 | brew/curl/gh-releases signed | ⏳ | gated on ADR-0008 license (owner) |
+| F-604 | brew/curl/gh-releases signed | 🟡 | **machinery prepared** (packaging/: install.sh, lightr.rb, release.sh — all fail-loud/license-gated); publish ⏳ on ADR-0008 (owner) |
 | F-605 | zero telemetry | ✅ | A6 + no network in core (ADR-0007) |
+
+## Operational (production hardening phase, 2026-06-12)
+| Item | Status | Evidence |
+|---|---|---|
+| Crash durability | ✅ | fsync of file + parent dir on every atomic write (lightr-store) |
+| Concurrent gc safety | ✅ | shared (writers) / exclusive (gc) flock — gc can't sweep a live write |
+| CI gate | ✅ | `.github/workflows/ci.yml`: fmt/clippy -D/test + bench, honors rust-toolchain.toml |
+| Registry robustness | ✅ | private auth, retry/backoff, streaming, typed status, multi-arch |
+| Outward tense-discipline | ✅ | README "Honest status" box + whitepaper §1 aspirational marker match this ledger |
 
 ## Summary
 - **✅ done + tested:** the entire local product — store, index, all R0 verbs,

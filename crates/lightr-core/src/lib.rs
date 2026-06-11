@@ -441,14 +441,23 @@ pub fn ref_key(name: &str) -> Digest {
 pub enum LightrError {
     NotFound(Digest),
     RefNotFound(String),
-    Integrity { expected: Digest, actual: Digest },
-    TooLarge { size: u64, cap: u64 },
+    Integrity {
+        expected: Digest,
+        actual: Digest,
+    },
+    TooLarge {
+        size: u64,
+        cap: u64,
+    },
     InvalidRef(String),
     InvalidManifest(String),
     /// Registry/network protocol error (OCI pull), with the HTTP status.
     /// Distinct from Io so auth (401/403), not-found (404), rate-limit (429)
     /// and 5xx surface their own message instead of collapsing to "Io".
-    Registry { status: u16, msg: String },
+    Registry {
+        status: u16,
+        msg: String,
+    },
     Io(std::io::Error),
 }
 
