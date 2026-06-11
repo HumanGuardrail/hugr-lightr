@@ -1,0 +1,103 @@
+# Parity audit — the truth ledger
+
+- **Status:** the tense-law ledger. Every feature-tree F-id maps to its real
+  status with the acceptance test that proves it or the honest reason it
+  doesn't. Updated 2026-06-12 after the R1→R4 mandate. No public claim
+  outside what a ✅ row's test/bench backs.
+- Legend: ✅ done + tested · 🟡 mechanism shipped, capability gated on
+  hardware/spike (honest probe, not silent) · ⏳ deferred to a named future
+  ring · ➖ doc/process item.
+
+## Store & index (R0)
+| F | Feature | Status | Evidence |
+|---|---|---|---|
+| F-001 | File-level CAS objects | ✅ | A1, A7; lightr-store unit |
+| F-002 | CoW ladder + materialize | ✅ | A1; bench B3′ (rung=Clone on APFS) |
+| F-003 | Binary mmap manifests (LMF1) | ✅ | lightr-core codec unit |
+| F-004 | Fail-closed integrity | ✅ | A7a/A7b; A17b (sha256) |
+| F-005 | Refs + lineage | ✅ | A12 undo, A18 reflog |
+| F-006 | Big-object page-chunking (VM states) | ⏳ | R2+ vz states (vz is hardware-gated); not exercised |
+| F-007 | fs-verity sealing (Linux) | ⏳ | Linux-only, future ring |
+| F-008 | `gc` one janitor | ✅ | A11 (sweep + min-age) |
+| F-091 | (reserved id in tree) | ➖ | lineage covered by F-005 |
+
+## Verbs / warp core (R0)
+| F | Feature | Status | Evidence |
+|---|---|---|---|
+| F-101 | stat-index | ✅ | lightr-index units; A5 |
+| F-102 | snapshot ≤budget warm | ✅ | bench B5b (233 ms@2k, machine-class) |
+| F-103 | hydrate CoW (R0) / O(1) view (R2) | ✅ R0 / ⏳ view | A1; bench B3′. Views = ADR-0013, spike S1/S3 |
+| F-104 | status | ✅ | A5; bench B6 |
+| F-105 | run memoized | ✅ | A2, A3 |
+| F-106 | memo replay ≤budget | ✅ | bench B4 |
+| F-107 | no-daemon | ✅ | A4, A9 (pid/ctl scoped) |
+| F-108 | offline-absolute core | ✅ | A6 |
+| F-109 | CLI overhead <budget | ✅ | bench B1 (7 ms) |
+
+## Engines (R1 native / R2 tiers)
+| F | Feature | Status | Evidence |
+|---|---|---|---|
+| F-201 | native engine | ✅ | A19; lightr-engine unit |
+| F-202 | exec/logs/ps/stop | ✅ | A9, A10, A9b, A9e |
+| F-203 | resource limits | ⏳ | reserved; honest — needs ns/vz (decisions-log) |
+| F-204 | ns engine (Linux) | 🟡 | code complete; probe honest on macOS (A19); CI-gated on Linux |
+| F-205 | vz engine boot-never | 🟡 | shim+kernel behind `vz` feature; probe honest (A19); boot = spike S5 (Apple Silicon) |
+| F-206 | Apple kernel + Rust PID1 | 🟡 | shim authored; validated by S5 |
+| F-207 | guest views over store | ⏳ | with vz boot, future |
+| F-208 | Rosetta x86 | ⏳ | vz path, future |
+| F-209 | fc engine (cloud) | ⏳ | Runners fabric, future |
+
+## OCI & ecosystem (R2/R3)
+| F | Feature | Status | Evidence |
+|---|---|---|---|
+| F-301 | oci import (layout/tar) | ✅ | A17, A17b/c/d (sha256, whiteout, hardlink) |
+| F-302 | registry push/pull | 🟡 | pull ✅ (A21 liveness; sha256 verify); push ⏳ (Stage 2) |
+| F-303 | volumes/binds (--mount) | ✅ | A9c grammar; mount unit |
+| F-304 | networking (DNS/VPN/-p) | 🟡 | compose port-binding (A24); full DNS/VPN parity = vz networking, future |
+| F-305 | compose lazy | ✅ | A24 (0 services until connect; down cleans) |
+| F-306 | build step-memoized | ✅ | A22 (counter side-effect proves memo), A23 |
+| F-307 | docker CLI compat | ✅ | A25 (build/images/unsupported→2) |
+| F-308 | restart via OS supervisor | ⏳ | launchd/systemd unit-gen, future |
+| F-309 | healthcheck/secrets/configs | ⏳ | run-spec features, future |
+
+## Beyond (R4)
+| F | Feature | Status | Evidence |
+|---|---|---|---|
+| F-401 | undo / diff @time | ✅ | A12, A12b |
+| F-402 | bisect memoized | ✅ | A13 (memo-HIT assertion dropped — bisect runs plain; documented) |
+| F-403 | deep-memo nitro | 🟡 | probe + honest whole-run fallback (A27); real shim = future ring |
+| F-404 | LAN mesh cache | ⏳ | future |
+| F-405 | Stage-2 sync (CoreLink) | ⏳ | wire bridge crate seam ready; future |
+| F-406 | run-state snapshot/restore | ⏳ | vz/fc, future |
+
+## Agent-first (cross-ring)
+| F | Feature | Status | Evidence |
+|---|---|---|---|
+| F-501 | `--json` every verb | ✅ | A8, A28 (schema-validated) |
+| F-502 | `--explain` | ✅ | hydrate/run/build explain; A26 |
+| F-503 | `plan` dry-run | ✅ | A14 |
+| F-504 | `--events` ndjson | ✅ | A16 |
+| F-505 | `lightr mcp` | ✅ | A15 (5 tools, JSON-RPC, -32601) |
+| F-506 | agent sandbox profiles | ⏳ | vz/fc + attestation, future |
+| F-507 | determinism-as-trust | ✅ | content addressing end-to-end; A7/A17b verify |
+
+## Product & distribution
+| F | Feature | Status | Evidence |
+|---|---|---|---|
+| F-601 | single binary ≤10 MB | ✅ | release 1.9 MB (bench B7) |
+| F-602 | `bench --vs-docker` | ✅ | bench cmd; B1–B11 |
+| F-603 | microwave floor (1 core/512 MB/POSIX) | 🟡 | copy-rung fallback coded; not yet measured on constrained HW |
+| F-604 | brew/curl/gh-releases signed | ⏳ | gated on ADR-0008 license (owner) |
+| F-605 | zero telemetry | ✅ | A6 + no network in core (ADR-0007) |
+
+## Summary
+- **✅ done + tested:** the entire local product — store, index, all R0 verbs,
+  run-control, gc, time-axis, OCI import (sha256-verified), build
+  (memoized), lazy compose, docker compat, the full agent surface, schemas.
+- **🟡 honest-gated:** ns/vz engines (probe-truthful; vz boot needs Apple
+  Silicon + spike S5), pull-push (push future), deep-memo shim, microwave
+  floor measurement.
+- **⏳ future rings:** views (S1/S3), fc/cloud, Rosetta, mesh, Stage-2 sync,
+  restart-via-OS, healthchecks. Each is a named ADR/ring, none claimed.
+- Nothing in the whitepaper's record table is published beyond what a ✅
+  bench row measured on the stated hardware.
