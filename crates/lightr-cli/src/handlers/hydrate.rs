@@ -26,6 +26,7 @@ fn rung_str(r: CowRung) -> &'static str {
         CowRung::Reflink => "Reflink",
         CowRung::CopyRange => "CopyRange",
         CowRung::Copy => "Copy",
+        CowRung::RefsBlockClone => "RefsBlockClone",
     }
 }
 
@@ -35,6 +36,7 @@ fn rung_lower(r: CowRung) -> &'static str {
         CowRung::Reflink => "reflink",
         CowRung::CopyRange => "copyrange",
         CowRung::Copy => "copy",
+        CowRung::RefsBlockClone => "refsblockclone",
     }
 }
 

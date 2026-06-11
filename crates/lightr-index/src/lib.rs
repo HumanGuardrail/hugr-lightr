@@ -5,16 +5,16 @@
 use lightr_core::{Digest, Entry, LightrError, Manifest, RefRecord, Result};
 use lightr_store::{CowRung, Store};
 use rayon::prelude::*;
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::{
     collections::HashMap,
     io::{self, Write as _},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
-#[cfg(unix)]
-use std::fs::File;
-#[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 // ---------------------------------------------------------------------------
 // fsync helper
@@ -316,7 +316,11 @@ fn stat_fields(meta: &std::fs::Metadata) -> (u64, u64, u64, u32) {
     #[cfg(unix)]
     let mode = meta.permissions().mode() & 0o7777;
     #[cfg(windows)]
-    let mode = if meta.permissions().readonly() { 0o444 } else { 0o644 };
+    let mode = if meta.permissions().readonly() {
+        0o444
+    } else {
+        0o644
+    };
     (mtime_ns, ino, size, mode)
 }
 
