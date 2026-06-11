@@ -1,6 +1,6 @@
 # ADR-0005 — Engine posture v0.1: native-only, no Engine trait yet
 
-- **Status:** Proposed
+- **Status:** Proposed — ⚠️ UNDER REWORK (performance bar, 2026-06-11: see `../spec/performance-bar.md`)
 - **Date:** 2026-06-11
 
 One line: v0.1 ships the `native` tier only, and it IS clw-run's process
@@ -17,8 +17,8 @@ processes with memoization. The runners repo owns the `Engine` lineage
 
 ## Decision
 
-1. v0.1 contains **no Engine trait** and no `cell-engine` crate.
-   `cell run` = clw-run `run_memoized` (which spawns the process natively).
+1. v0.1 contains **no Engine trait** and no `lightr-engine` crate.
+   `lightr run` = clw-run `run_memoized` (which spawns the process natively).
 2. **An abstraction with one implementation is a speculation** — the
    `Engine` trait enters in v0.2 together with the `vz` microVM engine, and
    when it does, it follows the runners contract shape

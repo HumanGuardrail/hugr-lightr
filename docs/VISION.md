@@ -1,4 +1,4 @@
-# Vision — why Cell exists
+# Vision — why Lightr exists
 
 ## The two pains
 
@@ -15,7 +15,7 @@ are expensive → poor bin-packing. The cure is not a faster process; it is
 
 ## What HuGR already has
 
-Cell is the missing third of a system that is two-thirds built:
+Lightr is the missing third of a system that is two-thirds built:
 
 - **CoreLink** (`corelink-server`) — production content-addressed store:
   FastCDC ~1 MiB chunks, BLAKE3, dedup, multi-region, Action Cache.
@@ -27,20 +27,20 @@ Cell is the missing third of a system that is two-thirds built:
   explicitly designed for the swap to Firecracker. Docker there is a
   declared placeholder.
 
-Cell = that `Engine`, promoted from internal seam to public product, with
+Lightr = that `Engine`, promoted from internal seam to public product, with
 clw as the distribution layer and CoreLink as the registry.
 
 ## The product in one line
 
-`cell run <workspace-ref> -- <cmd>` → resolve the manifest in CAS → sparse,
+`lightr run <workspace-ref> -- <cmd>` → resolve the manifest in CAS → sparse,
 lazy hydrate → execute under the right isolation for the context (native on
 dev Macs, namespaces on trusted Linux, Firecracker for multi-tenant) →
-memoize the result. The cheapest cell is the one that never runs: an Action
+memoize the result. The cheapest run is the one that never happens: an Action
 Cache hit returns in milliseconds without instantiating anything.
 
 ## What we can honestly promise
 
-| | Docker Desktop (Mac) | Cell local | Docker cloud | Cell cloud |
+| | Docker Desktop (Mac) | Lightr local | Docker cloud | Lightr cloud |
 |---|---|---|---|---|
 | Idle RAM | 2–4 GB | 0 | dockerd + image | ~5 MB/microVM |
 | "Pull" | whole layers | dedup chunks, lazy | layers | lazy, only what's touched |
@@ -53,7 +53,7 @@ defensible advantage is not "a faster container"; it is that nobody else
 ships a production CAS with chunk-level dedup and a memoizing Action Cache
 to anchor this (cross-tenant dedup is designed-in, staged post-GA). Modal,
 Fly and Depot built closed versions of this machinery for internal use;
-Cell is that machinery as a product.
+Lightr is that machinery as a product.
 
 ## The funnel
 
@@ -61,12 +61,12 @@ Cell is that machinery as a product.
                   ┌─────────────────────────────────────────────┐
   ACQUISITION     │  STAGE 0 — the pain                         │
                   │  Dev on a Mac, Docker Desktop eating 4 GB,  │
-                  │  fans spinning. `brew install hugr-cell`    │
+                  │  fans spinning. `brew install hugr-lightr`    │
                   │  fixes it in one command.                   │
                   └──────────────────┬──────────────────────────┘
                                      │ free, no signup
                   ┌──────────────────▼──────────────────────────┐
-  ACTIVATION      │  STAGE 1 — cell local (FREE, solo)          │
+  ACTIVATION      │  STAGE 1 — lightr local (FREE, solo)          │
                   │  hydrate + native/ephemeral-microVM run.    │
                   │  Cache 100% local (~/.clw/cache).           │
                   │  Works offline. Zero servers touched.       │
@@ -122,11 +122,11 @@ must close on intra-tenant dedup + memoization alone.
 ## Honesties
 
 1. **Stage 0→1 only works if the local product is spectacular standalone.**
-   If the first `cell run` requires an account, the funnel dies at the
+   If the first `lightr run` requires an account, the funnel dies at the
    door. Free local must genuinely be the best Docker killer on the Mac,
    period, with no visible agenda.
 2. **OrbStack already lives in that market** (beloved Docker Desktop
-   replacement). Cell's difference cannot be "a lighter VM" — it must be
+   replacement). Lightr's difference cannot be "a lighter VM" — it must be
    the CAS model: instant pull, dedup, memoization. Different category, but
    devs will compare on day one.
 3. **Sequencing matters.** Finish Runners M1 → extract `Engine` + clw into
