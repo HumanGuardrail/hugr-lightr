@@ -36,3 +36,27 @@ concurrent sessions. **Method:** `s4-clonefile-storm.rs`, serial loop,
 **Status:** S1 (NFS-loopback), S2 (VZ save/restore), S3 (composefs),
 S5 (Apple kernel + Rust PID1) — pending, need owner session (downloads/
 VMs/platform choices). S4 ✅ done.
+
+## First measured bench — release binary (2026-06-11, overnight)
+
+Machine: Intel i7-9750H (founder Mac), APFS, under concurrent-session load.
+Binary: 1.9 MB release (LTO fat, stripped). Fixture: 2k × 1 KiB + 1×8 MiB.
+`lightr bench --check` exit 0 — all budgets green:
+
+| Indicator | Measured (median-of-5) | Machine-class budget |
+|---|---|---|
+| B1 `--version` overhead | 7.4 ms | 15 ms |
+| B5a snapshot cold (2k files) | 361 ms | 2 500 ms |
+| B5b snapshot warm (index) | 233 ms | 500 ms |
+| B6 status warm | 34 ms | 500 ms |
+| B3′ hydrate (CoW clone) | 676 ms | 5 000 ms |
+| B4 run MISS overhead | 41 ms | 105 ms |
+| B2 run HIT (end-to-end) | 51 ms | 150 ms |
+| B7 binary size | **1.9 MB** | 10 MB |
+| B8 idle between runs | 0 processes | 0 |
+
+Note (tense law): an end-to-end memo HIT must re-validate inputs — a warm
+stat-walk (~45 ms @2k files on this box) — so the whitepaper's ~10 ms HIT
+target binds to the R2 views layer (mutation-tracked, no walk) and Apple
+Silicon hardware. Budgets B2/B4 recalibrated accordingly (lead amendment,
+logged).
