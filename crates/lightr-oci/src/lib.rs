@@ -43,7 +43,7 @@ use serde::Deserialize;
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::{
     fs,
-    io::{self, Read, Write},
+    io::{self, BufReader, Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -223,10 +223,47 @@ enum LayerBlob {
 }
 
 impl LayerBlob {
-    fn read_all(&self) -> io::Result<Vec<u8>> {
+    /// Open a streaming `Read` over the layer, auto-detecting gzip by magic bytes.
+    ///
+    /// # Streaming design (no whole-layer Vec)
+    ///
+    /// For `File`: open → `BufReader` → read the first 2 bytes for the gzip magic
+    /// (`0x1f 0x8b`). Those 2 bytes are chained back to the rest of the file via
+    /// `io::Cursor::new([b0,b1]).chain(rest)` so the caller sees a complete stream.
+    /// If gzip is detected the combined reader is wrapped in `flate2::read::GzDecoder`;
+    /// otherwise it is returned as-is. At no point is the full file read into RAM.
+    ///
+    /// For `Bytes`: the same peek-and-chain logic is applied to an `io::Cursor` over
+    /// the in-memory slice; behaviour is identical, no extra allocation.
+    fn open_reader(&self) -> io::Result<Box<dyn Read + '_>> {
         match self {
-            LayerBlob::File(p) => fs::read(p),
-            LayerBlob::Bytes(b) => Ok(b.clone()),
+            LayerBlob::File(p) => {
+                let file = fs::File::open(p)?;
+                let mut reader = BufReader::new(file);
+                // Peek the first 2 bytes to detect gzip magic.
+                let mut magic = [0u8; 2];
+                let n = reader.read(&mut magic)?;
+                // Chain the consumed bytes back so the tarball sees a complete stream.
+                let prefix = io::Cursor::new(magic[..n].to_vec());
+                let full: Box<dyn Read> = Box::new(prefix.chain(reader));
+                if n == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+                    Ok(Box::new(GzDecoder::new(full)))
+                } else {
+                    Ok(full)
+                }
+            }
+            LayerBlob::Bytes(b) => {
+                let mut cursor = io::Cursor::new(b.as_slice());
+                let mut magic = [0u8; 2];
+                let n = cursor.read(&mut magic)?;
+                let prefix = io::Cursor::new(magic[..n].to_vec());
+                let full: Box<dyn Read> = Box::new(prefix.chain(cursor));
+                if n == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+                    Ok(Box::new(GzDecoder::new(full)))
+                } else {
+                    Ok(full)
+                }
+            }
         }
     }
 }
@@ -280,18 +317,15 @@ fn apply_layers(tempdir: &Path, blobs: &[LayerBlob]) -> Result<u64> {
     let mut skipped: u64 = 0;
 
     for blob in blobs {
-        let raw_bytes = blob.read_all().map_err(LightrError::Io)?;
-
-        // Autodetect gzip: magic 0x1f 0x8b
-        let tar_bytes: Vec<u8> =
-            if raw_bytes.len() >= 2 && raw_bytes[0] == 0x1f && raw_bytes[1] == 0x8b {
-                let mut gz = GzDecoder::new(&raw_bytes[..]);
-                let mut decoded = Vec::new();
-                gz.read_to_end(&mut decoded).map_err(LightrError::Io)?;
-                decoded
-            } else {
-                raw_bytes
-            };
+        // Open a streaming reader over the blob.
+        //
+        // `open_reader` peeks the first 2 bytes for gzip magic (0x1f 0x8b), chains
+        // them back, and wraps in `flate2::read::GzDecoder` if compressed — all
+        // without reading the full layer into a Vec.  The `tar` crate's `Archive`
+        // accepts any `impl Read`, so decompression and entry parsing happen
+        // chunk-by-chunk through a bounded I/O buffer.
+        let reader = blob.open_reader().map_err(LightrError::Io)?;
+        let mut archive = tar::Archive::new(reader);
 
         // ── Pass 1: collect all operations ───────────────────────────────────
         //
@@ -317,9 +351,6 @@ fn apply_layers(tempdir: &Path, blobs: &[LayerBlob]) -> Result<u64> {
         // after this layer — even if the same layer also adds them (whiteout wins).
         let mut whited_out_paths: std::collections::HashSet<PathBuf> =
             std::collections::HashSet::new();
-
-        let cursor = io::Cursor::new(&tar_bytes);
-        let mut archive = tar::Archive::new(cursor);
 
         for entry_result in archive.entries().map_err(LightrError::Io)? {
             let mut entry = entry_result.map_err(LightrError::Io)?;
@@ -2294,29 +2325,53 @@ mod tests {
         }
     }
 
-    // ── WP-A-pull: streaming ≥64 MiB layer test ──────────────────────────────
+    // ── Streaming-apply path: ≥64 MiB uncompressed layer via LayerBlob::File ──
 
-    /// Build a ≥64 MiB layer fixture using tar+flate2 and import it through
-    /// the full apply_layers code path (which `pull` also uses via LayerBlob::File).
-    /// This ensures the streaming-to-temp-file path is exercised.
+    /// Verify that `apply_layers` streams a layer from a file (the `LayerBlob::File`
+    /// path taken by `pull`) without buffering the whole layer into a `Vec<u8>`.
+    ///
+    /// # What this test proves
+    ///
+    /// - `apply_layers` is called with `LayerBlob::File`, exercising `open_reader`'s
+    ///   file branch (the path that was previously doing `fs::read` into a full Vec).
+    /// - A ≥64 MiB **uncompressed** plain-tar layer (incompressible content: a 4 KiB
+    ///   XOR-chained pseudo-random pattern repeated to fill 64 MiB + 1 B) applies
+    ///   correctly and the resulting file has the right size and first/last bytes.
+    /// - The layer file on disk is genuinely large (asserted below), confirming the
+    ///   on-disk size is not compressed away.
+    ///
+    /// # What this test does NOT prove
+    ///
+    /// A unit test cannot instrument RAM usage; we cannot assert a hard RSS bound.
+    /// The claim "no whole-layer Vec" is guaranteed by code structure: `open_reader`
+    /// never calls `fs::read`, and `tar::Archive` iterates entries through its own
+    /// bounded I/O buffer.  Code review of `open_reader` + `apply_layers` is the
+    /// authoritative check for that invariant.
     #[test]
-    fn test_streaming_large_layer_import() {
+    fn test_apply_streams_without_buffering_whole_layer() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().unwrap();
         let (_home, store) = tmp_store_and_home();
 
-        // Build a layer containing one file of exactly 64 MiB + 1 byte.
-        // We use a gz-compressed tar (matching what `pull` produces).
-        const TARGET_SIZE: usize = 64 * 1024 * 1024 + 1; // 64 MiB + 1
+        // Build incompressible content: a 4 KiB pattern generated by a simple XOR
+        // chain so gzip cannot reduce it to a few KiB.
+        const FILE_SIZE: usize = 64 * 1024 * 1024 + 1; // 64 MiB + 1
+        let mut content = vec![0u8; FILE_SIZE];
+        // Seed the pattern with values that resist gzip's LZ77/Huffman compression.
+        let mut v: u8 = 0xA5;
+        for b in content.iter_mut() {
+            v = v.wrapping_mul(131).wrapping_add(17);
+            *b = v;
+        }
+        let first_byte = content[0];
+        let last_byte = content[FILE_SIZE - 1];
 
-        let layer_bytes = {
-            let gz_buf = Vec::new();
-            let encoder = GzEncoder::new(gz_buf, Compression::fast());
-            let mut tar_b = tar::Builder::new(encoder);
-
-            // Single large file of repeating bytes (compresses well but still
-            // exercises the streaming path).
-            let content = vec![0xABu8; TARGET_SIZE];
+        // Build a plain (uncompressed) tar — no gzip — so the on-disk layer file
+        // is also ≥64 MiB.  `open_reader` handles this: it peeks 2 bytes, sees no
+        // gzip magic, and passes the raw reader straight to `tar::Archive`.
+        let mut tar_bytes: Vec<u8> = Vec::new();
+        {
+            let mut tar_b = tar::Builder::new(&mut tar_bytes);
             let mut header = tar::Header::new_gnu();
             header.set_path("bigfile.bin").unwrap();
             header.set_mode(0o644);
@@ -2324,32 +2379,49 @@ mod tests {
             header.set_entry_type(tar::EntryType::Regular);
             header.set_cksum();
             tar_b.append(&header, content.as_slice()).unwrap();
+            tar_b.finish().unwrap();
+        }
+        // The on-disk tar must be genuinely large (tar overhead ≈ 512 B per entry).
+        assert!(
+            tar_bytes.len() > FILE_SIZE,
+            "tar must be at least as large as the file content"
+        );
 
-            tar_b.into_inner().unwrap().finish().unwrap()
-        };
+        // Write the layer tar to a file, then hand it to apply_layers via
+        // LayerBlob::File — this is the exact path taken by `pull`.
+        let layer_file = tmp.path().join("layer.tar");
+        fs::write(&layer_file, &tar_bytes).unwrap();
+        // Confirm the on-disk file is large.
+        let on_disk_len = fs::metadata(&layer_file).unwrap().len() as usize;
+        assert!(
+            on_disk_len > FILE_SIZE,
+            "on-disk layer must be ≥{FILE_SIZE} bytes, got {on_disk_len}"
+        );
 
-        // Verify the compressed size is at least a few bytes (sanity check).
-        assert!(!layer_bytes.is_empty());
+        // Use apply_and_snapshot with LayerBlob::File — the streaming path.
+        let blobs = vec![LayerBlob::File(layer_file)];
+        let report = apply_and_snapshot(blobs, 1, &store, "stream-apply-test").unwrap();
+        assert_eq!(report.layers, 1, "must report 1 layer");
 
-        // Build an OCI layout with this layer.
-        let layout_dir = make_layout(tmp.path(), &[layer_bytes]);
-
-        // Import — this exercises the full apply_layers path including gz decode.
-        let report = import_layout(&layout_dir, &store, "large-layer-test").unwrap();
-        assert_eq!(report.layers, 1);
-
-        // Hydrate and verify the file is present and has the right size.
-        let hydrate_dir = tmp.path().join("hydrated-large");
+        // Hydrate and verify correctness of the applied content.
+        let hydrate_dir = tmp.path().join("hydrated-stream");
         fs::create_dir_all(&hydrate_dir).unwrap();
-        lightr_index::hydrate(&hydrate_dir, &store, "large-layer-test").unwrap();
+        lightr_index::hydrate(&hydrate_dir, &store, "stream-apply-test").unwrap();
 
         let big = hydrate_dir.join("bigfile.bin");
-        assert!(big.exists(), "bigfile.bin must be present after import");
+        assert!(
+            big.exists(),
+            "bigfile.bin must be present after streaming apply"
+        );
         let meta = fs::metadata(&big).unwrap();
         assert_eq!(
             meta.len() as usize,
-            TARGET_SIZE,
-            "bigfile.bin must be exactly {TARGET_SIZE} bytes"
+            FILE_SIZE,
+            "bigfile.bin must be exactly {FILE_SIZE} bytes"
         );
+        // Spot-check first and last bytes to confirm content fidelity.
+        let hydrated = fs::read(&big).unwrap();
+        assert_eq!(hydrated[0], first_byte, "first byte must match");
+        assert_eq!(hydrated[FILE_SIZE - 1], last_byte, "last byte must match");
     }
 }
