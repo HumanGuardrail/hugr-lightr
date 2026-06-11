@@ -1,7 +1,10 @@
 //! Verb handler modules.
 pub mod bench;
 pub mod bisect;
+pub mod build;
+pub mod compose;
 pub mod diff;
+pub mod docker;
 pub mod engine;
 pub mod exec;
 pub mod gc;

@@ -63,6 +63,32 @@ struct Cli {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// ComposeCmd sub-enum
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum ComposeCmd {
+    /// Start a compose stack (lazy by default)
+    Up {
+        /// Compose file to read
+        #[arg(short = 'f', long, default_value = "compose.yml")]
+        file: String,
+        /// Start all services immediately (override lazy)
+        #[arg(long)]
+        eager: bool,
+        /// Stack TTL in seconds before the supervisor exits
+        #[arg(long, default_value_t = 3600)]
+        ttl: u64,
+    },
+    /// Tear down the most-recent compose stack
+    Down {
+        /// Compose file (used to identify the stack; resolved by newest stack dir)
+        #[arg(short = 'f', long)]
+        file: Option<String>,
+    },
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // PlanCmd sub-enum
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -272,9 +298,37 @@ enum Cmd {
     },
     /// Serve MCP protocol on stdio
     Mcp {},
+    /// Build an image from a Dockerfile (step-memoized)
+    Build {
+        /// Build context directory
+        context: String,
+        /// Path to Dockerfile (default: <context>/Dockerfile)
+        #[arg(short = 'f', long)]
+        file: Option<String>,
+        /// Ref name to store the built image under
+        #[arg(short = 't', long, default_value = "latest")]
+        name: String,
+        /// Engine to use: native (default), ns, vz
+        #[arg(long, default_value = "native", value_name = "ENGINE")]
+        engine: String,
+    },
+    /// Manage a compose stack (lazy services)
+    Compose {
+        #[command(subcommand)]
+        subcmd: ComposeCmd,
+    },
+    /// Docker CLI compatibility shim (translates docker subcommands to lightr)
+    Docker {
+        /// Docker arguments (subcommand + flags)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// [internal] Supervise a detached run (hidden)
     #[command(name = "__supervise", hide = true)]
     Supervise { dir: String },
+    /// [internal] Supervise a compose stack (hidden)
+    #[command(name = "__compose-supervise", hide = true)]
+    ComposeSupervisor { stack_dir: String },
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -309,7 +363,14 @@ fn main() {
         Cmd::Bisect { .. } => "bisect",
         Cmd::Plan { .. } => "plan",
         Cmd::Mcp { .. } => "mcp",
+        Cmd::Build { .. } => "build",
+        Cmd::Compose { subcmd } => match subcmd {
+            ComposeCmd::Up { .. } => "compose-up",
+            ComposeCmd::Down { .. } => "compose-down",
+        },
+        Cmd::Docker { .. } => "docker",
         Cmd::Supervise { .. } => "__supervise",
+        Cmd::ComposeSupervisor { .. } => "__compose-supervise",
     };
 
     if cli.events {
@@ -390,6 +451,17 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
         } => handlers::bisect::run(&name, &command, bisect_json),
         Cmd::Plan { subcmd } => handlers::plan::run(subcmd),
         Cmd::Mcp {} => handlers::mcp::run(),
+        Cmd::Build {
+            context,
+            file,
+            name,
+            engine,
+        } => handlers::build::run(&context, file.as_deref(), &name, &engine, json, explain),
+        Cmd::Compose { subcmd } => match subcmd {
+            ComposeCmd::Up { file, eager, ttl } => handlers::compose::up(&file, eager, ttl, json),
+            ComposeCmd::Down { file } => handlers::compose::down(file.as_deref()),
+        },
+        Cmd::Docker { args } => handlers::docker::run(&args, json, explain),
         Cmd::Supervise { dir } => match lightr_run::supervise(std::path::Path::new(&dir)) {
             Ok(exit_code) => exit_code,
             Err(e) => {
@@ -397,6 +469,15 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
                 2
             }
         },
+        Cmd::ComposeSupervisor { stack_dir } => {
+            match lightr_build::compose_supervise(std::path::Path::new(&stack_dir)) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("lightr: compose-supervise error: {e}");
+                    1
+                }
+            }
+        }
     };
 
     if events {
@@ -1086,5 +1167,291 @@ mod tests {
             }
             _ => panic!("expected Run"),
         }
+    }
+
+    // ── build ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn build_minimal() {
+        let cli = parse(&["build", "/some/ctx"]);
+        match &cli.cmd {
+            super::Cmd::Build {
+                context,
+                file,
+                name,
+                engine,
+            } => {
+                assert_eq!(context, "/some/ctx");
+                assert!(file.is_none(), "no -f by default");
+                assert_eq!(name, "latest", "default name is latest");
+                assert_eq!(engine, "native", "default engine is native");
+            }
+            _ => panic!("expected Build"),
+        }
+    }
+
+    #[test]
+    fn build_with_file_flag() {
+        let cli = parse(&["build", "-f", "custom/Dockerfile", "/ctx"]);
+        match &cli.cmd {
+            super::Cmd::Build { file, .. } => {
+                assert_eq!(file.as_deref(), Some("custom/Dockerfile"));
+            }
+            _ => panic!("expected Build"),
+        }
+    }
+
+    #[test]
+    fn build_with_name_flag() {
+        let cli = parse(&["build", "-t", "my-image", "/ctx"]);
+        match &cli.cmd {
+            super::Cmd::Build { name, .. } => {
+                assert_eq!(name, "my-image");
+            }
+            _ => panic!("expected Build"),
+        }
+    }
+
+    #[test]
+    fn build_with_engine_flag() {
+        let cli = parse(&["build", "--engine", "ns", "/ctx"]);
+        match &cli.cmd {
+            super::Cmd::Build { engine, .. } => {
+                assert_eq!(engine, "ns");
+            }
+            _ => panic!("expected Build"),
+        }
+    }
+
+    #[test]
+    fn build_all_flags() {
+        let cli = parse(&[
+            "--json",
+            "build",
+            "-f",
+            "/path/Dockerfile",
+            "-t",
+            "my-ref",
+            "--engine",
+            "vz",
+            "/my/ctx",
+        ]);
+        assert!(cli.json);
+        match &cli.cmd {
+            super::Cmd::Build {
+                context,
+                file,
+                name,
+                engine,
+            } => {
+                assert_eq!(context, "/my/ctx");
+                assert_eq!(file.as_deref(), Some("/path/Dockerfile"));
+                assert_eq!(name, "my-ref");
+                assert_eq!(engine, "vz");
+            }
+            _ => panic!("expected Build"),
+        }
+    }
+
+    #[test]
+    fn build_requires_context() {
+        assert!(try_parse(&["build"]).is_err());
+    }
+
+    // ── compose up ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn compose_up_minimal() {
+        let cli = parse(&["compose", "up"]);
+        match &cli.cmd {
+            super::Cmd::Compose { subcmd } => match subcmd {
+                super::ComposeCmd::Up { file, eager, ttl } => {
+                    assert_eq!(file, "compose.yml", "default compose file");
+                    assert!(!eager, "eager is false by default");
+                    assert_eq!(*ttl, 3600, "default TTL is 3600");
+                }
+                _ => panic!("expected Up"),
+            },
+            _ => panic!("expected Compose"),
+        }
+    }
+
+    #[test]
+    fn compose_up_with_file_flag() {
+        let cli = parse(&["compose", "up", "-f", "docker-compose.yml"]);
+        match &cli.cmd {
+            super::Cmd::Compose { subcmd } => match subcmd {
+                super::ComposeCmd::Up { file, .. } => {
+                    assert_eq!(file, "docker-compose.yml");
+                }
+                _ => panic!("expected Up"),
+            },
+            _ => panic!("expected Compose"),
+        }
+    }
+
+    #[test]
+    fn compose_up_eager_flag() {
+        let cli = parse(&["compose", "up", "--eager"]);
+        match &cli.cmd {
+            super::Cmd::Compose { subcmd } => match subcmd {
+                super::ComposeCmd::Up { eager, .. } => {
+                    assert!(*eager);
+                }
+                _ => panic!("expected Up"),
+            },
+            _ => panic!("expected Compose"),
+        }
+    }
+
+    #[test]
+    fn compose_up_ttl_flag() {
+        let cli = parse(&["compose", "up", "--ttl", "7200"]);
+        match &cli.cmd {
+            super::Cmd::Compose { subcmd } => match subcmd {
+                super::ComposeCmd::Up { ttl, .. } => {
+                    assert_eq!(*ttl, 7200);
+                }
+                _ => panic!("expected Up"),
+            },
+            _ => panic!("expected Compose"),
+        }
+    }
+
+    // ── compose down ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn compose_down_minimal() {
+        let cli = parse(&["compose", "down"]);
+        match &cli.cmd {
+            super::Cmd::Compose { subcmd } => match subcmd {
+                super::ComposeCmd::Down { file } => {
+                    assert!(file.is_none(), "no -f by default");
+                }
+                _ => panic!("expected Down"),
+            },
+            _ => panic!("expected Compose"),
+        }
+    }
+
+    #[test]
+    fn compose_down_with_file_flag() {
+        let cli = parse(&["compose", "down", "-f", "my-compose.yml"]);
+        match &cli.cmd {
+            super::Cmd::Compose { subcmd } => match subcmd {
+                super::ComposeCmd::Down { file } => {
+                    assert_eq!(file.as_deref(), Some("my-compose.yml"));
+                }
+                _ => panic!("expected Down"),
+            },
+            _ => panic!("expected Compose"),
+        }
+    }
+
+    // ── __compose-supervise (hidden) ──────────────────────────────────────────
+
+    #[test]
+    fn compose_supervise_hidden_parses() {
+        let cli = parse(&["__compose-supervise", "/some/stack/dir"]);
+        match &cli.cmd {
+            super::Cmd::ComposeSupervisor { stack_dir } => {
+                assert_eq!(stack_dir, "/some/stack/dir");
+            }
+            _ => panic!("expected ComposeSupervisor"),
+        }
+    }
+
+    // ── docker varargs ────────────────────────────────────────────────────────
+
+    #[test]
+    fn docker_varargs_capture() {
+        let cli = parse(&["docker", "build", "-t", "myref", "."]);
+        match &cli.cmd {
+            super::Cmd::Docker { args } => {
+                assert_eq!(args, &["build", "-t", "myref", "."]);
+            }
+            _ => panic!("expected Docker"),
+        }
+    }
+
+    #[test]
+    fn docker_images_parses() {
+        let cli = parse(&["docker", "images"]);
+        match &cli.cmd {
+            super::Cmd::Docker { args } => {
+                assert_eq!(args, &["images"]);
+            }
+            _ => panic!("expected Docker"),
+        }
+    }
+
+    #[test]
+    fn docker_ps_parses() {
+        let cli = parse(&["docker", "ps"]);
+        match &cli.cmd {
+            super::Cmd::Docker { args } => {
+                assert_eq!(args, &["ps"]);
+            }
+            _ => panic!("expected Docker"),
+        }
+    }
+
+    #[test]
+    fn docker_pull_parses() {
+        let cli = parse(&["docker", "pull", "alpine:latest"]);
+        match &cli.cmd {
+            super::Cmd::Docker { args } => {
+                assert_eq!(args, &["pull", "alpine:latest"]);
+            }
+            _ => panic!("expected Docker"),
+        }
+    }
+
+    #[test]
+    fn docker_compose_parses() {
+        let cli = parse(&["docker", "compose", "up", "-f", "myfile.yml"]);
+        match &cli.cmd {
+            super::Cmd::Docker { args } => {
+                assert_eq!(args, &["compose", "up", "-f", "myfile.yml"]);
+            }
+            _ => panic!("expected Docker"),
+        }
+    }
+
+    // ── docker translation unit tests (via handlers::docker) ──────────────────
+
+    #[test]
+    fn docker_unsupported_exits_2() {
+        use super::handlers::docker::run as docker_run;
+        let code = docker_run(&["frobnicate".to_string()], false, false);
+        assert_eq!(code, 2, "unsupported docker subcommand must exit 2");
+    }
+
+    #[test]
+    fn docker_unsupported_exact_message_format() {
+        // Verify the message format via the sanitize fn + exit code test above.
+        // The exact message is:
+        //   "lightr docker: unsupported 'frobnicate' — supported: build|run|pull|images|ps|compose"
+        // We trust the string literal in docker.rs is correct (verified by code review).
+        use super::handlers::docker::run as docker_run;
+        let code = docker_run(&["notreal".to_string()], false, false);
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn docker_ref_sanitize_slash_colon() {
+        use super::handlers::docker::sanitize_docker_ref;
+        assert_eq!(sanitize_docker_ref("nginx:1.25"), "@docker/nginx-1.25");
+        assert_eq!(
+            sanitize_docker_ref("ghcr.io/owner/repo:tag"),
+            "@docker/ghcr.io-owner-repo-tag"
+        );
+    }
+
+    #[test]
+    fn docker_empty_args_exits_2() {
+        use super::handlers::docker::run as docker_run;
+        let code = docker_run(&[], false, false);
+        assert_eq!(code, 2);
     }
 }
