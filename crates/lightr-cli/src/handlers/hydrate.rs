@@ -10,7 +10,7 @@ use lightr_index::{hydrate, hydrate_verified};
 use lightr_store::{CowRung, Store};
 use serde::Serialize;
 
-use crate::exit::{die_from_error, exit_ok};
+use crate::exit::die_internal;
 
 #[derive(Serialize)]
 struct HydrateJson {
@@ -38,10 +38,10 @@ fn rung_lower(r: CowRung) -> &'static str {
     }
 }
 
-pub fn run(dest: &str, name: &str, verify: bool, json: bool, explain: bool) -> ! {
+pub fn run(dest: &str, name: &str, verify: bool, json: bool, explain: bool) -> i32 {
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
-        Err(e) => die_from_error(&e),
+        Err(e) => return die_internal(&e),
     };
 
     let dest_path = std::path::Path::new(dest);
@@ -52,7 +52,7 @@ pub fn run(dest: &str, name: &str, verify: bool, json: bool, explain: bool) -> !
     };
     let report = match result {
         Ok(r) => r,
-        Err(e) => die_from_error(&e),
+        Err(e) => return die_internal(&e),
     };
 
     if explain {
@@ -86,5 +86,5 @@ pub fn run(dest: &str, name: &str, verify: bool, json: bool, explain: bool) -> !
         );
     }
 
-    exit_ok()
+    0
 }

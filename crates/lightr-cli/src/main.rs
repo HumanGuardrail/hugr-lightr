@@ -7,6 +7,41 @@ mod handlers;
 
 use clap::{Parser, Subcommand};
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Utility helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+pub fn lightr_home() -> std::path::PathBuf {
+    if let Ok(h) = std::env::var("LIGHTR_HOME") {
+        std::path::PathBuf::from(h)
+    } else {
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        home.join(".lightr")
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Event emitter
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn emit_event(w: &mut impl std::io::Write, ev: &str, verb: &str, extra: &str) {
+    let ts = now_ms();
+    let _ = writeln!(w, r#"{{"ev":"{ev}","verb":"{verb}"{extra},"ts":{ts}}}"#);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CLI struct
+// ──────────────────────────────────────────────────────────────────────────────
+
 #[derive(Parser)]
 #[command(
     name = "lightr",
@@ -20,9 +55,50 @@ struct Cli {
     /// Structured self-narration to stderr (memo keys, CoW rung, counts)
     #[arg(long, global = true)]
     explain: bool,
+    /// Emit JSON-RPC events to stderr on start/end
+    #[arg(long, global = true)]
+    events: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// PlanCmd sub-enum
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum PlanCmd {
+    /// Dry-run a snapshot (no store writes)
+    Snapshot {
+        #[arg(long, default_value = ".")]
+        dir: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Dry-run a hydrate (no writes)
+    Hydrate {
+        dest: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Predict memoization for a run
+    Run {
+        #[arg(long, default_value = ".")]
+        dir: String,
+        #[arg(long)]
+        input: Vec<String>,
+        #[arg(long)]
+        env: Vec<String>,
+        #[arg(long, value_name = "REF:TARGET")]
+        mount: Vec<String>,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Main command enum
+// ──────────────────────────────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
 enum Cmd {
@@ -57,6 +133,10 @@ enum Cmd {
         input: Vec<String>,
         #[arg(long)]
         env: Vec<String>,
+        #[arg(short = 'd', long)]
+        detach: bool,
+        #[arg(long, value_name = "REF:TARGET")]
+        mount: Vec<String>,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
@@ -67,28 +147,181 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
+    /// List running/exited run instances
+    Ps {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stream logs from a run
+    Logs {
+        id: String,
+        #[arg(long)]
+        stderr: bool,
+        #[arg(long)]
+        both: bool,
+        #[arg(short = 'f', long)]
+        follow: bool,
+    },
+    /// Stop a running instance
+    Stop {
+        id: String,
+        #[arg(long, default_value_t = 10)]
+        grace: u64,
+    },
+    /// Exec a command in a run's context
+    Exec {
+        id: String,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Garbage collect unreachable objects
+    Gc {
+        #[arg(long)]
+        force: bool,
+        #[arg(long, default_value_t = 3600)]
+        min_age: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revert a ref to its previous version
+    Undo {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Diff a ref against a previous version
+    Diff {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value_t = 1)]
+        at: usize,
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Binary-search ref history to find a regression
+    Bisect {
+        #[arg(long)]
+        name: String,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Dry-run planning operations
+    Plan {
+        #[command(subcommand)]
+        subcmd: PlanCmd,
+    },
+    /// Serve MCP protocol on stdio
+    Mcp {},
+    /// [internal] Supervise a detached run (hidden)
+    #[command(name = "__supervise", hide = true)]
+    Supervise { dir: String },
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Main + dispatch
+// ──────────────────────────────────────────────────────────────────────────────
 
 fn main() {
     let cli = Cli::parse();
-    dispatch(cli);
+
+    // Determine verb name for event emitter
+    let verb = match &cli.cmd {
+        Cmd::Snapshot { .. } => "snapshot",
+        Cmd::Hydrate { .. } => "hydrate",
+        Cmd::Status { .. } => "status",
+        Cmd::Run { .. } => "run",
+        Cmd::Bench { .. } => "bench",
+        Cmd::Ps { .. } => "ps",
+        Cmd::Logs { .. } => "logs",
+        Cmd::Stop { .. } => "stop",
+        Cmd::Exec { .. } => "exec",
+        Cmd::Gc { .. } => "gc",
+        Cmd::Undo { .. } => "undo",
+        Cmd::Diff { .. } => "diff",
+        Cmd::Bisect { .. } => "bisect",
+        Cmd::Plan { .. } => "plan",
+        Cmd::Mcp { .. } => "mcp",
+        Cmd::Supervise { .. } => "__supervise",
+    };
+
+    if cli.events {
+        emit_event(&mut std::io::stderr(), "start", verb, "");
+    }
+
+    let code = dispatch(cli.json, cli.explain, cli.events, verb, cli.cmd);
+
+    // end event already emitted inside dispatch if needed
+    std::process::exit(code);
 }
 
-fn dispatch(cli: Cli) -> ! {
-    match cli.cmd {
-        Cmd::Snapshot { dir, name } => handlers::snapshot::run(&dir, &name, cli.json, cli.explain),
+fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i32 {
+    let code = match cmd {
+        Cmd::Snapshot { dir, name } => handlers::snapshot::run(&dir, &name, json, explain),
         Cmd::Hydrate { dest, name, verify } => {
-            handlers::hydrate::run(&dest, &name, verify, cli.json, cli.explain)
+            handlers::hydrate::run(&dest, &name, verify, json, explain)
         }
-        Cmd::Status { dir, name } => handlers::status::run(&dir, &name, cli.json, cli.explain),
+        Cmd::Status { dir, name } => handlers::status::run(&dir, &name, json, explain),
         Cmd::Run {
             dir,
             input,
             env,
+            detach,
+            mount,
             command,
-        } => handlers::run::run(&dir, &input, &env, &command, cli.json, cli.explain),
-        Cmd::Bench { vs_docker, check } => handlers::bench::run(vs_docker, check, cli.json),
+        } => handlers::run::run(&dir, &input, &env, &command, json, explain, detach, &mount),
+        Cmd::Bench { vs_docker, check } => handlers::bench::run(vs_docker, check, json),
+        Cmd::Ps { json: ps_json } => handlers::ps::run(ps_json),
+        Cmd::Logs {
+            id,
+            stderr,
+            both,
+            follow,
+        } => handlers::logs::run(&id, stderr, both, follow),
+        Cmd::Stop { id, grace } => handlers::stop::run(&id, grace),
+        Cmd::Exec { id, command } => handlers::exec::run(&id, &command),
+        Cmd::Gc {
+            force,
+            min_age,
+            json: gc_json,
+        } => handlers::gc::run(force, min_age, gc_json),
+        Cmd::Undo {
+            name,
+            json: undo_json,
+        } => handlers::undo::run(&name, undo_json),
+        Cmd::Diff {
+            name,
+            at,
+            dir,
+            json: diff_json,
+        } => handlers::diff::run(&name, at, dir.as_deref(), diff_json),
+        Cmd::Bisect {
+            name,
+            command,
+            json: bisect_json,
+        } => handlers::bisect::run(&name, &command, bisect_json),
+        Cmd::Plan { subcmd } => handlers::plan::run(subcmd),
+        Cmd::Mcp {} => handlers::mcp::run(),
+        Cmd::Supervise { dir } => match lightr_run::supervise(std::path::Path::new(&dir)) {
+            Ok(exit_code) => exit_code,
+            Err(e) => {
+                eprintln!("lightr: supervise error: {e}");
+                2
+            }
+        },
+    };
+
+    if events {
+        let ok = code == 0;
+        let extra = format!(r#","ok":{ok},"exit":{code}"#);
+        emit_event(&mut std::io::stderr(), "end", verb, &extra);
     }
+
+    code
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -222,11 +455,15 @@ mod tests {
                 input,
                 env,
                 command,
+                detach,
+                mount,
             } => {
                 assert_eq!(dir, ".");
                 assert!(input.is_empty());
                 assert!(env.is_empty());
                 assert_eq!(command, &["echo", "hello"]);
+                assert!(!detach);
+                assert!(mount.is_empty());
             }
             _ => panic!("wrong cmd"),
         }
@@ -244,6 +481,7 @@ mod tests {
                 input,
                 env,
                 command,
+                ..
             } => {
                 assert_eq!(dir, "/work");
                 assert_eq!(input, &["/a", "/b"]);
@@ -257,6 +495,41 @@ mod tests {
     #[test]
     fn run_requires_command() {
         assert!(try_parse(&["run"]).is_err());
+    }
+
+    #[test]
+    fn run_detach_flag() {
+        let cli = parse(&["run", "-d", "--", "sleep", "100"]);
+        match &cli.cmd {
+            super::Cmd::Run { detach, .. } => {
+                assert!(*detach, "expected detach to be true");
+            }
+            _ => panic!("wrong cmd"),
+        }
+    }
+
+    #[test]
+    fn run_mount_single() {
+        let cli = parse(&["run", "--mount", "myref:subdir", "--", "echo"]);
+        match &cli.cmd {
+            super::Cmd::Run { mount, .. } => {
+                assert_eq!(mount, &["myref:subdir"]);
+            }
+            _ => panic!("wrong cmd"),
+        }
+    }
+
+    #[test]
+    fn run_mount_multiple() {
+        let cli = parse(&["run", "--mount", "r1:a", "--mount", "r2:b", "--", "cmd"]);
+        match &cli.cmd {
+            super::Cmd::Run { mount, .. } => {
+                assert_eq!(mount.len(), 2);
+                assert_eq!(mount[0], "r1:a");
+                assert_eq!(mount[1], "r2:b");
+            }
+            _ => panic!("wrong cmd"),
+        }
     }
 
     // ── bench ─────────────────────────────────────────────────────────────
@@ -291,6 +564,205 @@ mod tests {
         assert!(cli.json);
     }
 
+    // ── ps ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ps_minimal() {
+        parse(&["ps"]);
+    }
+
+    #[test]
+    fn ps_json() {
+        let cli = parse(&["ps", "--json"]);
+        match &cli.cmd {
+            super::Cmd::Ps { json } => assert!(*json),
+            _ => panic!("wrong cmd"),
+        }
+    }
+
+    // ── logs ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn logs_minimal() {
+        let cli = parse(&["logs", "abc123"]);
+        match &cli.cmd {
+            super::Cmd::Logs {
+                id,
+                stderr,
+                both,
+                follow,
+            } => {
+                assert_eq!(id, "abc123");
+                assert!(!stderr);
+                assert!(!both);
+                assert!(!follow);
+            }
+            _ => panic!("wrong cmd"),
+        }
+    }
+
+    #[test]
+    fn logs_stderr_flag() {
+        parse(&["logs", "id1", "--stderr"]);
+    }
+
+    #[test]
+    fn logs_both_flag() {
+        parse(&["logs", "id1", "--both"]);
+    }
+
+    #[test]
+    fn logs_follow_flag() {
+        parse(&["logs", "id1", "-f"]);
+    }
+
+    #[test]
+    fn logs_requires_id() {
+        assert!(try_parse(&["logs"]).is_err());
+    }
+
+    // ── stop ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stop_minimal() {
+        parse(&["stop", "myid"]);
+    }
+
+    #[test]
+    fn stop_grace() {
+        parse(&["stop", "myid", "--grace", "5"]);
+    }
+
+    #[test]
+    fn stop_default_grace() {
+        let cli = parse(&["stop", "myid"]);
+        match &cli.cmd {
+            super::Cmd::Stop { grace, .. } => assert_eq!(*grace, 10),
+            _ => panic!("wrong cmd"),
+        }
+    }
+
+    // ── exec ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn exec_minimal() {
+        parse(&["exec", "myid", "--", "echo", "hi"]);
+    }
+
+    #[test]
+    fn exec_requires_command() {
+        assert!(try_parse(&["exec", "myid"]).is_err());
+    }
+
+    // ── gc ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn gc_minimal() {
+        let cli = parse(&["gc"]);
+        match &cli.cmd {
+            super::Cmd::Gc {
+                force,
+                min_age,
+                json,
+            } => {
+                assert!(!force);
+                assert_eq!(*min_age, 3600);
+                assert!(!json);
+            }
+            _ => panic!("wrong cmd"),
+        }
+    }
+
+    #[test]
+    fn gc_force() {
+        parse(&["gc", "--force"]);
+    }
+
+    #[test]
+    fn gc_min_age() {
+        parse(&["gc", "--min-age", "7200"]);
+    }
+
+    // ── undo ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn undo_name() {
+        parse(&["undo", "--name", "myref"]);
+    }
+
+    #[test]
+    fn undo_requires_name() {
+        assert!(try_parse(&["undo"]).is_err());
+    }
+
+    // ── diff ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn diff_minimal() {
+        let cli = parse(&["diff", "--name", "myref"]);
+        match &cli.cmd {
+            super::Cmd::Diff { name, at, dir, .. } => {
+                assert_eq!(name, "myref");
+                assert_eq!(*at, 1);
+                assert!(dir.is_none());
+            }
+            _ => panic!("wrong cmd"),
+        }
+    }
+
+    #[test]
+    fn diff_at() {
+        parse(&["diff", "--name", "r", "--at", "3"]);
+    }
+
+    #[test]
+    fn diff_dir() {
+        parse(&["diff", "--name", "r", "--dir", "/tmp/x"]);
+    }
+
+    // ── bisect ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn bisect_minimal() {
+        parse(&["bisect", "--name", "r", "--", "sh", "-c", "true"]);
+    }
+
+    #[test]
+    fn bisect_requires_name_and_cmd() {
+        assert!(try_parse(&["bisect"]).is_err());
+    }
+
+    // ── plan ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn plan_snapshot() {
+        parse(&["plan", "snapshot", "--name", "r"]);
+    }
+
+    #[test]
+    fn plan_hydrate() {
+        parse(&["plan", "hydrate", "/dest", "--name", "r"]);
+    }
+
+    #[test]
+    fn plan_run() {
+        parse(&["plan", "run", "--", "echo"]);
+    }
+
+    // ── mcp ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mcp_parses() {
+        parse(&["mcp"]);
+    }
+
+    // ── supervise (hidden) ─────────────────────────────────────────────────
+
+    #[test]
+    fn supervise_parses() {
+        parse(&["__supervise", "/some/dir"]);
+    }
+
     // ── global flags ──────────────────────────────────────────────────────
 
     #[test]
@@ -306,7 +778,38 @@ mod tests {
     }
 
     #[test]
+    fn events_global_flag() {
+        let cli = parse(&["--events", "ps"]);
+        assert!(cli.events);
+    }
+
+    #[test]
     fn unknown_subcommand_fails() {
         assert!(try_parse(&["notaverb"]).is_err());
+    }
+
+    // ── EventEmitter unit tests ────────────────────────────────────────────
+
+    #[test]
+    fn emitter_start_contains_start_ev() {
+        let mut buf = Vec::<u8>::new();
+        super::emit_event(&mut buf, "start", "snapshot", "");
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#""ev":"start""#), "missing ev:start in: {s}");
+        assert!(
+            s.contains(r#""verb":"snapshot""#),
+            "missing verb:snapshot in: {s}"
+        );
+        assert!(s.contains("\"ts\":"), "missing ts in: {s}");
+    }
+
+    #[test]
+    fn emitter_end_contains_ok_and_exit() {
+        let mut buf = Vec::<u8>::new();
+        super::emit_event(&mut buf, "end", "run", r#","ok":true,"exit":0"#);
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#""ev":"end""#), "missing ev:end in: {s}");
+        assert!(s.contains(r#""ok":true"#), "missing ok:true in: {s}");
+        assert!(s.contains(r#""exit":0"#), "missing exit:0 in: {s}");
     }
 }

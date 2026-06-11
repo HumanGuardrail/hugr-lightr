@@ -26,8 +26,6 @@ use lightr_index::{hydrate, snapshot, status};
 use lightr_store::Store;
 use serde::Serialize;
 
-use crate::exit::{exit_dirty, exit_ok};
-
 // ──────────────────────────────────────────────────────────────────────────────
 // Budgets (frozen)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -133,7 +131,7 @@ struct RowJson {
 // Entry point
 // ──────────────────────────────────────────────────────────────────────────────
 
-pub fn run(vs_docker: bool, check: bool, json: bool) -> ! {
+pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
     // Temp dirs for fixture + store.
     let fixture_tmp = tempfile::tempdir().expect("fixture tempdir");
     let home_tmp = tempfile::tempdir().expect("home tempdir");
@@ -356,9 +354,9 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> ! {
     }
 
     if check && any_fail {
-        exit_dirty()
+        1
     } else {
-        exit_ok()
+        0
     }
 }
 

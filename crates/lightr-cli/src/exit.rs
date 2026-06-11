@@ -7,6 +7,9 @@
 //! - status dirty                             ⇒ exit 1 (no error message)
 //! - run ⇒ pass child's exit code
 //! - clap handles usage (already exits 2)
+//!
+//! R0 exit helpers are kept for backward-compat; R1 handlers use die_internal instead.
+#![allow(dead_code)]
 
 use lightr_core::LightrError;
 
@@ -38,6 +41,12 @@ pub fn exit_dirty() -> ! {
 /// Exit with the child's code (run verb).
 pub fn exit_child(code: i32) -> ! {
     std::process::exit(code);
+}
+
+/// Print error to stderr and return exit code 2 (internal helper for R1 handlers).
+pub fn die_internal(e: &dyn std::fmt::Display) -> i32 {
+    eprintln!("lightr: {e}");
+    2
 }
 
 #[cfg(test)]
