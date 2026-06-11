@@ -1,4 +1,7 @@
-# HuGR Lightr — Build Spec v0.1 (freeze candidate)
+# HuGR Lightr — Build Spec v0.1 (SUPERSEDED)
+
+> Superseded by `build-spec-v2.md` (R0, self-contained perf core — no clw
+> on the hot path). Kept for history.
 
 - **Status:** ⚠️ REWORK PENDING — the owner raised the bar (2026-06-11, see
   `performance-bar.md`): §3/§4/§5/§7 will be redesigned around CoW

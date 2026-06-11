@@ -19,14 +19,15 @@ HuGR (the company / brand)
    hugit (the forge for agent fleets)                          (campaign #3)
 ```
 
-**Status (2026-06-11): DESIGN — docs only, no code.** Repo seeded with the
-canonical vision; v0.1 scope cut but not started. TechLead is installed
-(`.techlead/` state, map at `.techlead/memory/MAP.md`).
+**Status (2026-06-11, overnight): SPEC COMPLETE — whitepaper v2 (working
+backwards) is canon; feature tree F-001…F-605 drives the build; ADRs
+0009–0016 Accepted under the owner overnight mandate (docs/decisions-log.md,
+subject to morning review); R0 wave in flight. TechLead installed
+(`.techlead/`, map at `.techlead/memory/MAP.md`).
 
-Read first: `docs/whitepaper/hugr-lightr-v1.md` (**canonical vision** — source
+Read first: `docs/whitepaper/hugr-lightr-v2.md` (**canonical vision** — source
 of truth) · `docs/adr/` (decision records — code is written only against
-Accepted ADRs) · `docs/spec/build-spec-v0.1.md` (frozen build surfaces +
-acceptance suite + wave partition) · `docs/product/product.md` (ICPs,
+Accepted ADRs) · `docs/spec/build-spec-v2.md` (FROZEN R0 surfaces + acceptance + wave) · `docs/product/product.md` (ICPs,
 pricing posture, open decisions) · `docs/VISION.md` (the funnel) ·
 `docs/ARCHITECTURE.md` (engines, seams) · `docs/MVP-v0.1.md` (scope + DoD).
 
@@ -91,6 +92,6 @@ repos is not.** Only work on hugr-lightr here.
 ## Don't touch
 
 - Other HuGR projects share the parent dir — never mutate siblings.
-- `docs/whitepaper/hugr-lightr-v1.md` §9 principles and the tense-discipline
+- `docs/whitepaper/hugr-lightr-v2.md` §13 principles and the tense-discipline
   rules change only with explicit owner approval.
 - `.techlead/` is gitignored session state — never commit its contents.

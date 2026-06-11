@@ -1,5 +1,9 @@
 # Architecture — how Lightr runs things
 
+> **Superseded for the perf core:** whitepaper v2 §3–§5 + ADRs 0009–0016
+> govern the store/views/engines now (CoW, O(1) views, boot-never). This
+> file remains for the funnel-era seams narrative.
+
 ## Design principles
 
 1. **No daemon.** One static binary. Nothing runs when nothing runs.
