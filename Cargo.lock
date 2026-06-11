@@ -646,6 +646,7 @@ dependencies = [
  "lightr-store",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
 ]
 
