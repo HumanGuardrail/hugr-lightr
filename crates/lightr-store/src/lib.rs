@@ -4,9 +4,13 @@
 use lightr_core::{Digest, LightrError, RefRecord, Result};
 #[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
-use std::fs::{self, File, Permissions};
+use std::fs::{self, File};
+#[cfg(unix)]
+use std::fs::Permissions;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,9 +31,24 @@ impl Drop for WriteGuard {
     fn drop(&mut self) {
         // LOCK_UN is released automatically when the File fd closes, but
         // we call it explicitly for clarity and portability.
-        let fd = self._file.as_raw_fd();
-        unsafe {
-            libc::flock(fd, libc::LOCK_UN);
+        #[cfg(unix)]
+        {
+            let fd = self._file.as_raw_fd();
+            unsafe {
+                libc::flock(fd, libc::LOCK_UN);
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+            use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+            use windows_sys::Win32::System::IO::OVERLAPPED;
+            let handle = self._file.as_raw_handle();
+            if handle != INVALID_HANDLE_VALUE as _ {
+                let mut ol: OVERLAPPED = unsafe { std::mem::zeroed() };
+                unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut ol) };
+            }
         }
     }
 }
@@ -43,9 +62,24 @@ pub struct GcGuard {
 
 impl Drop for GcGuard {
     fn drop(&mut self) {
-        let fd = self._file.as_raw_fd();
-        unsafe {
-            libc::flock(fd, libc::LOCK_UN);
+        #[cfg(unix)]
+        {
+            let fd = self._file.as_raw_fd();
+            unsafe {
+                libc::flock(fd, libc::LOCK_UN);
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+            use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+            use windows_sys::Win32::System::IO::OVERLAPPED;
+            let handle = self._file.as_raw_handle();
+            if handle != INVALID_HANDLE_VALUE as _ {
+                let mut ol: OVERLAPPED = unsafe { std::mem::zeroed() };
+                unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut ol) };
+            }
         }
     }
 }
@@ -55,6 +89,9 @@ pub enum CowRung {
     Clone,
     Reflink,
     CopyRange,
+    /// Windows: best-effort ReFS block-clone via FSCTL_DUPLICATE_EXTENTS_TO_FILE.
+    /// Falls through to Copy on NTFS or any failure. // WIN-PATH
+    RefsBlockClone,
     Copy,
 }
 
@@ -118,11 +155,25 @@ fn temp_suffix(hint: &str) -> String {
 }
 
 /// fsync the parent directory so the rename (directory entry change) is
-/// crash-durable on macOS/Linux.  On platforms that don't support it we
-/// return Ok(()) silently so the logic path is always exercised.
+/// crash-durable on macOS/Linux.
+///
+/// On Windows: NTFS has no portable directory fsync API (FlushFileBuffers on a
+/// directory handle is not guaranteed to flush directory metadata to disk across
+/// all NTFS configurations). This function is a documented no-op on Windows.
+/// The weaker guarantee: file data and the rename are durable once
+/// FlushFileBuffers is called on the FILE itself (done in atomic_write before
+/// rename), but the directory entry update may not be crash-synced.
+/// This is acceptable for the CAS store (objects are content-addressed;
+/// a missing directory entry after a crash means re-ingest, not corruption).
 fn fsync_dir(dir: &Path) -> std::io::Result<()> {
-    let f = File::open(dir)?;
-    f.sync_all()?;
+    #[cfg(unix)]
+    {
+        let f = File::open(dir)?;
+        f.sync_all()?;
+    }
+    // Windows: documented no-op — see function doc above.
+    #[cfg(windows)]
+    let _ = dir;
     Ok(())
 }
 
@@ -135,7 +186,17 @@ fn atomic_write(parent: &Path, dest: &Path, data: &[u8]) -> Result<()> {
     {
         let mut f = File::create(&tmp)?;
         f.write_all(data)?;
-        f.sync_all()?; // fsync before rename
+        // fsync before rename: flush file data to stable storage.
+        #[cfg(unix)]
+        f.sync_all()?;
+        #[cfg(windows)]
+        {
+            // WIN-PATH: FlushFileBuffers ensures data is on disk before rename.
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
+            let handle = f.as_raw_handle();
+            unsafe { FlushFileBuffers(handle as _) };
+        }
     }
     fs::rename(&tmp, dest)?;
     fsync_dir(parent)?; // fsync parent dir after rename
@@ -144,7 +205,16 @@ fn atomic_write(parent: &Path, dest: &Path, data: &[u8]) -> Result<()> {
 
 /// chmod a path to the given mode bits (unix only).
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
-    fs::set_permissions(path, Permissions::from_mode(mode))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, Permissions::from_mode(mode))?;
+    }
+    // Windows: mode bits are a Unix concept. Skip silently.
+    // Windows uses ACLs/read-only attribute semantics — not set here.
+    #[cfg(windows)]
+    {
+        let _ = (path, mode);
+    }
     Ok(())
 }
 
@@ -190,6 +260,15 @@ fn try_ladder_probe(src: &Path, dst: &Path) -> CowRung {
         let _ = fs::remove_file(dst);
         if cow_copy_range(src, dst).is_ok() {
             return CowRung::CopyRange;
+        }
+    }
+
+    // WIN-PATH: probe for ReFS block-clone capability on Windows.
+    #[cfg(windows)]
+    {
+        let _ = fs::remove_file(dst);
+        if cow_refs_block_clone(src, dst).is_ok() {
+            return CowRung::RefsBlockClone;
         }
     }
 
@@ -272,6 +351,82 @@ fn cow_copy_range(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Windows: best-effort ReFS block-clone via FSCTL_DUPLICATE_EXTENTS_TO_FILE.
+///
+/// Only succeeds on ReFS volumes that support block-clone (DUPLICATE_EXTENTS_DATA).
+/// Falls through (returns Err) on NTFS or any failure — the caller then uses
+/// std::fs::copy as the required-correct fallback path.
+///
+/// // WIN-PATH — this path is only exercisable on a ReFS volume on a real Windows box.
+#[cfg(windows)]
+fn cow_refs_block_clone(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::FALSE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandleEx, FileStandardInfo, FILE_STANDARD_INFO,
+    };
+    use windows_sys::Win32::System::Ioctl::{
+        FSCTL_DUPLICATE_EXTENTS_TO_FILE, DUPLICATE_EXTENTS_DATA,
+    };
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+
+    // Open src for reading.
+    let src_file = File::open(src)?;
+    let src_handle = src_file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+
+    // Get file size.
+    let mut std_info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            src_handle,
+            FileStandardInfo,
+            &mut std_info as *mut _ as *mut _,
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    if ok == FALSE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let file_size = std_info.EndOfFile;
+
+    // Create / truncate dst.
+    let dst_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dst)?;
+    let dst_handle = dst_file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+
+    // Build DUPLICATE_EXTENTS_DATA — clone entire file from offset 0.
+    let dup_data = DUPLICATE_EXTENTS_DATA {
+        FileHandle: src_handle,
+        SourceFileOffset: 0,
+        TargetFileOffset: 0,
+        ByteCount: file_size,
+    };
+
+    let mut bytes_returned: u32 = 0;
+    let result = unsafe {
+        DeviceIoControl(
+            dst_handle,
+            FSCTL_DUPLICATE_EXTENTS_TO_FILE,
+            &dup_data as *const _ as *const _,
+            std::mem::size_of::<DUPLICATE_EXTENTS_DATA>() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if result == FALSE {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// Apply the CoW ladder to copy src→dst at the given rung; falls back to
 /// std::fs::copy on failure (silent-correct, not silent-hidden — counted
 /// at the call sites but not exposed in the API per R0 law).
@@ -300,6 +455,9 @@ fn try_cow_at_rung(src: &Path, dst: &Path, rung: CowRung) -> std::io::Result<()>
         CowRung::Reflink => cow_reflink(src, dst),
         #[cfg(target_os = "linux")]
         CowRung::CopyRange => cow_copy_range(src, dst),
+        // WIN-PATH: attempt ReFS block-clone; falls through to Copy on failure.
+        #[cfg(windows)]
+        CowRung::RefsBlockClone => cow_refs_block_clone(src, dst),
         // CowRung::Copy (always available) or any rung on the wrong platform:
         _ => {
             fs::copy(src, dst)?;
@@ -371,10 +529,29 @@ impl Store {
     /// so gc cannot sweep an object that a concurrent writer is mid-publishing.
     pub fn write_guard(&self) -> Result<WriteGuard> {
         let f = self.gc_lock_file()?;
-        let fd = f.as_raw_fd();
-        let ret = unsafe { libc::flock(fd, libc::LOCK_SH) };
-        if ret != 0 {
-            return Err(LightrError::Io(std::io::Error::last_os_error()));
+        #[cfg(unix)]
+        {
+            let fd = f.as_raw_fd();
+            let ret = unsafe { libc::flock(fd, libc::LOCK_SH) };
+            if ret != 0 {
+                return Err(LightrError::Io(std::io::Error::last_os_error()));
+            }
+        }
+        #[cfg(windows)]
+        {
+            // WIN-PATH: shared (non-exclusive) lock via LockFileEx.
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::FALSE;
+            use windows_sys::Win32::Storage::FileSystem::LockFileEx;
+            use windows_sys::Win32::System::IO::OVERLAPPED;
+            // Flags = 0: shared, blocking.
+            let mut ol: OVERLAPPED = unsafe { std::mem::zeroed() };
+            let ret = unsafe {
+                LockFileEx(f.as_raw_handle() as _, 0, 0, u32::MAX, u32::MAX, &mut ol)
+            };
+            if ret == FALSE {
+                return Err(LightrError::Io(std::io::Error::last_os_error()));
+            }
         }
         Ok(WriteGuard { _file: f })
     }
@@ -385,10 +562,35 @@ impl Store {
     /// writer shared locks have been released.
     pub fn gc_guard(&self) -> Result<GcGuard> {
         let f = self.gc_lock_file()?;
-        let fd = f.as_raw_fd();
-        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-        if ret != 0 {
-            return Err(LightrError::Io(std::io::Error::last_os_error()));
+        #[cfg(unix)]
+        {
+            let fd = f.as_raw_fd();
+            let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+            if ret != 0 {
+                return Err(LightrError::Io(std::io::Error::last_os_error()));
+            }
+        }
+        #[cfg(windows)]
+        {
+            // WIN-PATH: exclusive lock via LockFileEx with LOCKFILE_EXCLUSIVE_LOCK.
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::FALSE;
+            use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+            use windows_sys::Win32::System::IO::OVERLAPPED;
+            let mut ol: OVERLAPPED = unsafe { std::mem::zeroed() };
+            let ret = unsafe {
+                LockFileEx(
+                    f.as_raw_handle() as _,
+                    LOCKFILE_EXCLUSIVE_LOCK,
+                    0,
+                    u32::MAX,
+                    u32::MAX,
+                    &mut ol,
+                )
+            };
+            if ret == FALSE {
+                return Err(LightrError::Io(std::io::Error::last_os_error()));
+            }
         }
         Ok(GcGuard { _file: f })
     }
@@ -414,7 +616,17 @@ impl Store {
         {
             let mut f = File::create(&tmp)?;
             f.write_all(bytes)?;
-            f.sync_all()?; // fsync before rename
+            // fsync before rename: flush file data.
+            #[cfg(unix)]
+            f.sync_all()?;
+            #[cfg(windows)]
+            {
+                // WIN-PATH: FlushFileBuffers on the file before rename.
+                use std::os::windows::io::AsRawHandle;
+                use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
+                let handle = f.as_raw_handle();
+                unsafe { FlushFileBuffers(handle as _) };
+            }
         }
         fs::rename(&tmp, &path)?;
         fsync_dir(&shard)?; // fsync parent dir after rename
@@ -456,7 +668,16 @@ impl Store {
         // fsync the temp file before rename so the data is crash-durable.
         {
             let f = File::open(&tmp)?;
+            #[cfg(unix)]
             f.sync_all()?;
+            #[cfg(windows)]
+            {
+                // WIN-PATH: FlushFileBuffers on the temp file before rename.
+                use std::os::windows::io::AsRawHandle;
+                use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
+                let handle = f.as_raw_handle();
+                unsafe { FlushFileBuffers(handle as _) };
+            }
         }
         fs::rename(&tmp, &dest)?;
         fsync_dir(&shard)?; // fsync parent dir after rename
@@ -800,11 +1021,31 @@ mod tests {
 
         // Locate the object file, relax permissions, flip a byte, restore.
         let obj_path = object_path(&store.root, &d);
-        fs::set_permissions(&obj_path, Permissions::from_mode(0o644)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&obj_path, Permissions::from_mode(0o644)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut perms = fs::metadata(&obj_path).unwrap().permissions();
+            perms.set_readonly(false);
+            fs::set_permissions(&obj_path, perms).unwrap();
+        }
         let mut bytes = fs::read(&obj_path).unwrap();
         bytes[0] ^= 0xFF;
         fs::write(&obj_path, &bytes).unwrap();
-        fs::set_permissions(&obj_path, Permissions::from_mode(0o444)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&obj_path, Permissions::from_mode(0o444)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut perms = fs::metadata(&obj_path).unwrap().permissions();
+            perms.set_readonly(true);
+            fs::set_permissions(&obj_path, perms).unwrap();
+        }
 
         let err = store.get_bytes(&d).unwrap_err();
         match err {
@@ -845,9 +1086,14 @@ mod tests {
         let got = fs::read(&dest).unwrap();
         assert_eq!(&got[..], data);
 
-        let meta = fs::metadata(&dest).unwrap();
-        let mode = meta.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o755, "mode mismatch: got {mode:o}");
+        // Mode check is unix-only (Windows uses ACLs, not mode bits).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(&dest).unwrap();
+            let mode = meta.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755, "mode mismatch: got {mode:o}");
+        }
     }
 
     #[test]
@@ -868,7 +1114,11 @@ mod tests {
         let r = store.rung();
         let valid = matches!(
             r,
-            CowRung::Clone | CowRung::Reflink | CowRung::CopyRange | CowRung::Copy
+            CowRung::Clone
+                | CowRung::Reflink
+                | CowRung::CopyRange
+                | CowRung::RefsBlockClone
+                | CowRung::Copy
         );
         assert!(valid);
     }
