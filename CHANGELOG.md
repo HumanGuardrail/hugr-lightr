@@ -1,5 +1,45 @@
 # Changelog — hugr-lightr
 
+## [Unreleased] — Omni cross-platform wave (2026-06-12)
+
+One product, every desktop — macOS (Intel + Apple Silicon), Linux (x86_64 +
+aarch64), Windows (x86_64). The daemonless core is portable behind `cfg`; each OS
+gets the lightest isolation it natively offers. Code-complete + host-green +
+cross-compile-clean; runtime on foreign hardware is a one-command runbook
+(ADR-0017; docs/spec/build-spec-omni.md).
+
+**vz un-gated from Apple Silicon (the correction):**
+- Virtualization.framework runs Linux guests on Intel Macs too — `--features vz`
+  **compiles + links on this Intel box** (verified, exit 0). Only VZ save/restore
+  (F-406) and Rosetta-in-VM (F-208) are genuinely arm64-only.
+- `packaging/vz.entitlements` (the `com.apple.security.virtualization` entitlement;
+  ad-hoc codesign for local, Developer ID for releases) — the gap that would have
+  blocked vz on ANY Mac. `spikes/s5-vz-boot/run-s5.sh` is now arch-aware
+  (Intel→x86_64 / ASi→arm64) and codesigns before any VM run; arm64 sibling at
+  `spikes/s5-vz-boot-arm64/`.
+
+**Windows tier (NEW — zero `cfg(windows)` existed before):**
+- Native core port, additive behind `#[cfg(windows)]`: file locks→`LockFileEx`,
+  fsync→`FlushFileBuffers` (dir-fsync = documented no-op), control socket→named
+  pipe (JSON protocol unchanged), CoW ladder gains a `RefsBlockClone` rung
+  (FSCTL_DUPLICATE_EXTENTS_TO_FILE, best-effort → `std::fs::copy` fallback),
+  symlinks→`symlink_file`+copy-fallback, perms→`cfg(unix)`.
+- **`wsl` isolation engine** — runs the `ns` model inside WSL2's OS-managed VM
+  ("no daemon" holds); honest probe when WSL2 is absent.
+- `windows-sys` target-gated (never on unix builds). `cargo check --target
+  x86_64-pc-windows-gnu` (lib+bins + all-targets): **0 errors**.
+
+**Distribution + CI:** `release.yml` = 5-target matrix (macOS arm64/x86_64, Linux
+x86_64/aarch64 cross-linked, Windows x86_64 `.zip`) → SHA256SUMS + Release;
+`ci.yml` gate on ubuntu/macos/windows + an aarch64 cross-check (installs CC +
+linker for blake3/ring C deps). macOS release signing applies the vz entitlement.
+
+**Gates:** host `cargo test --workspace` **408/0**, clippy `-D`, fmt clean; Windows
+cross-check 0 errors. Delivered via a 7-WP disjoint-by-crate fleet (git worktrees,
+**zero merge conflicts**) + cold opus critic. Every Windows runtime path is
+`// WIN-PATH` with an honest probe/error + a correct fallback; validation on
+Windows/ARM hardware ships as runbooks — nothing claimed validated until green.
+
 ## [Unreleased] — Ship + VM + Views wave (2026-06-12)
 
 Three parallel tracks toward true SOTA, all code-complete + host-tested
