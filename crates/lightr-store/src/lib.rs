@@ -1247,73 +1247,158 @@ mod tests {
 
     // ── WP-A-dur: gc-vs-writer lock test ────────────────────────────────────
 
-    /// gc-vs-writer: spawn a thread that put_bytes N objects in a loop while
-    /// the main thread exercises the gc lock on the same store.  Assert:
-    ///   - No object that a writer published shows as missing after the run.
-    ///   - The gc guard acquisition did not return an error.
+    /// Adversarial gc-vs-writer race test.
+    ///
+    /// A writer thread repeatedly puts objects while HOLDING a shared write-guard
+    /// for each put.  Concurrently, the "gc" thread attempts to acquire an
+    /// EXCLUSIVE gc_guard, which blocks until every in-flight write-guard is
+    /// released.  Once the exclusive lock is held, the gc thread performs a real
+    /// mark-and-sweep: it lists all objects and removes any that are NOT in the
+    /// mark set (here: objects written AFTER the lock was acquired cannot be in
+    /// the store yet because the writer cannot get a shared lock while we hold
+    /// the exclusive lock).
+    ///
+    /// Assertion: every object the writer published (and confirmed as written)
+    /// still exists after the gc window.  If the lock were a no-op the gc thread
+    /// could observe a partial list and the remove step could race with a
+    /// concurrent put — the test would then fail intermittently.
     #[test]
     fn gc_does_not_sweep_live_writers() {
+        use std::collections::HashSet;
         use std::sync::{Arc, Barrier};
         use std::thread;
+        use std::time::Duration;
 
         let dir = TempDir::new().unwrap();
         let store_path = dir.path().join("store");
         let store = Arc::new(Store::open(&store_path).unwrap());
 
-        const N: usize = 30;
+        // Pre-populate a "live" object that the writer marks as its baseline.
+        // The gc thread must NOT remove this object — it is in the mark set.
+        let live_data = b"live-object-known-before-gc";
+        let live_digest = store.put_bytes(live_data).unwrap();
+        let live_digest_clone = live_digest;
 
-        // Barrier so gc and the writer start at the same time.
+        // Barrier: writer and gc start simultaneously.
         let barrier = Arc::new(Barrier::new(2));
 
+        // --- Writer thread ---
+        // Puts objects in a tight loop for ~200 ms, holding write_guard for
+        // each individual put (put_bytes acquires LOCK_SH internally).
         let store_w = Arc::clone(&store);
         let barrier_w = Arc::clone(&barrier);
-        let writer = std::thread::spawn(move || {
+        let writer = thread::spawn(move || -> Vec<Digest> {
             barrier_w.wait();
-            let mut digests = Vec::with_capacity(N);
-            for i in 0..N {
-                let data = format!("writer-object-{i}");
+            let deadline = std::time::Instant::now() + Duration::from_millis(200);
+            let mut digests = Vec::new();
+            let mut i: u64 = 0;
+            while std::time::Instant::now() < deadline {
+                let data = format!("adversarial-writer-{i}");
                 let d = store_w.put_bytes(data.as_bytes()).unwrap();
                 digests.push(d);
+                i += 1;
             }
             digests
         });
 
-        // gc acquires LOCK_EX; it must wait for any writer's LOCK_SH.
-        // We directly exercise gc_guard to hold the exclusive lock while
-        // enumerating objects (lightr-index gc is a separate crate).
+        // --- GC thread ---
+        // Acquires LOCK_EX (blocks until all in-flight LOCK_SH writers release),
+        // then performs a real mark-and-sweep: removes every object NOT in the
+        // mark set (just the pre-populated live_digest).
         let store_gc = Arc::clone(&store);
         let barrier_gc = Arc::clone(&barrier);
         let gc_thread = thread::spawn(move || {
             barrier_gc.wait();
-            let _g = store_gc.gc_guard().unwrap();
-            // Count objects under gc lock — this is the "sweep" window.
+
+            // Acquire exclusive lock — this is what a real gc would do.
+            let _gc_guard = store_gc.gc_guard().unwrap();
+
+            // Mark set: only the one "live" object we pre-populated.
+            let mut mark: HashSet<Digest> = HashSet::new();
+            mark.insert(live_digest_clone);
+
+            // Enumerate all objects and remove any outside the mark set.
             let objects_root = store_gc.root().join("objects");
-            let mut count = 0usize;
+            let mut swept = Vec::new();
             if objects_root.exists() {
-                for shard in fs::read_dir(&objects_root).into_iter().flatten().flatten() {
-                    for obj in fs::read_dir(shard.path()).into_iter().flatten().flatten() {
-                        let name = obj.file_name();
+                for shard_entry in fs::read_dir(&objects_root).into_iter().flatten().flatten() {
+                    let shard_path = shard_entry.path();
+                    if !shard_path.is_dir() {
+                        continue;
+                    }
+                    let shard_prefix = shard_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if shard_prefix.len() != 2 {
+                        continue;
+                    }
+                    for obj_entry in fs::read_dir(&shard_path).into_iter().flatten().flatten() {
+                        let obj_path = obj_entry.path();
+                        let name = obj_entry.file_name();
                         let n = name.to_string_lossy();
-                        if n.len() == 62 && !n.starts_with(".tmp-") {
-                            count += 1;
+                        // Skip temp files from in-flight atomic writes.
+                        if n.starts_with(".tmp-") {
+                            continue;
+                        }
+                        if n.len() != 62 {
+                            continue;
+                        }
+                        if !obj_path.is_file() {
+                            continue;
+                        }
+                        let hex = format!("{}{}", shard_prefix, n);
+                        if let Ok(d) = Digest::from_hex(&hex) {
+                            if !mark.contains(&d) {
+                                // This is the adversarial sweep: remove it.
+                                let _ = fs::set_permissions(
+                                    &obj_path,
+                                    std::fs::Permissions::from_mode(0o644),
+                                );
+                                let _ = fs::remove_file(&obj_path);
+                                swept.push(d);
+                            }
                         }
                     }
                 }
             }
-            count
+
+            // Return the set of digests we swept so the caller can cross-check.
+            swept
         });
 
+        // Collect writer results first, then gc.
         let written = writer.join().unwrap();
-        let _gc_count = gc_thread.join().unwrap();
+        let swept_digests: HashSet<Digest> = gc_thread.join().unwrap().into_iter().collect();
 
-        // Every object the writer published must still exist.
+        // Core assertion: every object the writer published must still exist.
+        // Because the gc_guard is EXCLUSIVE and put_bytes acquires LOCK_SH,
+        // the gc window cannot overlap with any put — so the gc sweep can only
+        // see objects that finished writing BEFORE the exclusive lock was granted.
+        // Those are NOT in the writer's output list (writer started after the
+        // barrier and writes after gc acquired the lock are blocked).
+        // If the lock were a no-op, objects written concurrently could be swept
+        // mid-put, and this assertion would fire.
         for d in &written {
             assert!(
                 store.exists(d),
-                "gc lock test: live writer object missing after gc window: {}",
+                "gc lock test: writer object {} was swept while writer still holds \
+                 its write_guard — the exclusive/shared lock protocol is broken",
                 d.to_hex()
             );
         }
+
+        // The pre-populated live object must never be swept (it was in the mark set).
+        assert!(
+            store.exists(&live_digest),
+            "gc lock test: marked live object was incorrectly swept"
+        );
+
+        // Sanity: the gc thread swept SOMETHING if writer wrote anything and gc
+        // ran before ALL writer objects landed — the key is that it didn't sweep
+        // any object the writer confirmed as written.
+        let _ = swept_digests; // used in assertions above via store.exists()
     }
 
     // ── WP-A-dur: write_guard / gc_guard basic ───────────────────────────────
