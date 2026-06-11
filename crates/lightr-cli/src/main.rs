@@ -208,6 +208,9 @@ enum Cmd {
         /// Hydrate a ref CoW into a temp dir and hand it to the engine as rootfs
         #[arg(long, value_name = "REF")]
         rootfs: Option<String>,
+        /// Process-tree memoization (opt-in; honest fallback to whole-run memo)
+        #[arg(long)]
+        deep_memo: bool,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
@@ -405,6 +408,7 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
             mount,
             engine,
             rootfs,
+            deep_memo,
             command,
         } => handlers::run::run(
             &dir,
@@ -417,6 +421,7 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
             &mount,
             &engine,
             rootfs.as_deref(),
+            deep_memo,
         ),
         Cmd::Engine { subcmd } => match subcmd {
             EngineCmd::Ls => handlers::engine::ls(json),
@@ -1185,6 +1190,7 @@ mod tests {
             &[],
             "bogus",
             None,
+            false,
         );
         assert_eq!(code, 2, "bad engine string must exit 2");
     }
