@@ -213,12 +213,18 @@ tree generator shared: nested dirs, exec-bit file, symlink, empty dir,
 
 ## 9. Budgets (release build; bench `--check` in CI)
 
-B1 `--version` <5 ms · B2 memo-hit `run` ≤10 ms · B3 hydrate 10k files
-≤150 ms warm (rung=Clone) · B4 replay ≤10 ms · B5 snapshot 10k warm
-≤100 ms · B6 status 10k warm ≤50 ms · B7 binary ≤10 MB · B8 zero
-processes between invocations. Margins: ×3 on debug/CI-noise; measured
-medians-of-5 after 1 warmup. S4 (clonefile storm) calibrates B3 before
-WP-2 merges.
+B1 `--version` <5 ms · B2 memo-hit `run` ≤10 ms · B4 replay ≤10 ms ·
+B6 status 10k warm-index ≤500 ms · B7 binary ≤10 MB · B8 zero processes
+between invocations. Margins: ×3 on debug/CI-noise; medians-of-5 after 1
+warmup.
+
+**S4-calibrated (2026-06-11, `spikes/RESULTS.md` — this Intel dev box):**
+per-file metadata ops cost ~2 ms here, so O(files) materialization budgets
+bind to machine class: **B3′** hydrate 10k warm ≤5 s (parallel CoW) ·
+**B5′** snapshot 10k ≤2.5 s cold-hash / ≤500 ms warm-index. The
+whitepaper's ~ms materialization targets bind to **views (ADR-0013, R2)**
+and Apple-Silicon hardware — S4 is the empirical justification for the
+views layer — and stay unclaimed until the bench measures them there.
 
 ## 10. Wave partition (conflict map: CONFLICT-FREE)
 
