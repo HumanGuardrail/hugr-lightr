@@ -3,10 +3,7 @@
 use lightr_run::ps;
 use serde::Serialize;
 
-use crate::{
-    exit::{die_internal, die_lightr},
-    lightr_home,
-};
+use crate::{exit::die_lightr, lightr_home};
 
 #[derive(Serialize)]
 struct RunInfoJson {
