@@ -16,7 +16,10 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "UNLICENSED"
+license = "Apache-2.0"
+# publish stays false: ADR-0008 lifted the LICENSE gate (Apache-2.0), but
+# pushing to crates.io is a separate GTM decision (whitepaper §9.8: launch
+# after Runners M1). Flip to true when that timing call is made.
 publish = false
 
 [workspace.dependencies]
