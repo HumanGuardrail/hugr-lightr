@@ -24,9 +24,11 @@ canonical vision; v0.1 scope cut but not started. TechLead is installed
 (`.techlead/` state, map at `.techlead/memory/MAP.md`).
 
 Read first: `docs/whitepaper/hugr-cell-v1.md` (**canonical vision** — source
-of truth) · `docs/product/product.md` (ICPs, pricing posture, open decisions)
-· `docs/VISION.md` (the funnel) · `docs/ARCHITECTURE.md` (engines, seams) ·
-`docs/MVP-v0.1.md` (first slice + DoD).
+of truth) · `docs/adr/` (decision records — code is written only against
+Accepted ADRs) · `docs/spec/build-spec-v0.1.md` (frozen build surfaces +
+acceptance suite + wave partition) · `docs/product/product.md` (ICPs,
+pricing posture, open decisions) · `docs/VISION.md` (the funnel) ·
+`docs/ARCHITECTURE.md` (engines, seams) · `docs/MVP-v0.1.md` (scope + DoD).
 
 ## Principles (decided — don't relitigate without the owner)
 
