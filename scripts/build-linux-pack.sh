@@ -51,7 +51,7 @@ set -euo pipefail
 # with the sha256 when tracking a new pin.
 readonly KERNEL_VERSION="6.18.5"
 readonly KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz"
-readonly KERNEL_SHA256="f65a17fcc1c2fb0bd88ddaf069d1ad87ba9a72b48c9059fc4bfe3b24300d1ae5"
+readonly KERNEL_SHA256="189d1f409cef8d0d234210e04595172df392f8cb297e14b447ed95720e2fd940"
 # Apple's container-optimized arm64 kernel config (raw, pinned to a tag would
 # be stricter; main is documented here and easy to pin once a tag is chosen).
 readonly KERNEL_CONFIG_URL="https://raw.githubusercontent.com/apple/containerization/main/kernel/config-arm64"
