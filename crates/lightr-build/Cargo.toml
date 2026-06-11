@@ -1,0 +1,19 @@
+[package]
+name = "lightr-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lightr-core = { workspace = true }
+lightr-store = { workspace = true }
+lightr-index = { workspace = true }
+lightr-run = { workspace = true }
+lightr-oci = { workspace = true }
+lightr-engine = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

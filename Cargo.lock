@@ -567,6 +567,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightr-build"
+version = "0.1.0"
+dependencies = [
+ "lightr-core",
+ "lightr-engine",
+ "lightr-index",
+ "lightr-oci",
+ "lightr-run",
+ "lightr-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "lightr-cli"
 version = "0.1.0"
 dependencies = [
