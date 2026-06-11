@@ -624,6 +624,11 @@ impl Store {
         Ok(values)
     }
 
+    /// Store root path (gc walks objects from here). R1.
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
     /// gc sweep only: chmod 0o644 then remove one object.
     /// Object absent ⇒ Ok(()) (idempotent).
     pub fn remove_object(&self, d: &Digest) -> Result<()> {
@@ -1084,9 +1089,4 @@ mod tests {
         store.remove_object(&d).unwrap();
     }
 
-    /// Returns the store's root path (needed by gc to walk the objects tree).
-    /// Added in R1 alongside the other gc-support methods.
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
 }
