@@ -307,16 +307,46 @@ fn a4_no_daemon() {
         .assert()
         .success();
 
-    // pgrep -x lightr must return non-zero (no process found)
-    let pgrep = std::process::Command::new("pgrep")
-        .args(["-x", "lightr"])
-        .output()
-        .expect("pgrep must be available");
-    // pgrep exits 1 when no processes found
+    // No-daemon proof, scoped to THIS test's LIGHTR_HOME (a global `pgrep -x
+    // lightr` races other parallel acceptance tests that legitimately spawn
+    // the binary). These synchronous verbs must leave: no control sockets,
+    // no run/ supervisor dirs, no compose/ supervisors — nothing resident.
+    fn no_sockets(dir: &Path) -> bool {
+        let Ok(rd) = fs::read_dir(dir) else {
+            return true;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                if !no_sockets(&p) {
+                    return false;
+                }
+            } else if p.extension().and_then(|x| x.to_str()) == Some("sock") {
+                return false;
+            }
+        }
+        true
+    }
     assert!(
-        !pgrep.status.success() || pgrep.stdout.trim_ascii().is_empty(),
-        "pgrep -x lightr should find nothing; found: {}",
-        String::from_utf8_lossy(&pgrep.stdout)
+        no_sockets(home.path()),
+        "no control sockets may remain under LIGHTR_HOME after sync verbs"
+    );
+    let run_dir = home.path().join("run");
+    assert!(
+        !run_dir.exists()
+            || fs::read_dir(&run_dir)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+        "no run/ supervisor dirs may exist (this test never detached)"
+    );
+    let compose_dir = home.path().join("compose");
+    assert!(
+        !compose_dir.exists()
+            || fs::read_dir(&compose_dir)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+        "no compose/ supervisors may exist"
     );
 
     // LIGHTR_HOME tree must contain only regular files, dirs, or symlinks

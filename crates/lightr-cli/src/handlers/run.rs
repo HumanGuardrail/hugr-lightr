@@ -29,7 +29,7 @@ use std::io::Write;
 use lightr_core::validate_ref_name;
 use lightr_engine::{engine_for, EngineKind, ExecSpec};
 use lightr_index;
-use lightr_run::{run_memoized, spawn_detached, Mount, RunSpec};
+use lightr_run::{run_memoized, run_memoized_deep, spawn_detached, DeepMemoConfig, Mount, RunSpec};
 use lightr_store::Store;
 use serde::Serialize;
 
@@ -83,6 +83,7 @@ pub fn run(
     mounts_raw: &[String],
     engine_str: &str,
     rootfs_ref: Option<&str>,
+    deep_memo: bool,
 ) -> i32 {
     // Parse engine kind — bad value ⇒ exit 2
     let engine_kind = match engine_str.parse::<EngineKind>() {
@@ -194,9 +195,22 @@ pub fn run(
         );
     }
 
-    let outcome = match run_memoized(&spec, &store) {
-        Ok(o) => o,
-        Err(e) => return die_lightr(&e),
+    // Deep-memo (opt-in): surface the honest capability note, then run.
+    // The fn falls back to whole-run memo when the shim can't attach.
+    let outcome = if deep_memo {
+        let (avail, reason) = lightr_run::deep_memo_available();
+        if !avail {
+            eprintln!("lightr: deep-memo unavailable ({reason}) — falling back to whole-run memo");
+        }
+        match run_memoized_deep(&spec, &store, &DeepMemoConfig { enabled: true }) {
+            Ok(o) => o,
+            Err(e) => return die_lightr(&e),
+        }
+    } else {
+        match run_memoized(&spec, &store) {
+            Ok(o) => o,
+            Err(e) => return die_lightr(&e),
+        }
     };
 
     let hex = outcome.key.to_hex();
