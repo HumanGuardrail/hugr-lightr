@@ -1617,3 +1617,26 @@ mod tests {
         assert!(hit2, "predict after run must be hit");
     }
 }
+
+// ---------------------------------------------------------------------------
+// R4 additions — frozen contract: build-spec-r4.md §1 (bodies: R4-W1)
+// ---------------------------------------------------------------------------
+
+/// Deep-memo (opt-in nitro, ADR-0016): process-tree memoization via a
+/// spawn-shim. Degrades HONESTLY to whole-run memo when the shim can't
+/// attach (SIP/static binaries) — never silently claims the capability.
+pub struct DeepMemoConfig {
+    pub enabled: bool,
+}
+
+/// run_memoized with optional deep-memo. When cfg.enabled and the shim
+/// attaches, sub-invocations are memoized; otherwise falls back to whole-run
+/// memo (run_memoized) and reports the fallback reason via the returned
+/// outcome's stderr stream / a stderr note at the CLI layer.
+pub fn run_memoized_deep(
+    _spec: &RunSpec,
+    _store: &Store,
+    _cfg: &DeepMemoConfig,
+) -> Result<RunOutcome> {
+    todo!("R4-W1: spawn-shim deep-memo + honest fallback to run_memoized")
+}
