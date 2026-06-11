@@ -521,9 +521,23 @@ fn apply_layers(tempdir: &Path, blobs: &[LayerBlob]) -> Result<u64> {
                         fs::create_dir_all(p).map_err(LightrError::Io)?;
                     }
                     fs::write(dest, data).map_err(LightrError::Io)?;
-                    use std::os::unix::fs::PermissionsExt;
-                    fs::set_permissions(dest, fs::Permissions::from_mode(*mode))
-                        .map_err(LightrError::Io)?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(dest, fs::Permissions::from_mode(*mode))
+                            .map_err(LightrError::Io)?;
+                    }
+                    #[cfg(windows)]
+                    {
+                        // WIN-PATH: Windows has no POSIX mode bits; honour read-only (bit 0o200 = owner write).
+                        // All other permission semantics are skipped on Windows.
+                        let readonly = (*mode & 0o200) == 0;
+                        if readonly {
+                            let mut perms = fs::metadata(dest).map_err(LightrError::Io)?.permissions();
+                            perms.set_readonly(true);
+                            let _ = fs::set_permissions(dest, perms);
+                        }
+                    }
                 }
                 PendingEntry::Symlink { dest, link_target } => {
                     if whited_out_paths.contains(dest.as_path()) {
@@ -533,7 +547,29 @@ fn apply_layers(tempdir: &Path, blobs: &[LayerBlob]) -> Result<u64> {
                         fs::create_dir_all(p).map_err(LightrError::Io)?;
                     }
                     let _ = fs::remove_file(dest);
+                    #[cfg(unix)]
                     std::os::unix::fs::symlink(link_target, dest).map_err(LightrError::Io)?;
+                    #[cfg(windows)]
+                    {
+                        // WIN-PATH: symlink creation requires Developer Mode or admin on Windows.
+                        // Fall back to copying the target if symlink creation fails so import never hard-fails.
+                        use std::os::windows::fs::symlink_file;
+                        if symlink_file(link_target, dest).is_err() {
+                            // Symlink creation failed (no Dev Mode / not admin) — copy the target instead.
+                            // The target may itself be relative; resolve it against dest's parent.
+                            let resolved_target = if link_target.is_absolute() {
+                                link_target.to_path_buf()
+                            } else {
+                                dest.parent()
+                                    .unwrap_or_else(|| std::path::Path::new("."))
+                                    .join(link_target)
+                            };
+                            if resolved_target.exists() {
+                                fs::copy(&resolved_target, dest).map_err(LightrError::Io)?;
+                            }
+                            // If target does not exist either (broken symlink in the layer), skip — no error.
+                        }
+                    }
                 }
                 PendingEntry::Hardlink { .. } => {} // handled below
             }
@@ -1505,9 +1541,12 @@ mod tests {
         // /app/hello must be present and executable (mode 0755)
         let hello = hydrate_dir.join("app/hello");
         assert!(hello.exists(), "app/hello must exist");
-        use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(&hello).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o755, "app/hello mode should be 0755, got {mode:o}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&hello).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755, "app/hello mode should be 0755, got {mode:o}");
+        }
 
         let content = fs::read(&hello).unwrap();
         assert_eq!(content, b"hello world\n");
