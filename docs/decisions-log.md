@@ -126,3 +126,22 @@ at root (no waivers):
    generous on purpose (legit guest connects only at job-end); precise
    cancel-on-VM-stop remains S5 (BOOT-PATH, can't validate on Intel).
 Final: 379 tests/0, clippy -D clean, `--features vz` compiles+lints clean.
+
+## 2026-06-12 — ship-vm-views cold critic + S5 runbook fix
+
+Critic (opus) verdict: GAPS but **no honesty violations, no vacuous tests, no
+overclaims** — release/naming/kpack/views all verified REAL (403/0). The 3
+gaps were all in the S5 runbook (the one artifact the owner pays to run on a
+rented ARM Mac):
+1. build→install disconnect: `run-s5.sh` Step 2 ran build-linux-pack.sh but
+   never `install-pack`; pack landed in build/linux-pack while probe_vz checks
+   ~/.lightr/packs/linux → would log_fail at Step 2. Fixed: build → explicit
+   `engine install-pack <dir>` → verify. (Failed-closed, never a false green.)
+2. kernel not turnkey: from-source kernel build needs a Linux env macOS lacks;
+   runbook surprised the user with exit 3. Fixed: `LIGHTR_KERNEL=/path/to/vmlinux`
+   passthrough + README §2.4 makes the prebuilt-kernel the recommended path and
+   the from-source path honestly heavy.
+3. README §3 showed `vz available` as reachable pre-install → corrected to
+   build→install→verify order.
+Product code untouched (Rust 403/0 holds); fixes are shell+README, bash -n +
+shellcheck clean.

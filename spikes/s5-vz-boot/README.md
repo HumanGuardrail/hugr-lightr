@@ -78,14 +78,36 @@ rustup target add aarch64-unknown-linux-musl   # guest init cross-compile target
 rustup show   # confirm stable aarch64-apple-darwin is active
 ```
 
-### 2.4 Install cross-compilation toolchain for lightr-init
+### 2.4 Toolchain + kernel for the pack (READ — not fully turnkey)
 
+The pack = a Linux **kernel** + an **initrd** (with `lightr-init` as `/init`).
+Two prerequisites, one of which is not native to macOS:
+
+**(a) lightr-init cross-compile (musl) — easy:**
 ```
-# musl cross-linker for aarch64 Linux — needed by build-linux-pack.sh
-brew install filosottile/musl-cross/musl-cross
-# Verify:
+rustup target add aarch64-unknown-linux-musl
+brew install filosottile/musl-cross/musl-cross   # provides aarch64-linux-musl-gcc
 aarch64-linux-musl-gcc --version
 ```
+
+**(b) the kernel — pick ONE (the from-source path needs a Linux builder):**
+- **Recommended (turnkey): bring a prebuilt `vmlinux`.** Build/obtain an
+  arm64 kernel once with the Apple Containerization config
+  (`github.com/apple/containerization`, `kernel/config-arm64`; virtiofs +
+  AF_VSOCK enabled), then point the harness at it:
+  ```
+  export LIGHTR_KERNEL=/path/to/vmlinux
+  ```
+  `build-linux-pack.sh` skips its from-source build and uses this.
+- **From source (heavy):** `build-linux-pack.sh` fetches + sha-verifies Linux
+  6.18.5 but **does not compile a kernel on macOS** — kernel `make` needs a
+  Linux build environment (docker/lima or a Linux box). The script detects
+  the missing toolchain and exits with instructions rather than faking a
+  kernel. If you go this route, build the kernel in a Linux container/VM and
+  export `LIGHTR_KERNEL` to the result.
+
+> Honest note: until a `vmlinux` exists (via either path), Step 2 below will
+> stop with a clear message — it never proceeds with a fake kernel.
 
 ### 2.5 Install skopeo (or have docker available)
 
@@ -121,15 +143,21 @@ Run in order. All commands assume `cwd = hugr-lightr/`.
 source "$HOME/.cargo/env"        # founder-Mac PATH workaround: rustup not on $PATH by default
 cargo build --release --features vz
 
-# Step 2 — Build and install the Linux kernel pack
-bash scripts/build-linux-pack.sh --arch arm64
-# The script downloads/builds the kernel and lightr-init, assembles the pack,
-# and installs it to $LIGHTR_HOME/packs/linux (default: ~/.lightr/packs/linux).
-# If the cross-toolchain is absent it will print exactly what to install.
+# Step 2 — Build the pack, THEN install it (two distinct steps)
+#   The build script assembles kernel+initrd into ./build/linux-pack — it does
+#   NOT install. install-pack then validates (verify_pack) + copies the pack to
+#   ~/.lightr/packs/linux (the path the vz engine probes). Bring a kernel per §2.4:
+export LIGHTR_KERNEL=/path/to/vmlinux      # see §2.4(b); omit only if building from source in a Linux env
+bash scripts/build-linux-pack.sh --arch arm64 --out ./build/linux-pack \
+     ${LIGHTR_KERNEL:+--kernel "$LIGHTR_KERNEL"}
+./target/release/lightr engine install-pack ./build/linux-pack
 
-# Step 3 — Verify the engine sees the pack
+# Step 3 — Verify the engine sees the pack (only AFTER install-pack)
 ./target/release/lightr engine ls
 # Expected line:  vz    available    vz engine ready (pack: ~/.lightr/packs/linux)
+
+# (Or skip Steps 1–3 manual sequence and just run the harness, which does all
+#  of this + the boot assertions: `bash spikes/s5-vz-boot/run-s5.sh`)
 
 # Step 4 — Import a tiny Alpine OCI image
 # Option A — skopeo (no docker daemon):

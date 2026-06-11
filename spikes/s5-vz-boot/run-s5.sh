@@ -79,22 +79,41 @@ if [ ! -x "${LIGHTR}" ]; then
 fi
 log_pass
 
-# ── Step 2: Build + install the linux pack via W3 script ──────────────────────
+# ── Step 2: Build the linux pack, THEN install it ─────────────────────────────
 #
-# scripts/build-linux-pack.sh (produced by WP W3) assembles the kernel + initrd
-# for the vz engine and installs them to $LIGHTR_HOME/packs/linux.
-# The --arch arm64 flag selects the aarch64-unknown-linux-musl target for
-# lightr-init.
+# scripts/build-linux-pack.sh assembles kernel + initrd (lightr-init as /init)
+# into a pack DIRECTORY; it does NOT install. We then run
+# `lightr engine install-pack <dir>`, which validates the pack (verify_pack:
+# cpio /init executable, non-empty kernel) and copies it to
+# $LIGHTR_HOME/packs/linux — the path probe_vz checks.
+#
+# KERNEL: building a Linux kernel from source needs a cross toolchain the build
+# script detects and demands (it will NOT fake a kernel). To stay turnkey,
+# pre-obtain a vmlinux (see README §2.4) and export LIGHTR_KERNEL=/path/to/it;
+# it's passed through to --kernel and the from-source build is skipped.
 log_step "Step 2: Building + installing linux pack (arm64)"
 BUILD_PACK_SCRIPT="${REPO_ROOT}/scripts/build-linux-pack.sh"
 if [ ! -f "${BUILD_PACK_SCRIPT}" ]; then
-    log_fail "${BUILD_PACK_SCRIPT} not found — ensure WP W3 (s5-runbook) has been merged"
+    log_fail "${BUILD_PACK_SCRIPT} not found — ensure the wave is merged"
 fi
-bash "${BUILD_PACK_SCRIPT}" --arch arm64 2>&1
+PACK_DIR="${REPO_ROOT}/build/linux-pack"
+if [ -n "${LIGHTR_KERNEL:-}" ]; then
+    if [ ! -f "${LIGHTR_KERNEL}" ]; then
+        log_fail "LIGHTR_KERNEL=${LIGHTR_KERNEL} does not exist"
+    fi
+    bash "${BUILD_PACK_SCRIPT}" --arch arm64 --out "${PACK_DIR}" --kernel "${LIGHTR_KERNEL}" 2>&1 \
+        || log_fail "build-linux-pack.sh failed (see output above)"
+else
+    bash "${BUILD_PACK_SCRIPT}" --arch arm64 --out "${PACK_DIR}" 2>&1 \
+        || log_fail "build-linux-pack.sh failed — a kernel toolchain is missing. Pre-build a vmlinux and re-run with LIGHTR_KERNEL=/path/to/vmlinux (see README.md §2.4)"
+fi
+# Install the built pack so the engine can find it.
+"${LIGHTR}" engine install-pack "${PACK_DIR}" 2>&1 \
+    || log_fail "engine install-pack rejected the pack at ${PACK_DIR} (verify_pack failed)"
 # Verify the pack is now visible to the engine.
 ENGINE_LS=$("${LIGHTR}" engine ls 2>&1)
 if ! echo "${ENGINE_LS}" | grep -q "^vz.*available"; then
-    log_fail "engine ls reports vz unavailable after pack install. Output: ${ENGINE_LS}"
+    log_fail "engine ls reports vz unavailable after install-pack. Output: ${ENGINE_LS}"
 fi
 log_pass
 
