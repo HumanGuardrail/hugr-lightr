@@ -72,3 +72,19 @@ budgets binding to AS hardware. Honest degradations are documented, never
 silent. R1 scope cut logged: native-tier resource limits are NOT
 enforceable honestly on macOS without VM/ns tiers — flags reserved,
 enforcement lands with ns/vz (feature-tree F-203 note).
+
+## 2026-06-12 — R2 cold-critic findings + lead amendment (sha2)
+
+Critic (opus, cold) flagged a FAIL-OPEN: build-spec-r2 §3 claims "blob digest
+verified before applying (fail-closed)" but the pull path verified nothing
+(blobs named by loop index, not sha256) — a substituted registry blob would
+be imported as a trusted ref, and the net-gate hides it from CI. Under the
+rigor compact this is debt that must be closed at the root, not waived.
+
+**Lead amendment (authorized under the R1→R4 mandate):** add `sha2` crate to
+lightr-oci (justified: registry integrity is load-bearing; tiny, audited dep)
+and verify every layer + config blob's sha256 against the manifest digest on
+BOTH import_layout and pull, fail-closed (LightrError::Integrity, real
+digests). Also fix: size-mismatch exit class, OCI whiteout intra-layer
+ordering, opaque-same-layer, hardlink forward-ref, pull malformed-ref → exit 2.
+Dispatched as R2-HARDEN (parallel, disjoint from R3-build).
