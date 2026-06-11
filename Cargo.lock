@@ -570,7 +570,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "lightr-core",
+ "lightr-engine",
  "lightr-index",
+ "lightr-oci",
  "lightr-run",
  "lightr-store",
  "serde",
