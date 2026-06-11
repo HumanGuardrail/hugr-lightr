@@ -14,3 +14,8 @@ path = "src/bin/init.rs"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Real guest PID1 syscalls (mount(2) + AF_VSOCK) live in bin/init.rs behind
+# cfg(target_os="linux"); the library + host stub need no libc.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
