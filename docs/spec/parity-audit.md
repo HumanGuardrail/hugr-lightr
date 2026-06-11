@@ -26,7 +26,7 @@
 |---|---|---|---|
 | F-101 | stat-index | ✅ | lightr-index units; A5 |
 | F-102 | snapshot ≤budget warm | ✅ | bench B5b (233 ms@2k, machine-class) |
-| F-103 | hydrate CoW (R0) / O(1) view (R2) | ✅ R0 / ⏳ view | A1; bench B3′. Views = ADR-0013, spike S1/S3 |
+| F-103 | hydrate CoW (R0) / O(1) view (R2) | ✅ R0 / 🟡 view | A1; bench B3′. **Views: `lightr-views` crate — ViewPlan + Solidifier pure logic host-tested; composefs(Linux)/NFS-loopback(macOS) backends compile-only (VIEW-PATH), runtime = spike S1/S3 on a target box** |
 | F-104 | status | ✅ | A5; bench B6 |
 | F-105 | run memoized | ✅ | A2, A3 |
 | F-106 | memo replay ≤budget | ✅ | bench B4 |
@@ -41,8 +41,8 @@
 | F-202 | exec/logs/ps/stop | ✅ | A9, A10, A9b, A9e |
 | F-203 | resource limits | ⏳ | reserved; honest — needs ns/vz (decisions-log) |
 | F-204 | ns engine (Linux) | 🟡 | code complete; probe honest on macOS (A19); CI-gated on Linux |
-| F-205 | vz engine boot-never | 🟡 | shim behind `vz` feature (compiles+lints clean w/ swiftc); **real vsock exit-code receiver — fake exitCode=0 KILLED** (prod phase); boot itself = spike S5 (Apple Silicon) |
-| F-206 | Apple kernel + Rust PID1 | 🟡 | **`lightr-init` crate: guest PID1 with real exit reporting, host-tested**; cpio pack assembly real+tested; kernel sourcing + boot = S5 |
+| F-205 | vz engine boot-never | 🟡 | shim behind `vz` feature (compiles+lints w/ swiftc); real vsock exit-code receiver (no fake 0; silent-guest→255 backstop); **S5 boot runbook + harness ready (`spikes/s5-vz-boot/`)** — boot itself = run on a rented ARM Mac |
+| F-206 | Apple kernel + Rust PID1 | 🟡 | `lightr-init` PID1 (real exit, host-tested); **real kernel-pack pipeline (`scripts/build-linux-pack.sh`, kernel = Apple Containerization config, pinned) + `verify_pack` structural gate wired into `install-pack`**; boot = S5 |
 | F-207 | guest views over store | ⏳ | with vz boot, future |
 | F-208 | Rosetta x86 | ⏳ | vz path, future |
 | F-209 | fc engine (cloud) | ⏳ | Runners fabric, future |
@@ -87,7 +87,7 @@
 | F-601 | single binary ≤10 MB | ✅ | release 1.9 MB (bench B7) |
 | F-602 | `bench --vs-docker` | ✅ | bench cmd; B1–B11 |
 | F-603 | microwave floor (1 core/512 MB/POSIX) | 🟡 | copy-rung fallback coded; not yet measured on constrained HW |
-| F-604 | brew/curl/gh-releases signed | 🟡 | **machinery prepared** (packaging/: install.sh, lightr.rb, release.sh, fail-loud until a release exists); **license gate lifted — Apache-2.0 (ADR-0008)**; publish ⏳ on GTM timing (whitepaper §9.8, after Runners M1) |
+| F-604 | brew/curl/gh-releases signed | 🟡 | **release pipeline live** (`.github/workflows/release.yml`: tag-triggered matrix build + checksums + GitHub Release; macOS signing gated behind owner secrets, unsigned clearly labeled); packaging/ + brew formula wired; **name verified FREE — crate `hugr-lightr`, binary `lightr` (`docs/NAMING.md`)**; license = Apache-2.0; publish ⏳ on GTM timing (after Runners M1) |
 | F-605 | zero telemetry | ✅ | A6 + no network in core (ADR-0007) |
 
 ## Operational (production hardening phase, 2026-06-12)
