@@ -87,7 +87,7 @@
 | F-601 | single binary ≤10 MB | ✅ | release 1.9 MB (bench B7) |
 | F-602 | `bench --vs-docker` | ✅ | bench cmd; B1–B11 |
 | F-603 | microwave floor (1 core/512 MB/POSIX) | 🟡 | copy-rung fallback coded; not yet measured on constrained HW |
-| F-604 | brew/curl/gh-releases signed | 🟡 | **machinery prepared** (packaging/: install.sh, lightr.rb, release.sh — all fail-loud/license-gated); publish ⏳ on ADR-0008 (owner) |
+| F-604 | brew/curl/gh-releases signed | 🟡 | **machinery prepared** (packaging/: install.sh, lightr.rb, release.sh, fail-loud until a release exists); **license gate lifted — Apache-2.0 (ADR-0008)**; publish ⏳ on GTM timing (whitepaper §9.8, after Runners M1) |
 | F-605 | zero telemetry | ✅ | A6 + no network in core (ADR-0007) |
 
 ## Operational (production hardening phase, 2026-06-12)

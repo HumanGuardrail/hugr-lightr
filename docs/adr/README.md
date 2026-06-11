@@ -15,7 +15,7 @@ the batch acceptance of 0001/0002/0004/0006/0007 were Accepted under the
 | [0005](0005-engine-posture.md) | v0.1 native-only, no Engine trait | **Superseded by 0014** |
 | [0006](0006-toolchain.md) | Toolchain & edition | Accepted (mandate) |
 | [0007](0007-telemetry.md) | Zero telemetry | Accepted (mandate) |
-| [0008](0008-license.md) | License | **Open (owner)** — blocks public distribution only |
+| [0008](0008-license.md) | License | **Accepted — Apache-2.0** (LICENSE gate lifted; GTM/M1 timing remains) |
 | [0009](0009-content-plane.md) | The content plane (file CAS + CoW + refs) | Accepted (mandate) |
 | [0010](0010-stat-index.md) | The stat-index | Accepted (mandate) |
 | [0011](0011-wire-bridge.md) | Wire bridge (CoreLink/OCI at the border) | Accepted (mandate) |

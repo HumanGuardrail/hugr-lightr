@@ -23,8 +23,9 @@ $ lightr bench --vs-docker                         # run the table yourself
 > What is **NOT yet real**: running a Linux container on a Mac via a microVM
 > (the `vz` engine is built behind a feature flag, boot path unvalidated —
 > needs Apple-Silicon validation, spike S5), the O(1) "views" materialization
-> layer (designed, not built), and public distribution (`brew`/release —
-> license-gated, ADR-0008). The headline perf numbers (~ms materialize,
+> layer (designed, not built), and a published `brew`/release (the project
+> is **Apache-2.0** per ADR-0008, but release *timing* is gated on
+> GTM/Runners M1). The headline perf numbers (~ms materialize,
 > boot-never) bind to Apple Silicon + the views layer and are **targets, not
 > measurements**. Full feature-by-feature truth ledger:
 > [`docs/spec/parity-audit.md`](docs/spec/parity-audit.md).

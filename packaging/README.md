@@ -1,12 +1,15 @@
 # lightr — Distribution Packaging
 
-> **LICENSE GATE: These artifacts are prepared but MUST NOT be published until
-> ADR-0008 (license) is Accepted; the binary ships `license = UNLICENSED`,
-> `publish = false`.**
+> **GATES.** The LICENSE gate is **CLEARED** — the project is **Apache-2.0**
+> (ADR-0008 Accepted 2026-06-12); `Cargo.toml` carries the SPDX, `LICENSE` +
+> `NOTICE` are in the repo root. One gate remains before anything is
+> published: **release timing** (GTM / launch after Runners M1, whitepaper
+> §9.8) and the absence of a real release URL — so these artifacts still
+> fail loudly and upload nothing.**
 
-See `docs/adr/0008-license.md`. Until that ADR reaches status **Accepted** with
-a concrete license string, no artifact from this directory may be uploaded,
-tapped, or otherwise made public. The release checklist enforces this gate.
+See `docs/adr/0008-license.md`. The artifacts here are wired to fail-loud
+until a real release exists; flip `publish`/`RELEASES_URL` only when the GTM
+timing call is made.
 
 ---
 
