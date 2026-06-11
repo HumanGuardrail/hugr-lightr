@@ -36,9 +36,13 @@ staged (`CAP-DEDUP-CROSS-TENANT`).
 
 ## Status
 
-**Spec complete (2026-06-11 overnight).** Whitepaper v2 (working backwards)
-is canon; the R0 wave is building the warp core. The platform it converges
-with already exists across three sibling repos:
+**R0 delivered (2026-06-11, overnight wave): the warp core works.**
+A 1.9 MB release binary; 90 tests green incl. the A1–A8 acceptance suite
+end-to-end; `lightr bench --check` green on the Intel dev box (snapshot
+warm 233 ms, status 34 ms, memo HIT 51 ms k files — see
+`spikes/RESULTS.md`; ~ms targets bind to R2 views + Apple Silicon, tense
+law). Whitepaper v2 (working backwards) is canon. The platform it
+converges with already exists across three sibling repos:
 
 | Layer | Repo | Status |
 |---|---|---|
@@ -49,6 +53,20 @@ with already exists across three sibling repos:
 Lightr promotes the runners' internal `Engine` seam into a public, local-first
 product. Sequencing note: launch after Runners M1, so the demand the free
 tier creates has somewhere to convert.
+
+## Quickstart (today, on this machine)
+
+```
+$ cargo build --release          # bin: target/release/lightr (1.9 MB)
+$ lightr snapshot --dir . --name @me/proj
+$ lightr hydrate /tmp/fresh --name @me/proj     # CoW, instant-ish
+$ lightr run --input src -- make test           # memoized: 2nd run = HIT
+$ lightr status --name @me/proj --json          # agent-ready output
+$ lightr bench --vs-docker                      # run the table yourself
+```
+
+Nothing runs between invocations (`pgrep lightr` proves it). No daemon,
+no images, no network code in the binary.
 
 ## Docs
 
