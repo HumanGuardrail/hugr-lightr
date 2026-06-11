@@ -355,7 +355,28 @@ fn materialize_from_digest(dest: &Path, manifest_digest: &Digest, store: &Store)
                     }
                 }
                 let link_path = dest.join(path);
+                #[cfg(unix)]
                 std::os::unix::fs::symlink(target, &link_path).map_err(LightrError::Io)?;
+                #[cfg(windows)]
+                {
+                    // WIN-PATH: symlink creation requires Developer Mode or admin on Windows.
+                    // Fall back to copying the target if symlink creation fails so build never hard-fails.
+                    use std::os::windows::fs::symlink_file;
+                    if symlink_file(target, &link_path).is_err() {
+                        let resolved_target = if std::path::Path::new(target).is_absolute() {
+                            std::path::PathBuf::from(target)
+                        } else {
+                            link_path
+                                .parent()
+                                .unwrap_or_else(|| std::path::Path::new("."))
+                                .join(target)
+                        };
+                        if resolved_target.exists() {
+                            std::fs::copy(&resolved_target, &link_path).map_err(LightrError::Io)?;
+                        }
+                        // Broken symlink target: skip without error (same as unix behaviour for missing targets).
+                    }
+                }
             }
         }
     }
