@@ -6,6 +6,7 @@
 //!   with `LIGHTR_HOME` set; callers set `current_dir` as needed.
 //! - Nothing here touches `$HOME`.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -59,11 +60,15 @@ pub fn fixture_tree(root: &Path) {
     // One execute-bit file (0o755)
     let exec_path = root.join("exec_script.sh");
     std::fs::write(&exec_path, b"#!/bin/sh\necho hello\n").unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(&exec_path, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     // One symlink to a sibling (level1/sub1/deep1/file_0000.txt)
+    #[allow(unused_variables)]
     let link_target = Path::new("file_0000.txt");
+    #[allow(unused_variables)]
     let link_path = root.join("level1/sub1/deep1/symlink_to_first.txt");
+    #[cfg(unix)]
     std::os::unix::fs::symlink(link_target, &link_path).unwrap();
 
     // One file ≥ 8 MiB
