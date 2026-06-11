@@ -216,7 +216,12 @@ impl Index {
 
         // Atomic write: write to a tmp path in same dir, then rename.
         let dir = index_path.parent().unwrap_or(Path::new("."));
-        let tmp_path = dir.join(format!(".lightr-index-tmp-{}", std::process::id()));
+        static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp_path = dir.join(format!(
+            ".lightr-index-tmp-{}-{}",
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         {
             let mut f = std::fs::File::create(&tmp_path).map_err(LightrError::Io)?;
             f.write_all(&buf).map_err(LightrError::Io)?;
@@ -795,12 +800,15 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    // Helpers to set LIGHTR_HOME for tests
-    fn with_lightr_home(tmp: &TempDir) {
-        // This is intentionally per-process; each test creates its own TempDir
-        // and sets env. Tests are run sequentially via test harness (or we rely
-        // on the per-test home dir being distinct).
+    // LIGHTR_HOME is process-global: serialize every test that sets it and
+    // hold the guard for the test's whole duration.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[must_use]
+    fn with_lightr_home(tmp: &TempDir) -> std::sync::MutexGuard<'static, ()> {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("LIGHTR_HOME", tmp.path());
+        guard
     }
 
     // -----------------------------------------------------------------------
@@ -809,7 +817,7 @@ mod tests {
     #[test]
     fn test_scan_empty_dir() {
         let home = TempDir::new().unwrap();
-        with_lightr_home(&home);
+        let _env_guard = with_lightr_home(&home);
         let root = TempDir::new().unwrap();
         let mut index = Index::empty();
         let report = scan(root.path(), &mut index).unwrap();
@@ -825,7 +833,7 @@ mod tests {
     #[test]
     fn test_scan_ignore_rules_and_dotfiles() {
         let home = TempDir::new().unwrap();
-        with_lightr_home(&home);
+        let _env_guard = with_lightr_home(&home);
         let root = TempDir::new().unwrap();
         let rp = root.path();
 
@@ -889,7 +897,7 @@ mod tests {
     #[test]
     fn test_index_reuse_after_save_load() {
         let home = TempDir::new().unwrap();
-        with_lightr_home(&home);
+        let _env_guard = with_lightr_home(&home);
         let root = TempDir::new().unwrap();
         let rp = root.path();
 
@@ -922,7 +930,7 @@ mod tests {
     #[test]
     fn test_snapshot_hydrate_roundtrip() {
         let home = TempDir::new().unwrap();
-        with_lightr_home(&home);
+        let _env_guard = with_lightr_home(&home);
 
         // We need a real Store. Since lightr-store is todo!() at this point,
         // we use a mock store. Tests run post-merge so this validates structure.
@@ -981,7 +989,7 @@ mod tests {
     #[test]
     fn test_index_path_for_is_deterministic() {
         let home = TempDir::new().unwrap();
-        with_lightr_home(&home);
+        let _env_guard = with_lightr_home(&home);
         let root = TempDir::new().unwrap();
         let p1 = index_path_for(root.path()).unwrap();
         let p2 = index_path_for(root.path()).unwrap();
@@ -996,7 +1004,7 @@ mod tests {
     #[test]
     fn test_index_encode_decode_roundtrip() {
         let home = TempDir::new().unwrap();
-        with_lightr_home(&home);
+        let _env_guard = with_lightr_home(&home);
         let root = TempDir::new().unwrap();
         let rp = root.path();
 
@@ -1021,7 +1029,7 @@ mod tests {
     #[test]
     fn test_corrupt_index_treated_as_empty() {
         let home = TempDir::new().unwrap();
-        with_lightr_home(&home);
+        let _env_guard = with_lightr_home(&home);
         let root = TempDir::new().unwrap();
         let rp = root.path();
         fs::write(rp.join("x.txt"), b"x").unwrap();
@@ -1109,7 +1117,7 @@ mod tests {
     #[test]
     fn test_scan_empty_dir_entry() {
         let home = TempDir::new().unwrap();
-        with_lightr_home(&home);
+        let _env_guard = with_lightr_home(&home);
         let root = TempDir::new().unwrap();
         let rp = root.path();
 
