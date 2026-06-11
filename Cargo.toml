@@ -35,6 +35,8 @@ lightr-core = { path = "crates/lightr-core" }
 lightr-store = { path = "crates/lightr-store" }
 lightr-index = { path = "crates/lightr-index" }
 lightr-run = { path = "crates/lightr-run" }
+lightr-oci = { path = "crates/lightr-oci" }
+lightr-engine = { path = "crates/lightr-engine" }
 
 [profile.release]
 lto = "fat"
