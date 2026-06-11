@@ -44,6 +44,22 @@ fn ref_path(root: &Path, key: &Digest) -> PathBuf {
     root.join("refs").join(pre).join(rest)
 }
 
+/// Refs-names path: <root>/refs-names/<2hex>/<62hex of ref_key digest>
+/// Content = UTF-8 ref name bytes, written once.
+fn refs_names_path(root: &Path, key: &Digest) -> PathBuf {
+    let hex = key.to_hex();
+    let (pre, rest) = shard_parts(&hex);
+    root.join("refs-names").join(pre).join(rest)
+}
+
+/// Refs-log directory: <root>/refs-log/<2hex>/<62hex of ref_key digest>/
+/// Each file is named `<n>` (decimal) and contains an encoded RefRecord.
+fn refs_log_dir(root: &Path, key: &Digest) -> PathBuf {
+    let hex = key.to_hex();
+    let (pre, rest) = shard_parts(&hex);
+    root.join("refs-log").join(pre).join(rest)
+}
+
 /// AC path: <root>/ac/<2hex>/<62hex>
 fn ac_path(root: &Path, key: &Digest) -> PathBuf {
     let hex = key.to_hex();
@@ -397,17 +413,51 @@ impl Store {
     }
 
     /// Write a ref atomically (last-write-wins).
+    /// R1 extension: also writes a name record (once) and appends a log entry.
     pub fn ref_put(&self, rec: &RefRecord) -> Result<()> {
         lightr_core::validate_ref_name(&rec.name)?;
         let key = lightr_core::ref_key(&rec.name);
-        let path = ref_path(&self.root, &key);
 
+        // 1. Write name record if absent (written once; idempotent).
+        let names_path = refs_names_path(&self.root, &key);
+        if !names_path.exists() {
+            let names_hex = key.to_hex();
+            let (names_pre, _) = shard_parts(&names_hex);
+            let names_shard = self.root.join("refs-names").join(names_pre);
+            atomic_write(&names_shard, &names_path, rec.name.as_bytes())?;
+        }
+
+        // 2. Determine next log index by counting existing entries in log dir.
+        let log_dir = refs_log_dir(&self.root, &key);
+        let next_n: u64 = if log_dir.exists() {
+            match fs::read_dir(&log_dir) {
+                Ok(entries) => entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|s| s.parse::<u64>().is_ok())
+                            .unwrap_or(false)
+                    })
+                    .count() as u64,
+                Err(_) => 0,
+            }
+        } else {
+            0
+        };
+
+        // 3. Atomic-write log entry <n>.
+        let log_entry_path = log_dir.join(next_n.to_string());
+        let data = rec.encode();
+        atomic_write(&log_dir, &log_entry_path, &data)?;
+
+        // 4. Atomic-write the current ref file (LWW).
+        let path = ref_path(&self.root, &key);
         let hex = key.to_hex();
         let (pre, _) = shard_parts(&hex);
         let shard = self.root.join("refs").join(pre);
-
-        let data = rec.encode();
         atomic_write(&shard, &path, &data)?;
+
         Ok(())
     }
 
@@ -428,6 +478,161 @@ impl Store {
         let (pre, _) = shard_parts(&hex);
         let shard = self.root.join("ac").join(pre);
         atomic_write(&shard, &path, value)?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R1 additions — frozen contract: build-spec-r1.md §1 (bodies: WP-R1-W1)
+// ---------------------------------------------------------------------------
+impl Store {
+    /// Ref history, newest-first (index 0 = current).
+    /// Absent or empty log ⇒ Ok(vec![]). Corrupt entries are skipped silently.
+    pub fn ref_log(&self, name: &str) -> Result<Vec<RefRecord>> {
+        lightr_core::validate_ref_name(name)?;
+        let key = lightr_core::ref_key(name);
+        let log_dir = refs_log_dir(&self.root, &key);
+
+        if !log_dir.exists() {
+            return Ok(vec![]);
+        }
+
+        // Collect all numeric file names in the log dir.
+        let mut indices: Vec<u64> = match fs::read_dir(&log_dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().to_str().and_then(|s| s.parse::<u64>().ok()))
+                .collect(),
+            Err(_) => return Ok(vec![]),
+        };
+
+        if indices.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Sort descending: newest-first (highest index = most recent write).
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+
+        let mut records = Vec::with_capacity(indices.len());
+        for n in indices {
+            let entry_path = log_dir.join(n.to_string());
+            match fs::read(&entry_path) {
+                Ok(bytes) => match RefRecord::decode(&bytes) {
+                    Ok(rec) => records.push(rec),
+                    Err(_) => {
+                        // Corrupt entry — skip silently (log is history, not truth).
+                    }
+                },
+                Err(_) => {
+                    // Missing or unreadable — skip silently.
+                }
+            }
+        }
+
+        Ok(records)
+    }
+
+    /// Enumerate all ref names ever written (from refs-names shards).
+    /// Non-UTF-8 name files are skipped. Returns sorted ascending.
+    pub fn list_refs(&self) -> Result<Vec<String>> {
+        let names_root = self.root.join("refs-names");
+        if !names_root.exists() {
+            return Ok(vec![]);
+        }
+
+        let mut names: Vec<String> = Vec::new();
+
+        let shards = match fs::read_dir(&names_root) {
+            Ok(d) => d,
+            Err(_) => return Ok(vec![]),
+        };
+
+        for shard_entry in shards.filter_map(|e| e.ok()) {
+            let shard_path = shard_entry.path();
+            if !shard_path.is_dir() {
+                continue;
+            }
+            let files = match fs::read_dir(&shard_path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            for file_entry in files.filter_map(|e| e.ok()) {
+                let file_path = file_entry.path();
+                if !file_path.is_file() {
+                    continue;
+                }
+                match fs::read(&file_path) {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(name) => names.push(name),
+                        Err(_) => {
+                            // Non-UTF-8 name — skip per spec.
+                        }
+                    },
+                    Err(_) => continue,
+                }
+            }
+        }
+
+        names.sort_unstable();
+        Ok(names)
+    }
+
+    /// Enumerate all raw AC values (decoded by caller). Order unspecified.
+    pub fn list_ac(&self) -> Result<Vec<Vec<u8>>> {
+        let ac_root = self.root.join("ac");
+        if !ac_root.exists() {
+            return Ok(vec![]);
+        }
+
+        let mut values: Vec<Vec<u8>> = Vec::new();
+
+        let shards = match fs::read_dir(&ac_root) {
+            Ok(d) => d,
+            Err(_) => return Ok(vec![]),
+        };
+
+        for shard_entry in shards.filter_map(|e| e.ok()) {
+            let shard_path = shard_entry.path();
+            if !shard_path.is_dir() {
+                continue;
+            }
+            let files = match fs::read_dir(&shard_path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            for file_entry in files.filter_map(|e| e.ok()) {
+                let file_path = file_entry.path();
+                // Skip temp files from in-flight atomic writes.
+                if file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.starts_with(".tmp-"))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                if !file_path.is_file() {
+                    continue;
+                }
+                match fs::read(&file_path) {
+                    Ok(bytes) => values.push(bytes),
+                    Err(_) => continue,
+                }
+            }
+        }
+
+        Ok(values)
+    }
+
+    /// gc sweep only: chmod 0o644 then remove one object.
+    /// Object absent ⇒ Ok(()) (idempotent).
+    pub fn remove_object(&self, d: &Digest) -> Result<()> {
+        let path = object_path(&self.root, d);
+        if !path.exists() {
+            return Ok(());
+        }
+        set_mode(&path, 0o644)?;
+        fs::remove_file(&path)?;
         Ok(())
     }
 }
@@ -707,26 +912,175 @@ mod tests {
         let d2 = store.ingest_file(&src).unwrap();
         assert_eq!(d1, d2);
     }
-}
 
-// ---------------------------------------------------------------------------
-// R1 additions — frozen contract: build-spec-r1.md §1 (bodies: WP-R1-W1)
-// ---------------------------------------------------------------------------
-impl Store {
-    /// Ref history, newest-first (index 0 = current).
-    pub fn ref_log(&self, _name: &str) -> Result<Vec<RefRecord>> {
-        todo!("R1-W1")
+    // ── R1: ref_log ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn ref_log_three_versions_newest_first() {
+        let (_dir, store) = tmp_store();
+
+        let root1 = Digest::of_bytes(b"v1");
+        let root2 = Digest::of_bytes(b"v2");
+        let root3 = Digest::of_bytes(b"v3");
+
+        let rec1 = RefRecord {
+            name: "main".to_string(),
+            root: root1,
+            parent: None,
+            created_at_unix: 1_000,
+            tool_version: "0.1.0".to_string(),
+        };
+        let rec2 = RefRecord {
+            name: "main".to_string(),
+            root: root2,
+            parent: Some(root1),
+            created_at_unix: 2_000,
+            tool_version: "0.1.0".to_string(),
+        };
+        let rec3 = RefRecord {
+            name: "main".to_string(),
+            root: root3,
+            parent: Some(root2),
+            created_at_unix: 3_000,
+            tool_version: "0.1.0".to_string(),
+        };
+
+        store.ref_put(&rec1).unwrap();
+        store.ref_put(&rec2).unwrap();
+        store.ref_put(&rec3).unwrap();
+
+        let log = store.ref_log("main").unwrap();
+        assert_eq!(log.len(), 3, "expected 3 log entries");
+        // Index 0 = newest (rec3), 1 = rec2, 2 = oldest (rec1).
+        assert_eq!(log[0].root, root3, "log[0] must be newest (v3)");
+        assert_eq!(log[1].root, root2, "log[1] must be v2");
+        assert_eq!(log[2].root, root1, "log[2] must be oldest (v1)");
     }
-    /// Enumerate all ref names ever written.
-    pub fn list_refs(&self) -> Result<Vec<String>> {
-        todo!("R1-W1")
+
+    #[test]
+    fn ref_log_unknown_name_is_empty() {
+        let (_dir, store) = tmp_store();
+        let log = store.ref_log("does-not-exist").unwrap();
+        assert!(log.is_empty(), "unknown ref must return empty log");
     }
-    /// Enumerate all raw AC values.
-    pub fn list_ac(&self) -> Result<Vec<Vec<u8>>> {
-        todo!("R1-W1")
+
+    // R0 LWW still works after R1 extension.
+    #[test]
+    fn ref_log_lww_still_works() {
+        let (_dir, store) = tmp_store();
+
+        let root1 = Digest::of_bytes(b"first");
+        let root2 = Digest::of_bytes(b"second");
+
+        let rec1 = RefRecord {
+            name: "dev".to_string(),
+            root: root1,
+            parent: None,
+            created_at_unix: 100,
+            tool_version: "0.1.0".to_string(),
+        };
+        let rec2 = RefRecord {
+            name: "dev".to_string(),
+            root: root2,
+            parent: Some(root1),
+            created_at_unix: 200,
+            tool_version: "0.1.0".to_string(),
+        };
+
+        store.ref_put(&rec1).unwrap();
+        store.ref_put(&rec2).unwrap();
+
+        // ref_get must return the LWW (latest).
+        let current = store.ref_get("dev").unwrap().unwrap();
+        assert_eq!(current.root, root2, "LWW violated after R1 extension");
     }
-    /// gc sweep only: chmod + remove one object.
-    pub fn remove_object(&self, _d: &Digest) -> Result<()> {
-        todo!("R1-W1")
+
+    // ── R1: list_refs ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn list_refs_returns_both_names_sorted() {
+        let (_dir, store) = tmp_store();
+
+        let rec_b = RefRecord {
+            name: "beta".to_string(),
+            root: Digest::of_bytes(b"beta"),
+            parent: None,
+            created_at_unix: 1,
+            tool_version: "0.1.0".to_string(),
+        };
+        let rec_a = RefRecord {
+            name: "alpha".to_string(),
+            root: Digest::of_bytes(b"alpha"),
+            parent: None,
+            created_at_unix: 2,
+            tool_version: "0.1.0".to_string(),
+        };
+
+        store.ref_put(&rec_b).unwrap();
+        store.ref_put(&rec_a).unwrap();
+
+        let refs = store.list_refs().unwrap();
+        assert_eq!(
+            refs,
+            vec!["alpha", "beta"],
+            "list_refs must be sorted ascending"
+        );
+    }
+
+    #[test]
+    fn list_refs_empty_store() {
+        let (_dir, store) = tmp_store();
+        assert!(store.list_refs().unwrap().is_empty());
+    }
+
+    // ── R1: list_ac ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn list_ac_roundtrip_two_values() {
+        let (_dir, store) = tmp_store();
+
+        let key1 = Digest::of_bytes(b"k1");
+        let key2 = Digest::of_bytes(b"k2");
+        let val1 = b"value-one";
+        let val2 = b"value-two";
+
+        store.ac_put(&key1, val1).unwrap();
+        store.ac_put(&key2, val2).unwrap();
+
+        let mut values = store.list_ac().unwrap();
+        values.sort(); // order unspecified per spec; sort for determinism.
+        assert_eq!(values.len(), 2, "expected exactly 2 AC values");
+        assert!(values.contains(&val1.to_vec()), "missing val1");
+        assert!(values.contains(&val2.to_vec()), "missing val2");
+    }
+
+    #[test]
+    fn list_ac_empty_store() {
+        let (_dir, store) = tmp_store();
+        assert!(store.list_ac().unwrap().is_empty());
+    }
+
+    // ── R1: remove_object ────────────────────────────────────────────────────
+
+    #[test]
+    fn remove_object_removes_and_is_idempotent() {
+        let (_dir, store) = tmp_store();
+        let data = b"to be removed";
+        let d = store.put_bytes(data).unwrap();
+
+        assert!(store.exists(&d), "object must exist after put");
+        store.remove_object(&d).unwrap();
+        assert!(!store.exists(&d), "object must not exist after remove");
+
+        // Second remove must be Ok(()) — idempotent.
+        store.remove_object(&d).unwrap();
+    }
+
+    #[test]
+    fn remove_object_absent_is_ok() {
+        let (_dir, store) = tmp_store();
+        let d = Digest::of_bytes(b"never stored");
+        // Must succeed without error.
+        store.remove_object(&d).unwrap();
     }
 }
