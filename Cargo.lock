@@ -619,6 +619,8 @@ dependencies = [
 name = "lightr-build"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "libc",
  "lightr-core",
  "lightr-engine",
  "lightr-index",
