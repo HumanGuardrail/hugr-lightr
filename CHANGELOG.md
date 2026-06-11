@@ -1,5 +1,34 @@
 # Changelog — hugr-lightr
 
+## [Unreleased] — Production hardening + VM foundation (2026-06-12)
+
+379 tests, 0 failures, clippy -D clean. Two parallel tracks.
+
+**Track A — toward shippable (local product):**
+- **Registry pull hardened:** private-registry auth (`~/.docker/config.json`
+  + `LIGHTR_REGISTRY_AUTH`), retry/backoff on 429/5xx (honors `Retry-After`),
+  blobs streamed to disk (no OOM), typed HTTP status (`LightrError::Registry`
+  — 401/403/404/429/5xx distinct, never collapsed to Io), host-arch image
+  selection with fallback.
+- **Crash durability:** every atomic write now `fsync`s the file and its
+  parent directory; **gc takes an exclusive flock while writers take a shared
+  one** — gc can no longer sweep an object a concurrent write is publishing.
+- **CI:** `.github/workflows/ci.yml` — fmt/clippy -D/test + bench, honoring
+  `rust-toolchain.toml` on GitHub runners (no founder-Mac proxy workaround).
+- **Outward honesty:** README "Honest status" box + whitepaper §1 aspirational
+  marker now match `parity-audit.md` (no fabricated `brew`/transcript).
+
+**Track B — VM foundation (progresses on Intel; boot validated by S5/ARM):**
+- **`lightr-init` crate** — the Linux guest PID1: real exit-code reporting
+  through an `ExitSink` seam (host-tested), syscalls behind `cfg(linux)`.
+- **The fake `exitCode = 0` is dead** — `vz` now returns the guest's real
+  exit code via a vsock receiver (Rust owns the code; Swift shim returns only
+  VM-lifecycle status; source-level invariant test proves no hardcoded path).
+- **cpio pack assembly** — `assemble_pack(kernel, init, out)` builds a real
+  initrd with `lightr-init` as `/init`, giving `engine install-pack` content.
+- **Packaging prepared, license-gated:** `packaging/` (install.sh, brew
+  formula, release.sh) — all fail loudly until ADR-0008 is Accepted.
+
 ## [Unreleased] — R1→R4 (2026-06-12): the full local product
 
 338 tests, 0 failures, clippy -D clean, bench --check green. 9 crates.
