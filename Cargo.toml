@@ -38,6 +38,19 @@ ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 flate2 = "1"
 tar = "0.4"
 sha2 = "0.10"
+# Windows FFI — declared here, consumed per-crate under
+# [target.'cfg(windows)'.dependencies] windows-sys.workspace = true (so it is
+# NEVER pulled on unix builds). Added for the omni cross-platform wave
+# (docs/spec/build-spec-omni.md): LockFileEx/UnlockFileEx, FlushFileBuffers,
+# named pipes, FSCTL block-clone, OpenProcess/TerminateProcess.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 lightr-core = { path = "crates/lightr-core" }
 lightr-store = { path = "crates/lightr-store" }
 lightr-index = { path = "crates/lightr-index" }
