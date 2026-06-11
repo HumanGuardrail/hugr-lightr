@@ -7,6 +7,8 @@ members = [
     "crates/lightr-run",
     "crates/lightr-cli",
     "crates/lightr-acceptance",
+    "crates/lightr-engine",
+    "crates/lightr-oci",
 ]
 
 [workspace.package]
@@ -26,6 +28,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 assert_cmd = "2"
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+flate2 = "1"
+tar = "0.4"
 lightr-core = { path = "crates/lightr-core" }
 lightr-store = { path = "crates/lightr-store" }
 lightr-index = { path = "crates/lightr-index" }

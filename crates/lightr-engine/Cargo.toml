@@ -1,0 +1,20 @@
+[package]
+name = "lightr-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# vz: Virtualization.framework microVM engine (macOS; Swift shim built by
+# build.rs in WP R2-W2). Default OFF — the default build stays pure Rust.
+vz = []
+
+[dependencies]
+lightr-core = { workspace = true }
+lightr-store = { workspace = true }
+lightr-index = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
