@@ -10,7 +10,7 @@ gain tenant semantics in Stage 2 without a grammar change.
 
 ## Context
 
-The grammar is the product's visible surface (`cell run @hugr/web -- …` is
+The grammar is the product's visible surface (`lightr run @hugr/web -- …` is
 in every doc and was the approved naming preview). product.md §9 required
 freezing it before the first demo. clw's `ref_key(name)` hashes an arbitrary
 string with domain separation, so the grammar is purely a CLI-side

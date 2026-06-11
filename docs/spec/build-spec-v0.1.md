@@ -1,6 +1,9 @@
-# HuGR Cell — Build Spec v0.1 (freeze candidate)
+# HuGR Lightr — Build Spec v0.1 (freeze candidate)
 
-- **Status:** Draft — becomes FROZEN when ADRs 0001–0007 are Accepted; a
+- **Status:** ⚠️ REWORK PENDING — the owner raised the bar (2026-06-11, see
+  `performance-bar.md`): §3/§4/§5/§7 will be redesigned around CoW
+  materialization, a file-level store and a stat-index before any freeze.
+  Originally: Draft — becomes FROZEN when ADRs 0001–0007 are Accepted; a
   contract hash is then recorded here and any change requires owner sign-off.
 - **Baseline facts:** clw consumed at `corelink-workspaces @ f8f5edf` (clean
   tree, verified 2026-06-11). All clw signatures below were extracted
@@ -10,7 +13,7 @@
 
 ## 1. Scope (one sprint)
 
-`cell snapshot | hydrate | status | run` — local-only, native execution,
+`lightr snapshot | hydrate | status | run` — local-only, native execution,
 macOS arm64 (Linux x86_64 if free). Out: microVMs, namespaces, OCI import,
 remote/auth/teams, any corelink-server change. (Full list: MVP doc.)
 
@@ -19,9 +22,9 @@ remote/auth/teams, any corelink-server change. (Full list: MVP doc.)
 ```
 Cargo.toml                # workspace: resolver 2, edition 2021, publish=false, license UNLICENSED
 rust-toolchain.toml       # channel 1.96.0 (scaffold-time proxy verification per ADR-0006)
-crates/cell-store/        # WP-1
-crates/cell-cli/          # WP-2
-crates/cell-acceptance/   # WP-3
+crates/lightr-store/        # WP-1
+crates/lightr-cli/          # WP-2
+crates/lightr-acceptance/   # WP-3
 ```
 
 Path-deps (read-only sibling):
@@ -32,10 +35,10 @@ External deps (workspace-pinned): `tokio` (rt-multi-thread, macros),
 `clap` (derive), `async-trait` (trait impls), `anyhow` (cli error surface),
 `tempfile` + `assert_cmd` (dev/acceptance). No others without spec change.
 
-## 3. FROZEN — `cell-store` public API (código-âncora)
+## 3. FROZEN — `lightr-store` public API (código-âncora)
 
 ```rust
-// crates/cell-store/src/lib.rs — public surface, verbatim target
+// crates/lightr-store/src/lib.rs — public surface, verbatim target
 use std::path::PathBuf;
 use clw_types::{AcTransport, CasTransport, Digest, Result};
 
@@ -49,7 +52,7 @@ impl LocalStore {
     /// Creates `<root>/cas/<00..ff>/` and `<root>/ac/<00..ff>/` shard dirs.
     pub fn new(root: impl Into<PathBuf>) -> Result<Self>;
 
-    /// Resolution order: explicit arg → $CELL_STORE_DIR → ~/.cell/store
+    /// Resolution order: explicit arg → $LIGHTR_STORE_DIR → ~/.lightr/store
     pub fn default_root() -> PathBuf;
 }
 
@@ -94,7 +97,7 @@ pub trait AcTransport: Send + Sync {
 // pub const CAS_BLOB_CAP_BYTES: usize = 5 * 1024 * 1024;
 ```
 
-## 4. FROZEN — CLI surface (`cell-cli`, bin `cell`)
+## 4. FROZEN — CLI surface (`lightr-cli`, bin `lightr`)
 
 Pipelines consumed as-is (signatures verbatim from baseline):
 `clw_snapshot::snapshot<C>(root, client, cache, opts) -> SnapshotReport`,
@@ -103,31 +106,31 @@ Pipelines consumed as-is (signatures verbatim from baseline):
 `clw_run::run_memoized<C>(cwd, client, opts) -> RunOutcome`,
 `clw_manifest::diff(old, new) -> ManifestDiff`,
 all with `C: CasTransport + AcTransport` = `LocalStore`.
-L1 cache: `clw_cache::LocalCache` at `$CELL_CACHE_DIR` | `~/.cell/cache`.
+L1 cache: `clw_cache::LocalCache` at `$LIGHTR_CACHE_DIR` | `~/.lightr/cache`.
 
 | Verb | Form | Behavior | Exit |
 |---|---|---|---|
-| `snapshot` | `cell snapshot [--dir <path=.>] --name <ref>` | snapshot dir → store; print `root=<hex> files=<n> bytes=<n> chunks_uploaded=<n>` | 0 ok · 2 usage/invalid-ref · 1 error |
-| `hydrate` | `cell hydrate <dest> --name <ref>` | materialize ref into `<dest>`; print `root=<hex> files=<n> bytes_total=<n> from_cache=<n>` | 0 ok · 2 ref-not-found/usage · 1 error |
-| `status` | `cell status [--dir <path=.>] --name <ref>` | `build_manifest_local` vs ref manifest via `diff`; print added/removed/changed | 0 clean · 1 dirty · 2 ref-not-found/usage |
-| `run` | `cell run [--input <path>]... [--env <KEY>]... --name? -- <cmd> [args...]` | `run_memoized`; stream stored/captured stdout/stderr; marker line to **stderr**: `cell: memo HIT key=<hex>` or `cell: memo MISS key=<hex>` | child's exit code · 2 usage |
+| `snapshot` | `lightr snapshot [--dir <path=.>] --name <ref>` | snapshot dir → store; print `root=<hex> files=<n> bytes=<n> chunks_uploaded=<n>` | 0 ok · 2 usage/invalid-ref · 1 error |
+| `hydrate` | `lightr hydrate <dest> --name <ref>` | materialize ref into `<dest>`; print `root=<hex> files=<n> bytes_total=<n> from_cache=<n>` | 0 ok · 2 ref-not-found/usage · 1 error |
+| `status` | `lightr status [--dir <path=.>] --name <ref>` | `build_manifest_local` vs ref manifest via `diff`; print added/removed/changed | 0 clean · 1 dirty · 2 ref-not-found/usage |
+| `run` | `lightr run [--input <path>]... [--env <KEY>]... --name? -- <cmd> [args...]` | `run_memoized`; stream stored/captured stdout/stderr; marker line to **stderr**: `lightr: memo HIT key=<hex>` or `lightr: memo MISS key=<hex>` | child's exit code · 2 usage |
 
 Global rules (frozen):
 - Ref grammar `^(@[a-z0-9-]+/)?[a-z0-9._-]{1,64}$` (ADR-0004); violation →
   stderr error + exit 2.
-- Env contract: `CELL_STORE_DIR`, `CELL_CACHE_DIR` (tests depend on these).
+- Env contract: `LIGHTR_STORE_DIR`, `LIGHTR_CACHE_DIR` (tests depend on these).
 - No network code paths exist in v0.1 (ADR-0007). No `--engine` flag
-  (ADR-0005). `cell --help` states: "native execution — reproducibility,
+  (ADR-0005). `lightr --help` states: "native execution — reproducibility,
   not a sandbox".
 - Exit-code classes: 0 success/clean · 1 dirty-or-runtime-error · 2
   usage/not-found · (`run` is the exception: child's code passes through).
 - `run` memo law is clw's, not ours: memoize **only** exit 0 AND
   stdout/stderr each ≤ 5 MiB (quoted from `clw-run @ f8f5edf`).
 
-## 5. FROZEN — Acceptance suite A1–A7 (`cell-acceptance`)
+## 5. FROZEN — Acceptance suite A1–A7 (`lightr-acceptance`)
 
-End-to-end via `assert_cmd` against the compiled `cell` binary; every test
-sets `CELL_STORE_DIR`/`CELL_CACHE_DIR` to per-test tempdirs; no test touches
+End-to-end via `assert_cmd` against the compiled `lightr` binary; every test
+sets `LIGHTR_STORE_DIR`/`LIGHTR_CACHE_DIR` to per-test tempdirs; no test touches
 `~`. Each item maps to the MVP DoD.
 
 - **A1 roundtrip** — fixture tree (nested dirs, exec-bit file, symlink,
@@ -139,13 +142,13 @@ sets `CELL_STORE_DIR`/`CELL_CACHE_DIR` to per-test tempdirs; no test touches
   2nd invocation stderr has `memo HIT`; stdout identical both times; exit 0.
 - **A3 failure never memoized** — same shape, command exits 7: two
   invocations → side-effect **2** lines, both exit 7, both `memo MISS`.
-- **A4 no daemon** — after A1–A3, zero `cell` processes alive
-  (`pgrep -x cell` empty); store root contains only plain files/dirs.
+- **A4 no daemon** — after A1–A3, zero `lightr` processes alive
+  (`pgrep -x lightr` empty); store root contains only plain files/dirs.
 - **A5 status** — post-snapshot `status` exits 0; modify one file → exits 1
   and names it `~ <path>`; unknown ref → exits 2.
 - **A6 offline-structural** — A1+A2 pass with `CLW_ENDPOINT`/`CLW_TOKEN`
   pointing at a black-hole (`http://127.0.0.1:9`) — proving those env vars
-  are dead code to `cell`.
+  are dead code to `lightr`.
 - **A7 integrity fail-closed** — flip one byte in one CAS blob → `hydrate`
   into a fresh dir exits 1 with `integrity` in stderr; the corrupt file
   still exists afterward (no silent deletion).
@@ -165,9 +168,9 @@ sets `CELL_STORE_DIR`/`CELL_CACHE_DIR` to per-test tempdirs; no test touches
 | WP | Owner-globs (disjoint) | Depends on |
 |---|---|---|
 | W0 scaffold (lead) | `Cargo.toml`, `rust-toolchain.toml`, crate skeletons, this spec's stubs | ADRs accepted |
-| W1 store | `crates/cell-store/**` | §3 frozen |
-| W2 cli | `crates/cell-cli/**` | §3 (via stubs) + §4 frozen |
-| W3 acceptance | `crates/cell-acceptance/**` | §4 + §5 frozen |
+| W1 store | `crates/lightr-store/**` | §3 frozen |
+| W2 cli | `crates/lightr-cli/**` | §3 (via stubs) + §4 frozen |
+| W3 acceptance | `crates/lightr-acceptance/**` | §4 + §5 frozen |
 
 Shared/lead-owned (agents must NOT touch): workspace `Cargo.toml`,
 `Cargo.lock`, `rust-toolchain.toml`, `docs/**`, `README.md`, `CLAUDE.md`.

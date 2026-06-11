@@ -1,6 +1,6 @@
-# HuGR Cell — Product Design
+# HuGR Lightr — Product Design
 
-Derived from the canonical vision: `docs/whitepaper/hugr-cell-v1.md`.
+Derived from the canonical vision: `docs/whitepaper/hugr-lightr-v1.md`.
 Status: design phase — every number below is indicative until validated.
 
 ## 1. The one-sentence product
@@ -15,41 +15,41 @@ CoreLink's cache, Runners and Workspaces.
   dev-tool pain on macOS; OrbStack's traction proves devs switch fast when
   something lighter appears.
 - The differentiated substrate (production CAS + Action Cache + clw pipeline
-  + fail-closed execution core) already exists across CoreLink repos; Cell is
+  + fail-closed execution core) already exists across CoreLink repos; Lightr is
   the cheap remaining third.
 - Agent fleets are exploding demand for ephemeral sandboxes; the team that
   owns the dev's local workspace ref owns where those sandboxes run.
-- Cell is the platform's CAC engine: a free tool with standalone value,
+- Lightr is the platform's CAC engine: a free tool with standalone value,
   distributed bottom-up (brew/HN), feeding tenants to products that already
   bill (CoreLink Solo exists today at ~$30/mo, ~80% margin documented).
 
 ## 3. Who it's for (ICPs) & user stories
 
 ### ICP-A — The Mac dev (free user, the funnel's mouth)
-"Docker Desktop eats my RAM and my battery." → `brew install hugr-cell`,
-`cell run`, no account. Success = Docker Desktop uninstalled. They are not a
+"Docker Desktop eats my RAM and my battery." → `brew install hugr-lightr`,
+`lightr run`, no account. Success = Docker Desktop uninstalled. They are not a
 buyer; they are distribution and future tenant gravity.
 
 ### ICP-B — The team lead / platform engineer (Stage-2 buyer)
 "My team re-downloads and re-builds the same things all day." → flips the
 CoreLink flag: shared snapshots, team-wide cache hits, onboarding via
-`cell hydrate` in seconds. Buys CoreLink tenancy; later evaluates Runners
+`lightr hydrate` in seconds. Buys CoreLink tenancy; later evaluates Runners
 for CI.
 
 ### ICP-C — Agent-fleet teams (Stage-3 demand, via Workspaces)
 "I need hundreds of cheap, fast, disposable sandboxes for agents." → the
 same refs their devs already use locally, booted as `fc` microVMs on the
-Runners fabric. This ICP is shared with corelink-workspaces; Cell is the
+Runners fabric. This ICP is shared with corelink-workspaces; Lightr is the
 on-ramp and the local dev-loop for it.
 
 ### ICP-D — HuGR itself (anchor consumer)
-hugit and the CoreLink repos dogfood Cell for their own dev loops; the
+hugit and the CoreLink repos dogfood Lightr for their own dev loops; the
 platform's own CI demand seeds usage data before any external launch.
 
 ## 4. The product surface
 
-- **CLI verbs (v0.1):** `cell run <ref|path> -- <cmd>` · `cell snapshot` ·
-  `cell hydrate` · `cell status`. Engines arrive as flags/config
+- **CLI verbs (v0.1):** `lightr run <ref|path> -- <cmd>` · `lightr snapshot` ·
+  `lightr hydrate` · `lightr status`. Engines arrive as flags/config
   (`--engine native|ns|vz|fc|docker`), defaulting to the lightest safe tier
   for the context.
 - **Visible absences are features:** no daemon (`ps` shows nothing between
@@ -61,7 +61,7 @@ platform's own CI demand seeds usage data before any external launch.
 
 ## 5. Pricing (indicative — validate before publishing)
 
-**Cell itself: $0, forever, all stages.** Cell has no SKU and no bill. The
+**Lightr itself: $0, forever, all stages.** Lightr has no SKU and no bill. The
 money lives upstream, where products already exist:
 
 | Stage | What's billed | Where the SKU lives |
@@ -72,7 +72,7 @@ money lives upstream, where products already exist:
 
 Platform law applies: never charge for the customer's own compute twice — a
 memoized result is never billed as a run. One bill downstream: a team buying
-Workspaces never sees a "Cell" line item.
+Workspaces never sees a "Lightr" line item.
 
 ## 6. Cost & margin model (indicative)
 
@@ -80,7 +80,7 @@ Workspaces never sees a "Cell" line item.
   releases/brew) is the only cost. No free-tier server burn — the classic
   freemium trap is structurally absent.
 - **Stage 2 margins are CoreLink's** (~80% documented on Solo), improved by
-  Cell users arriving with warm local caches (their first sync uploads less
+  Lightr users arriving with warm local caches (their first sync uploads less
   than a cold tenant).
 - **Dedup tense (inherited law):** intra-tenant at GA — unit economics must
   close on that alone. Cross-tenant dedup (staged, `CAP-DEDUP-CROSS-TENANT`)
@@ -92,7 +92,7 @@ Workspaces never sees a "Cell" line item.
 
 ## 7. Positioning
 
-| Against | Their story | Cell's axis |
+| Against | Their story | Lightr's axis |
 |---|---|---|
 | Docker Desktop | the incumbent; VM + daemon + layers | nothing idle, chunk-lazy, daemonless, memoized |
 | OrbStack / Apple `container` | lighter VM, same model | different category: distribution + memoization; must still win the day-1 local comparison |
@@ -121,8 +121,8 @@ Workspaces never sees a "Cell" line item.
    (built for cross-repo *frozen* seams, which this is not yet). Leaning:
    direct dependency.
 3. **Ref grammar** — see §4; freeze pre-demo.
-4. **Naming collisions** — crates.io `cell` is taken (famous crate): crate
-   `hugr-cell`, binary `cell`. Verify brew formula availability before
+4. **Naming collisions** — verify `lightr` availability (crates.io, brew, trademark scan) before announcing: crate
+   `hugr-lightr`, binary `lightr`. Verify brew formula availability before
    announcing.
 5. **Telemetry stance** — a guardrail company's free tool should default to
    zero or opt-in anonymous metrics; decide before v0.1, it's in the first

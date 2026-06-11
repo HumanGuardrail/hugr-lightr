@@ -1,4 +1,4 @@
-# Architecture — how Cell runs things
+# Architecture — how Lightr runs things
 
 ## Design principles
 
@@ -19,7 +19,7 @@
 ## Execution flow
 
 ```
-cell run @tenant/workspace -- <cmd>
+lightr run @tenant/workspace -- <cmd>
   │
   1. Resolve ref → RefRecord → root manifest digest        (AC)
   2. Memo check: BLAKE3(inputs ⊕ cmd ⊕ env ⊕ toolchain)    (AC)
@@ -35,7 +35,7 @@ cell run @tenant/workspace -- <cmd>
 ## Isolation tiers (the `Engine` implementations)
 
 The seam is `corelink-runner/src/isolation.rs`'s `Engine` trait — spawn /
-probe / exec / teardown against a `ContainerSpec`. Cell promotes it to the
+probe / exec / teardown against a `ContainerSpec`. Lightr promotes it to the
 public interface and ships multiple engines:
 
 | Engine | Context | Overhead | Cold start |
@@ -73,25 +73,25 @@ bin-packing, dedup across tenants.
 ## Seams with the existing repos
 
 ```
-cell (this repo)
+lightr (this repo)
  ├── distribution  = clw crates (snapshot / hydrate / run, local L1 cache)
  ├── registry      = CoreLink CAS/AC over HTTPS (tenant-namespaced, PAT auth)
  └── execution     = Engine trait lineage from corelink-runners
 ```
 
-- **corelink-server**: untouched. Cell is a pure client of `/v1/cas` and
+- **corelink-server**: untouched. Lightr is a pure client of `/v1/cas` and
   `/v1/ac`, exactly like clw. Stage-1 (free local) never calls it.
 - **corelink-workspaces**: the house pattern is wire-level seams with
   transcribed types proven by shared conformance vectors (no git/path
-  deps between repos). Whether Cell vendors the clw crates, depends on
+  deps between repos). Whether Lightr vendors the clw crates, depends on
   them, or transcribes the contract is an open decision — see MVP doc.
 - **corelink-runners**: shares the `Engine` contract and the fail-closed
   lifecycle (lease → spec → verify → spawn → probe → exec → teardown →
-  forensic sweep). Runners is the multi-tenant *fabric*; Cell is the
+  forensic sweep). Runners is the multi-tenant *fabric*; Lightr is the
   *runtime* — locally it runs standalone, in the cloud it is what a
   runner lease executes.
 
-## What Cell is not
+## What Lightr is not
 
 - Not an OCI replacement crusade: a compat engine (`docker`) and an
   OCI-image import path keep migration cheap.
