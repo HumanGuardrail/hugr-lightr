@@ -247,17 +247,66 @@ fn step_key(
     hasher.update(&prev_bytes);
     // canonical instr bytes = the raw line text
     hasher.update(step.raw.as_bytes());
-    // for COPY, also hash each source file
+    // For COPY, hash each source's content into the key. Files contribute
+    // their digest; DIRECTORIES contribute every contained file's
+    // (relative-path ‖ digest), sorted — so editing any file inside a copied
+    // dir (e.g. `COPY src/ /app`) invalidates the cache. Symlinks contribute
+    // their target. Missing sources contribute a sentinel (so add/remove of a
+    // source also changes the key).
     if let Instr::Copy { src, .. } = &step.instr {
         for s in src {
-            let file_path = context_dir.join(s);
-            if file_path.is_file() {
-                let d = Digest::of_file(&file_path)?;
-                hasher.update(&d.0);
-            }
+            let src_path = context_dir.join(s);
+            hash_copy_source(&mut hasher, &src_path)?;
         }
     }
     Ok(Digest(*hasher.finalize().as_bytes()))
+}
+
+/// Fold a COPY source's content-identity into `hasher`, recursing dirs.
+fn hash_copy_source(hasher: &mut blake3::Hasher, path: &Path) -> Result<()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => {
+            hasher.update(b"\x00missing\x00");
+            return Ok(());
+        }
+    };
+    let ft = meta.file_type();
+    if ft.is_symlink() {
+        let target = std::fs::read_link(path).map_err(LightrError::Io)?;
+        hasher.update(b"L");
+        hasher.update(target.as_os_str().as_encoded_bytes());
+    } else if ft.is_file() {
+        hasher.update(b"F");
+        hasher.update(&Digest::of_file(path)?.0);
+    } else if ft.is_dir() {
+        hasher.update(b"D");
+        // Collect (relative path, entry) deterministically (sorted by path).
+        let mut entries: Vec<PathBuf> = Vec::new();
+        collect_dir_paths(path, &mut entries)?;
+        entries.sort();
+        for child in &entries {
+            let rel = child.strip_prefix(path).unwrap_or(child);
+            hasher.update(rel.as_os_str().as_encoded_bytes());
+            hasher.update(b"\x00");
+            hash_copy_source(hasher, child)?;
+        }
+    }
+    Ok(())
+}
+
+/// Recursively collect every entry path under `dir` (files, dirs, symlinks).
+fn collect_dir_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).map_err(LightrError::Io)? {
+        let entry = entry.map_err(LightrError::Io)?;
+        let p = entry.path();
+        let ft = entry.file_type().map_err(LightrError::Io)?;
+        out.push(p.clone());
+        if ft.is_dir() {
+            collect_dir_paths(&p, out)?;
+        }
+    }
+    Ok(())
 }
 
 // ── Hydrate-from-manifest-digest ─────────────────────────────────────────────
@@ -1242,6 +1291,48 @@ mod tests {
         std::env::set_var("LIGHTR_HOME", tmp.path());
         f();
         std::env::remove_var("LIGHTR_HOME");
+    }
+
+    // ── step_key: directory-COPY cache invalidation (final-critic gap) ──────
+
+    #[test]
+    fn step_key_dir_copy_changes_when_contained_file_changes() {
+        // `COPY src/ /app` must invalidate the cache when a file INSIDE src/
+        // changes — not just top-level files. Regression for the final-critic
+        // finding (step_key hashed is_file() only).
+        let ctx = TempDir::new().unwrap();
+        std::fs::create_dir_all(ctx.path().join("src/nested")).unwrap();
+        std::fs::write(ctx.path().join("src/a.txt"), b"one").unwrap();
+        std::fs::write(ctx.path().join("src/nested/b.txt"), b"deep-one").unwrap();
+
+        let step = BuildStep {
+            instr: Instr::Copy {
+                src: vec!["src".to_string()],
+                dest: "/app".to_string(),
+            },
+            raw: "COPY src /app".to_string(),
+        };
+
+        let k1 = step_key(None, &step, ctx.path()).unwrap();
+
+        // change a NESTED file
+        std::fs::write(ctx.path().join("src/nested/b.txt"), b"deep-two").unwrap();
+        let k2 = step_key(None, &step, ctx.path()).unwrap();
+        assert_ne!(
+            k1.0, k2.0,
+            "nested file change must change the COPY step key"
+        );
+
+        // adding a file changes the key too
+        std::fs::write(ctx.path().join("src/c.txt"), b"new").unwrap();
+        let k3 = step_key(None, &step, ctx.path()).unwrap();
+        assert_ne!(k2.0, k3.0, "adding a file must change the COPY step key");
+
+        // identical content ⇒ identical key (determinism)
+        std::fs::remove_file(ctx.path().join("src/c.txt")).unwrap();
+        std::fs::write(ctx.path().join("src/nested/b.txt"), b"deep-one").unwrap();
+        let k4 = step_key(None, &step, ctx.path()).unwrap();
+        assert_eq!(k1.0, k4.0, "restoring content must restore the key");
     }
 
     // ── parse_dockerfile tests ──────────────────────────────────────────────

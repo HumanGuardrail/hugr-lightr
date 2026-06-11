@@ -88,3 +88,19 @@ BOTH import_layout and pull, fail-closed (LightrError::Integrity, real
 digests). Also fix: size-mismatch exit class, OCI whiteout intra-layer
 ordering, opaque-same-layer, hardlink forward-ref, pull malformed-ref → exit 2.
 Dispatched as R2-HARDEN (parallel, disjoint from R3-build).
+
+## 2026-06-12 — Final cross-ring critic + dir-COPY fix
+
+Closing critic (opus, cold) verdict: product PASS, parity-audit honest,
+zero todo!() in src. ONE material defect: `build` step_key hashed COPY
+sources only when `is_file()`, so `COPY src/ /app` (a directory) didn't
+fold its contents into the cache key → editing a file inside a copied dir
+gave a stale cache hit (silent miscompile). Hidden because the shipped A22
+was narrowed to single-file COPY.
+
+**Lead fix (root):** step_key now recurses copied directories — every
+contained file's (relative-path ‖ digest), sorted; symlinks contribute
+target; missing sources a sentinel. Regression covered at both levels:
+`step_key_dir_copy_changes_when_contained_file_changes` (unit) +
+`a22b_dir_copy_invalidates_on_nested_change` (e2e). Cosmetic: whitepaper
+"315 cases" → 338. Final: 340 tests / 0 failures, clippy -D clean.

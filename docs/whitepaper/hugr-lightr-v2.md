@@ -215,7 +215,7 @@ The honest gap: this is an **Intel** box where per-file metadata syscalls
 (~2 ms) dominate, so the sub-10 ms / O(1) headline numbers bind to the
 views layer (R2) and Apple Silicon — they are *targets with a mechanism*,
 not yet *measurements*. Everything the local product actually does is
-green and tested (315 cases, A1–A30); see `docs/spec/parity-audit.md`.
+green and tested (338 cases, A1–A30); see `docs/spec/parity-audit.md`.
 
 ## 11. What we absorbed (and from whom)
 

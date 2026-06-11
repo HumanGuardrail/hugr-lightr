@@ -213,6 +213,55 @@ fn a22_build_memoizes() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// A22b — directory COPY cache invalidation (final-critic regression)
+//
+// `COPY src /app` must invalidate the build cache when a file INSIDE the
+// copied directory changes — the bug the narrowed file-COPY A22 hid.
+// ─────────────────────────────────────────────────────────────────────────────
+#[test]
+fn a22b_dir_copy_invalidates_on_nested_change() {
+    let home = TempDir::new().unwrap();
+    let ctx = TempDir::new().unwrap();
+    let counter_dir = TempDir::new().unwrap();
+    let counter = counter_dir.path().join("counter.txt");
+
+    std::fs::create_dir_all(ctx.path().join("src/nested")).unwrap();
+    std::fs::write(ctx.path().join("src/nested/b.txt"), b"one").unwrap();
+    let dockerfile = format!(
+        "FROM scratch\nCOPY src /app\nRUN /bin/sh -c 'echo built >> {}'\n",
+        counter.to_str().unwrap()
+    );
+    std::fs::write(ctx.path().join("Dockerfile"), dockerfile).unwrap();
+
+    let build = |home: &Path| {
+        lightr_cmd(home)
+            .current_dir(ctx.path())
+            .args(["build", "-t", "@t/dircopy", "."])
+            .output()
+            .expect("build runs")
+    };
+
+    // first build → RUN executes (counter = 1)
+    assert_eq!(build(home.path()).status.code(), Some(0));
+    // second build, unchanged → fully cached (counter stays 1)
+    assert_eq!(build(home.path()).status.code(), Some(0));
+    let lines_after_cached = std::fs::read_to_string(&counter).unwrap().lines().count();
+    assert_eq!(
+        lines_after_cached, 1,
+        "unchanged dir-COPY build must be cached (counter==1); got {lines_after_cached}"
+    );
+
+    // change a NESTED file → the COPY step key must change → RUN re-executes
+    std::fs::write(ctx.path().join("src/nested/b.txt"), b"two").unwrap();
+    assert_eq!(build(home.path()).status.code(), Some(0));
+    let lines_after_change = std::fs::read_to_string(&counter).unwrap().lines().count();
+    assert_eq!(
+        lines_after_change, 2,
+        "nested file change must bust the dir-COPY cache (counter==2); got {lines_after_change}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // A23 — build hydrate
 //
 // After A22's third build the ref @t/b is the final state (data.txt=v2-changed,
