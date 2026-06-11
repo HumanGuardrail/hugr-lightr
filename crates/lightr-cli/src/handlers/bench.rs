@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use tar;
+
 use lightr_index::{hydrate, snapshot, status};
 use lightr_store::Store;
 use serde::Serialize;
@@ -41,6 +43,11 @@ const BUDGET_STATUS_WARM_MS: u64 = 500;
 const BUDGET_HYDRATE_MS: u64 = 5_000;
 const BUDGET_SNAPSHOT_COLD_MS: u64 = 2_500;
 const BUDGET_SNAPSHOT_WARM_MS: u64 = 500;
+// R4 §3 bench expansion (B9–B11) — generous machine-class budgets
+const BUDGET_OCI_IMPORT_MS: u64 = 2_000;
+const BUDGET_BUILD_COLD_MS: u64 = 5_000;
+const BUDGET_BUILD_CACHED_MS: u64 = 2_000;
+const BUDGET_COMPOSE_UP_MS: u64 = 3_000;
 
 /// Spawn-measured indicators get ×3 margin in --check (debug/CI noise).
 const SPAWN_MARGIN: u64 = 3;
@@ -316,6 +323,138 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
     );
     rows.push(Row::new("B2 hit-run", hit_dur, BUDGET_HIT_RUN_MS, true));
 
+    // ── B9: oci-import (tiny in-mem docker-save tar) ──────────────────────
+    //
+    // Build a minimal docker-save tar in-memory (manifest.json + one small
+    // uncompressed layer tar) in a fresh tempdir, then time `oci import`.
+    // A new LIGHTR_HOME is used per call so the store is fresh each run.
+    {
+        let b9_img_dir = tempfile::tempdir().expect("b9 img tempdir");
+        let tar_path = make_tiny_oci_tar(b9_img_dir.path());
+        let tar_str = tar_path.to_string_lossy().to_string();
+
+        let b9_dur = median_of(
+            || {
+                let home_tmp = tempfile::tempdir().expect("b9 home tmpdir");
+                let exe = std::env::current_exe().expect("current_exe");
+                let t = Instant::now();
+                let _out = Command::new(&exe)
+                    .env("LIGHTR_HOME", home_tmp.path())
+                    .args(["oci", "import", &tar_str, "--name", "bench-oci"])
+                    .output()
+                    .expect("spawn oci import");
+                t.elapsed()
+            },
+            5,
+        );
+        rows.push(Row::new(
+            "B9 oci-import",
+            b9_dur,
+            BUDGET_OCI_IMPORT_MS,
+            true,
+        ));
+    }
+
+    // ── B10a/B10: build cold then build cached ────────────────────────────
+    //
+    // Write a 3-step Dockerfile into a temp context dir. Build once (cold),
+    // then again with the same context (warm/cached). The cached run should
+    // be materially faster (all steps hit AC).
+    {
+        let build_ctx_dir = tempfile::tempdir().expect("build ctx tempdir");
+        make_bench_dockerfile(build_ctx_dir.path());
+        let ctx_str = build_ctx_dir.path().to_string_lossy().to_string();
+
+        // B10a: cold build (1 sample — expensive; not a median)
+        let b10a_dur = {
+            let home_tmp = tempfile::tempdir().expect("b10a home tmpdir");
+            let exe = std::env::current_exe().expect("current_exe");
+            let t = Instant::now();
+            let _out = Command::new(&exe)
+                .env("LIGHTR_HOME", home_tmp.path())
+                .args(["build", &ctx_str, "-t", "bench-build-cold"])
+                .output()
+                .expect("spawn build cold");
+            t.elapsed()
+        };
+        rows.push(Row::new(
+            "B10a build-cold",
+            b10a_dur,
+            BUDGET_BUILD_COLD_MS,
+            true,
+        ));
+
+        // B10: cached build — reuse same home so AC is warm
+        let b10_home = tempfile::tempdir().expect("b10 home tempdir");
+        // warm-up run (populates AC)
+        {
+            let exe = std::env::current_exe().expect("current_exe");
+            let _out = Command::new(&exe)
+                .env("LIGHTR_HOME", b10_home.path())
+                .args(["build", &ctx_str, "-t", "bench-build-warm"])
+                .output()
+                .expect("spawn build warm-up");
+        }
+        let b10_dur = median_of(
+            || {
+                let exe = std::env::current_exe().expect("current_exe");
+                let t = Instant::now();
+                let _out = Command::new(&exe)
+                    .env("LIGHTR_HOME", b10_home.path())
+                    .args(["build", &ctx_str, "-t", "bench-build-warm"])
+                    .output()
+                    .expect("spawn build cached");
+                t.elapsed()
+            },
+            3,
+        );
+        rows.push(Row::new(
+            "B10 build-cached",
+            b10_dur,
+            BUDGET_BUILD_CACHED_MS,
+            true,
+        ));
+    }
+
+    // ── B11: compose-up (1-service, high port) ────────────────────────────
+    //
+    // Write a 1-service compose.yml binding a high (unprivileged) port.
+    // Time `compose up`. Then tear down with `compose down` to clean up.
+    {
+        let compose_ctx_dir = tempfile::tempdir().expect("compose ctx tempdir");
+        let compose_file = make_bench_compose(compose_ctx_dir.path());
+        let compose_str = compose_file.to_string_lossy().to_string();
+
+        let b11_home = tempfile::tempdir().expect("b11 home tempdir");
+        let b11_dur = {
+            let exe = std::env::current_exe().expect("current_exe");
+            let t = Instant::now();
+            let _out = Command::new(&exe)
+                .env("LIGHTR_HOME", b11_home.path())
+                .args(["compose", "up", "-f", &compose_str])
+                .output()
+                .expect("spawn compose up");
+            t.elapsed()
+        };
+
+        // Tear down to clean up any supervisor processes
+        {
+            let exe = std::env::current_exe().expect("current_exe");
+            let _out = Command::new(&exe)
+                .env("LIGHTR_HOME", b11_home.path())
+                .args(["compose", "down"])
+                .output()
+                .ok();
+        }
+
+        rows.push(Row::new(
+            "B11 compose-up",
+            b11_dur,
+            BUDGET_COMPOSE_UP_MS,
+            true,
+        ));
+    }
+
     // ── --vs-docker ────────────────────────────────────────────────────────
     let docker_line: Option<String> = if vs_docker { check_docker() } else { None };
 
@@ -358,6 +497,108 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
     } else {
         0
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// B9 fixture: minimal docker-save tar
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Build a single-file uncompressed layer tar in memory.
+fn build_layer_buf(path: &str, content: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    {
+        let mut ar = tar::Builder::new(&mut buf);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_cksum();
+        ar.append_data(&mut header, path, content)
+            .expect("append layer entry");
+        ar.finish().expect("finish layer tar");
+    }
+    buf
+}
+
+/// Write a minimal docker-save tar to `<dir>/image.tar` and return the path.
+///
+/// Layout:
+///   manifest.json  — [{Config, RepoTags, Layers:[layer.tar]}]
+///   layer.tar      — one tiny file (bench/hello)
+///   config.json    — minimal config blob ({})
+fn make_tiny_oci_tar(dir: &Path) -> PathBuf {
+    let layer_data = build_layer_buf("bench/hello", b"hi");
+    let config_data = b"{}";
+    let config_name = "config.json";
+
+    let manifest_json = serde_json::json!([{
+        "Config": config_name,
+        "RepoTags": ["bench-image:latest"],
+        "Layers": ["layer.tar"]
+    }]);
+    let manifest_bytes =
+        serde_json::to_vec(&manifest_json).expect("serialize docker-save manifest");
+
+    let tar_path = dir.join("image.tar");
+    let file = fs::File::create(&tar_path).expect("create image.tar");
+    let mut ar = tar::Builder::new(file);
+
+    let mut append = |name: &str, data: &[u8]| {
+        let mut hdr = tar::Header::new_gnu();
+        hdr.set_size(data.len() as u64);
+        hdr.set_mode(0o644);
+        hdr.set_entry_type(tar::EntryType::Regular);
+        hdr.set_cksum();
+        ar.append_data(&mut hdr, name, data)
+            .expect("append tar entry");
+    };
+
+    append("manifest.json", &manifest_bytes);
+    append("layer.tar", &layer_data);
+    append(config_name, config_data);
+    ar.finish().expect("finish image.tar");
+
+    tar_path
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// B10 fixture: 3-step Dockerfile
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Write a 3-step Dockerfile + context into `dir`.
+/// Steps: COPY a file, RUN a pure deterministic command (echo), COPY another.
+fn make_bench_dockerfile(dir: &Path) {
+    // Context files
+    fs::write(dir.join("fileA.txt"), b"alpha content").expect("write fileA");
+    fs::write(dir.join("fileB.txt"), b"beta content").expect("write fileB");
+
+    let dockerfile = concat!(
+        "FROM scratch\n",
+        "COPY fileA.txt /a.txt\n",
+        "RUN echo built\n",
+        "COPY fileB.txt /b.txt\n",
+    );
+    fs::write(dir.join("Dockerfile"), dockerfile.as_bytes()).expect("write Dockerfile");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// B11 fixture: minimal 1-service compose.yml
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Write a minimal 1-service compose.yml binding port 59876 into `dir` and
+/// return the path. Port is high and unprivileged; service has no real image
+/// (lazy binding: listeners registered but service not eagerly started).
+fn make_bench_compose(dir: &Path) -> PathBuf {
+    let compose_yml = concat!(
+        "services:\n",
+        "  bench-svc:\n",
+        "    image: bench-image:latest\n",
+        "    ports:\n",
+        "      - \"59876:59876\"\n",
+    );
+    let path = dir.join("compose.yml");
+    fs::write(&path, compose_yml.as_bytes()).expect("write compose.yml");
+    path
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
