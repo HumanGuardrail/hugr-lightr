@@ -1,0 +1,16 @@
+[package]
+name = "lightr-init"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The guest PID1 binary. The LIBRARY compiles + tests on any host (logic
+# behind seams); the BINARY's real syscalls are cfg(target_os="linux").
+[[bin]]
+name = "lightr-init"
+path = "src/bin/init.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

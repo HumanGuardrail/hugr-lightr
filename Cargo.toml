@@ -10,6 +10,7 @@ members = [
     "crates/lightr-engine",
     "crates/lightr-oci",
     "crates/lightr-build",
+    "crates/lightr-init",
 ]
 
 [workspace.package]

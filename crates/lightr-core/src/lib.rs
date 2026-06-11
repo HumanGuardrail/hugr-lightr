@@ -445,6 +445,10 @@ pub enum LightrError {
     TooLarge { size: u64, cap: u64 },
     InvalidRef(String),
     InvalidManifest(String),
+    /// Registry/network protocol error (OCI pull), with the HTTP status.
+    /// Distinct from Io so auth (401/403), not-found (404), rate-limit (429)
+    /// and 5xx surface their own message instead of collapsing to "Io".
+    Registry { status: u16, msg: String },
     Io(std::io::Error),
 }
 
@@ -464,6 +468,9 @@ impl std::fmt::Display for LightrError {
             }
             LightrError::InvalidRef(n) => write!(f, "invalid ref: {n}"),
             LightrError::InvalidManifest(msg) => write!(f, "invalid manifest: {msg}"),
+            LightrError::Registry { status, msg } => {
+                write!(f, "registry error (HTTP {status}): {msg}")
+            }
             LightrError::Io(e) => write!(f, "{e}"),
         }
     }
