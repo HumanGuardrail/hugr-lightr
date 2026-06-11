@@ -457,10 +457,92 @@ fn pid_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+// WIN-PATH: liveness via OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) +
+// GetExitCodeProcess; alive iff the process is still STILL_ACTIVE (259).
+// Runtime-validatable only on a real Windows box.
+#[cfg(windows)]
+fn pid_alive(pid: i32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+        if handle.is_null() {
+            // Could not open: either gone or access-denied. Treat as not alive
+            // (the supervisor owns the pid it spawned, so denial implies dead).
+            return false;
+        }
+        let mut code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        // STILL_ACTIVE is i32 259; GetExitCodeProcess writes a u32.
+        ok != 0 && code == STILL_ACTIVE as u32
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Process termination — transport for SIGTERM/SIGKILL semantics.
+// ---------------------------------------------------------------------------
+
+// WIN-PATH: Windows has no signal model. SIGKILL maps to a forced
+// TerminateProcess; SIGTERM is best-effort (no graceful-term equivalent — we
+// force-terminate so `stop` makes progress). Graceful-term semantics differ
+// from unix and are only validatable on a real Windows box.
+// Returns true if a terminate was attempted successfully.
+#[cfg(windows)]
+fn win_terminate(pid: i32, exit_code: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid as u32);
+        if handle.is_null() {
+            return false;
+        }
+        let ok = TerminateProcess(handle, exit_code);
+        CloseHandle(handle);
+        ok != 0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Control transport path.
+// unix: a `.sock` unix-domain-socket path inside the run dir.
+// windows: a named pipe whose name is derived deterministically from the run
+//          id (the run dir's file name), so client and server agree without
+//          any extra shared state. A presence sentinel file in the run dir
+//          mirrors `.sock`'s "does the endpoint exist?" check.
+// JSON wire protocol is identical on both transports.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
 fn ctl_sock_path(dir: &std::path::Path) -> PathBuf {
     dir.join("ctl.sock")
 }
 
+// WIN-PATH: named-pipe address `\\.\pipe\lightr-<id>`. The id is the run dir's
+// file name — the same identity the unix `.sock` lives under — so a client
+// computes the identical pipe name from the same `dir`. Runtime-validatable
+// only on a real Windows box.
+#[cfg(windows)]
+fn ctl_pipe_name(dir: &std::path::Path) -> String {
+    let id = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "default".to_string());
+    format!(r"\\.\pipe\lightr-{id}")
+}
+
+// Windows sentinel mirroring `ctl.sock`'s existence semantics. The named pipe
+// itself is not a filesystem object pollable via `Path::exists`, so the
+// supervisor touches this file once the pipe server is listening and removes
+// it on exit. `ps`/`stop` test this exactly like the unix `.sock` path.
+#[cfg(windows)]
+fn ctl_sock_path(dir: &std::path::Path) -> PathBuf {
+    dir.join("ctl.pipe.live")
+}
+
+#[cfg(unix)]
 fn send_ctl_op(dir: &std::path::Path, op: &str) -> Option<serde_json::Value> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
@@ -478,6 +560,64 @@ fn send_ctl_op(dir: &std::path::Path, op: &str) -> Option<serde_json::Value> {
     stream.write_all(op.as_bytes()).ok()?;
     stream.write_all(b"\n").ok()?;
     let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    serde_json::from_str(line.trim()).ok()
+}
+
+// WIN-PATH: named-pipe client. Opens `\\.\pipe\lightr-<id>` with CreateFileW
+// (the pipe server is a BLOCKING PIPE_TYPE_BYTE / PIPE_WAIT pipe — see
+// `supervise`), wraps the handle in a std File, and exchanges the SAME
+// newline-delimited JSON request/response as the unix transport. The wire
+// protocol is byte-identical; only the transport differs.
+// Runtime-validatable only on a real Windows box.
+#[cfg(windows)]
+fn send_ctl_op(dir: &std::path::Path, op: &str) -> Option<serde_json::Value> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
+
+    // Mirror the unix `sock.exists()` guard: if the supervisor's live sentinel
+    // is absent, there is no endpoint to talk to.
+    let sentinel = ctl_sock_path(dir);
+    if !sentinel.exists() {
+        return None;
+    }
+
+    let name = ctl_pipe_name(dir);
+    // Build a NUL-terminated wide string for CreateFileW.
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // dwShareMode=0, no security attrs, no extra flags (FILE_FLAGS_AND_ATTRIBUTES
+    // is a u32 alias in windows-sys 0.59 — pass 0), no template handle.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+
+    // SAFETY: handle is a valid, owned pipe handle; File takes ownership and
+    // closes it on drop.
+    let file = unsafe { File::from_raw_handle(handle as *mut _) };
+    // We need two independent halves (write the request, then buffered-read the
+    // reply). try_clone duplicates the underlying handle.
+    let mut writer = file.try_clone().ok()?;
+    writer.write_all(op.as_bytes()).ok()?;
+    writer.write_all(b"\n").ok()?;
+    writer.flush().ok()?;
+
+    let mut reader = BufReader::new(file);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     serde_json::from_str(line.trim()).ok()
@@ -536,6 +676,20 @@ pub fn spawn_detached(spec: &RunSpec, _store: &Store) -> Result<RunHandle> {
         }
     }
 
+    // WIN-PATH: Windows has no `setsid`/process-session model. The closest
+    // correctness analog is detaching the supervisor from the parent's console
+    // and giving it its own process group so a Ctrl-C to the launcher does not
+    // tear down the detached supervisor. Full process-tree containment via job
+    // objects is a future ring. Validatable only on a real Windows box.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
+        };
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
+    }
+
     cmd.spawn().map_err(LightrError::Io)?;
 
     Ok(RunHandle { id, dir })
@@ -546,10 +700,6 @@ pub fn spawn_detached(spec: &RunSpec, _store: &Store) -> Result<RunHandle> {
 // ---------------------------------------------------------------------------
 
 pub fn supervise(dir: &std::path::Path) -> Result<i32> {
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixListener;
-    use std::time::Duration;
-
     let spec = read_spec_on_disk(dir)?;
     let cwd = PathBuf::from(&spec.cwd);
 
@@ -584,76 +734,283 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
     // Write status = running
     std::fs::write(dir.join("status"), "running").map_err(LightrError::Io)?;
 
-    // Bind ctl.sock
-    let sock_path = ctl_sock_path(dir);
-    let listener = UnixListener::bind(&sock_path).map_err(LightrError::Io)?;
-    listener.set_nonblocking(true).map_err(LightrError::Io)?;
+    // The control transport is cfg-split below; the JSON wire protocol
+    // (newline-delimited `{"op":...}` request → `{...}` reply) is identical.
 
-    // Main loop: serve ctl.sock + poll child
-    let exit_code = loop {
-        // Poll child
-        if let Some(status) = child.try_wait().map_err(LightrError::Io)? {
-            #[cfg(unix)]
-            {
+    #[cfg(unix)]
+    {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::time::Duration;
+
+        // Bind ctl.sock
+        let sock_path = ctl_sock_path(dir);
+        let listener = UnixListener::bind(&sock_path).map_err(LightrError::Io)?;
+        listener.set_nonblocking(true).map_err(LightrError::Io)?;
+
+        // Main loop: serve ctl.sock + poll child
+        let exit_code = loop {
+            // Poll child
+            if let Some(status) = child.try_wait().map_err(LightrError::Io)? {
                 use std::os::unix::process::ExitStatusExt;
                 let code = status
                     .code()
                     .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
                 break code;
             }
-            #[cfg(not(unix))]
-            {
-                break status.code().unwrap_or(1);
-            }
-        }
 
-        // Accept ctl connections (non-blocking)
-        match listener.accept() {
-            Ok((stream, _)) => {
-                stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
-                stream.set_write_timeout(Some(Duration::from_secs(1))).ok();
-                let mut reader = BufReader::new(&stream);
-                let mut line = String::new();
-                if reader.read_line(&mut line).is_ok() {
-                    let line = line.trim();
-                    if let Ok(req) = serde_json::from_str::<serde_json::Value>(line) {
-                        let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
-                        let reply: serde_json::Value = match op {
-                            "status" => serde_json::json!({"status": "running"}),
-                            "signal" => {
-                                if let Some(sig) = req.get("sig").and_then(|v| v.as_i64()) {
-                                    #[cfg(unix)]
-                                    unsafe {
-                                        libc::kill(child_pid, sig as libc::c_int);
+            // Accept ctl connections (non-blocking)
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
+                    stream.set_write_timeout(Some(Duration::from_secs(1))).ok();
+                    let mut reader = BufReader::new(&stream);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_ok() {
+                        let line = line.trim();
+                        if let Ok(req) = serde_json::from_str::<serde_json::Value>(line) {
+                            let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                            let reply: serde_json::Value = match op {
+                                "status" => serde_json::json!({"status": "running"}),
+                                "signal" => {
+                                    if let Some(sig) = req.get("sig").and_then(|v| v.as_i64()) {
+                                        unsafe {
+                                            libc::kill(child_pid, sig as libc::c_int);
+                                        }
+                                        serde_json::json!({"ok": true})
+                                    } else {
+                                        serde_json::json!({"ok": false})
                                     }
-                                    serde_json::json!({"ok": true})
-                                } else {
-                                    serde_json::json!({"ok": false})
                                 }
-                            }
-                            _ => serde_json::json!({"error": "unknown op"}),
-                        };
-                        let mut reply_bytes = serde_json::to_vec(&reply).unwrap_or_default();
-                        reply_bytes.push(b'\n');
-                        let mut w = &stream;
-                        let _ = w.write_all(&reply_bytes);
+                                _ => serde_json::json!({"error": "unknown op"}),
+                            };
+                            let mut reply_bytes = serde_json::to_vec(&reply).unwrap_or_default();
+                            reply_bytes.push(b'\n');
+                            let mut w = &stream;
+                            let _ = w.write_all(&reply_bytes);
+                        }
                     }
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => {}
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => {}
-        }
 
-        std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(100));
+        };
+
+        // Write final status
+        std::fs::write(dir.join("status"), format!("exited {exit_code}"))
+            .map_err(LightrError::Io)?;
+
+        // Remove ctl.sock
+        let _ = std::fs::remove_file(&sock_path);
+
+        Ok(exit_code)
+    }
+
+    // WIN-PATH: named-pipe control server. A dedicated thread runs a BLOCKING
+    // pipe accept loop (CreateNamedPipeW + ConnectNamedPipe, PIPE_TYPE_BYTE |
+    // PIPE_WAIT) — one instance per connection, the Windows analog of the unix
+    // thread-per-connection model — while the main thread polls the child, the
+    // same as the unix path. The JSON wire protocol is identical. The pipe
+    // runtime is validatable only on a real Windows box.
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        // Presence sentinel mirroring unix `ctl.sock` existence semantics: write
+        // it once the pipe server is listening, remove it on exit. `ps`/`stop`
+        // poll this file exactly like the unix `.sock`.
+        let sentinel = ctl_sock_path(dir);
+        let pipe_name = ctl_pipe_name(dir);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let done_srv = Arc::clone(&done);
+        let pipe_name_srv = pipe_name.clone();
+
+        // Pipe-server thread: blocking accept loop. Handles the SAME ops as the
+        // unix listener; `signal` maps to a Windows TerminateProcess (no signal
+        // model on Windows), with the exit code following the unix
+        // 128+sig convention so callers observe 143 (SIGTERM) / 137 (SIGKILL).
+        let server = std::thread::spawn(move || {
+            win_pipe_server_loop(&pipe_name_srv, child_pid, &done_srv);
+        });
+
+        // Now that the server thread is up and will create the first pipe
+        // instance, publish the sentinel so clients/`ps` see the endpoint.
+        std::fs::write(&sentinel, b"live").map_err(LightrError::Io)?;
+
+        // Main loop: poll child (identical cadence to the unix path).
+        let exit_code = loop {
+            if let Some(status) = child.try_wait().map_err(LightrError::Io)? {
+                // No signal() on Windows; ExitStatus::code is authoritative.
+                break status.code().unwrap_or(1);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+
+        // Tell the server thread to stop, then unblock its pending
+        // ConnectNamedPipe by connecting to our own pipe once.
+        done.store(true, Ordering::SeqCst);
+        win_pipe_nudge(&pipe_name);
+        let _ = server.join();
+
+        // Write final status
+        std::fs::write(dir.join("status"), format!("exited {exit_code}"))
+            .map_err(LightrError::Io)?;
+
+        // Remove the presence sentinel (the named pipe itself is freed when its
+        // handles close in the server thread).
+        let _ = std::fs::remove_file(&sentinel);
+
+        Ok(exit_code)
+    }
+}
+
+// WIN-PATH: blocking named-pipe accept loop for the control server. Each
+// iteration creates one pipe instance, waits for a single client
+// (ConnectNamedPipe), reads one newline-delimited JSON request, writes one
+// JSON reply, then tears the instance down — the Windows analog of the unix
+// accept-then-thread-per-connection model. Loops until `done` is set; the
+// supervisor unblocks the final ConnectNamedPipe via `win_pipe_nudge`.
+// Validatable only on a real Windows box.
+#[cfg(windows)]
+fn win_pipe_server_loop(
+    pipe_name: &str,
+    child_pid: i32,
+    done: &std::sync::atomic::AtomicBool,
+) {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::windows::io::FromRawHandle;
+    use std::sync::atomic::Ordering;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+    use windows_sys::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
 
-    // Write final status
-    std::fs::write(dir.join("status"), format!("exited {exit_code}")).map_err(LightrError::Io)?;
+    let wide: Vec<u16> = pipe_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
 
-    // Remove ctl.sock
-    let _ = std::fs::remove_file(&sock_path);
+    loop {
+        if done.load(Ordering::SeqCst) {
+            break;
+        }
 
-    Ok(exit_code)
+        // Create one blocking pipe instance.
+        let handle = unsafe {
+            CreateNamedPipeW(
+                wide.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                PIPE_UNLIMITED_INSTANCES,
+                4096,
+                4096,
+                0,
+                std::ptr::null(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            // Could not create the instance; back off briefly and retry unless
+            // we are shutting down.
+            if done.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+
+        // Block until a client connects (or the nudge connection arrives).
+        let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
+        // ConnectNamedPipe returns 0 on failure; ERROR_PIPE_CONNECTED also means
+        // a client is already present. Either way, if shutting down we bail.
+        let _ = connected;
+
+        if done.load(Ordering::SeqCst) {
+            unsafe {
+                DisconnectNamedPipe(handle);
+                CloseHandle(handle);
+            }
+            break;
+        }
+
+        // Serve exactly one request/response on this instance using the SAME
+        // newline-delimited JSON protocol as the unix transport.
+        // SAFETY: handle is a valid owned pipe handle; File owns and closes it.
+        let file = unsafe { File::from_raw_handle(handle as *mut _) };
+        if let Ok(write_half) = file.try_clone() {
+            let mut writer = write_half;
+            let mut reader = BufReader::new(file);
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_ok() {
+                let line = line.trim();
+                if let Ok(req) = serde_json::from_str::<serde_json::Value>(line) {
+                    let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                    let reply: serde_json::Value = match op {
+                        "status" => serde_json::json!({"status": "running"}),
+                        "signal" => {
+                            if let Some(sig) = req.get("sig").and_then(|v| v.as_i64()) {
+                                // Map unix signal → forced TerminateProcess.
+                                // Exit code follows the unix 128+sig convention.
+                                let code = (128 + sig) as u32;
+                                let ok = win_terminate(child_pid, code);
+                                serde_json::json!({"ok": ok})
+                            } else {
+                                serde_json::json!({"ok": false})
+                            }
+                        }
+                        _ => serde_json::json!({"error": "unknown op"}),
+                    };
+                    let mut reply_bytes = serde_json::to_vec(&reply).unwrap_or_default();
+                    reply_bytes.push(b'\n');
+                    let _ = writer.write_all(&reply_bytes);
+                    let _ = writer.flush();
+                }
+            }
+            // `reader` (and the underlying handle) and `writer` drop here,
+            // flushing and closing the instance — disconnecting the client.
+        }
+    }
+}
+
+// WIN-PATH: unblock a pending ConnectNamedPipe by opening the pipe once and
+// immediately dropping the connection. Used by the supervisor on child exit so
+// the blocking server thread can observe `done` and terminate. Best-effort —
+// failure is harmless (the next loop check still exits). Validatable only on a
+// real Windows box.
+#[cfg(windows)]
+fn win_pipe_nudge(pipe_name: &str) {
+    use std::fs::File;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
+
+    let wide: Vec<u16> = pipe_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle != INVALID_HANDLE_VALUE {
+        // Own and immediately drop → closes the handle, completing the
+        // server's ConnectNamedPipe so it can re-check `done`.
+        let _f = unsafe { File::from_raw_handle(handle as *mut _) };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -692,11 +1049,11 @@ pub fn ps(store_home: &std::path::Path) -> Result<Vec<RunInfo>> {
         let running = if sock.exists() {
             // Also check pid alive
             if let Some(pid) = read_pid_file(&path) {
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 {
                     pid_alive(pid)
                 }
-                #[cfg(not(unix))]
+                #[cfg(not(any(unix, windows)))]
                 {
                     true
                 }
@@ -847,6 +1204,13 @@ pub fn stop(dir: &std::path::Path, grace_secs: u64) -> Result<i32> {
         unsafe {
             libc::kill(pid, libc::SIGTERM);
         }
+        // WIN-PATH: no SIGTERM equivalent — best-effort forced terminate with
+        // the unix 128+SIGTERM(15)=143 exit code. Graceful-term semantics
+        // differ from unix; validatable only on a real Windows box.
+        #[cfg(windows)]
+        {
+            win_terminate(pid, 143);
+        }
     }
 
     // Poll for grace_secs
@@ -862,13 +1226,10 @@ pub fn stop(dir: &std::path::Path, grace_secs: u64) -> Result<i32> {
                 return Ok(code);
             }
         }
-        // Check pid alive
+        // Check pid alive (pid_alive is implemented on unix and windows)
         if let Some(pid) = read_pid_file(dir) {
-            #[cfg(unix)]
-            {
-                if !pid_alive(pid) {
-                    break;
-                }
+            if !pid_alive(pid) {
+                break;
             }
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -887,6 +1248,12 @@ pub fn stop(dir: &std::path::Path, grace_secs: u64) -> Result<i32> {
         #[cfg(unix)]
         unsafe {
             libc::kill(pid, libc::SIGKILL);
+        }
+        // WIN-PATH: SIGKILL → forced TerminateProcess with the unix
+        // 128+SIGKILL(9)=137 exit code. Validatable only on a real Windows box.
+        #[cfg(windows)]
+        {
+            win_terminate(pid, 137);
         }
     }
 
