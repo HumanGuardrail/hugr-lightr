@@ -49,8 +49,11 @@ permissions, symlinks, and process control — a bounded seam set.
    `sync_all`) over raw FFI where it suffices.
 5. **Distribution = 5-target matrix:** macOS arm64 + x86_64 (x86 cross-built on
    the arm64 runner), Linux x86_64 + aarch64 (cross-linked), Windows x86_64
-   (`.zip`). macOS release binaries are signed with the **virtualization
-   entitlement** (`packaging/vz.entitlements`) so `vz` works out of the box.
+   (`.zip`). Ad-hoc local signing with the **virtualization entitlement**
+   (`packaging/vz.entitlements`) runs `vz` locally with no Apple account.
+   Carrying that entitlement on a Developer-ID-**notarized** release is a
+   *restricted* entitlement that Apple must provision for the team — to be
+   validated when signing secrets are configured (NOT asserted as working).
 6. **Honesty law extends:** runtime paths validatable only on a foreign host are
    marked `// WIN-PATH` (cf. `// BOOT-PATH`, `// VIEW-PATH`). Two objective gates
    bind every `cfg` port — the host stays green **and** `cargo check --target

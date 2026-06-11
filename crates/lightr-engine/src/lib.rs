@@ -787,15 +787,16 @@ mod wsl_impl {
             }
 
             match spec.rootfs {
-                // Isolated run: apply the `ns` model INSIDE the distro. We hand
-                // the rootfs + command to the in-distro entrypoint, which
-                // performs the same unshare(user|mount|pid)+pivot_root sequence
-                // as `ns_impl` on native Linux. The rootfs is a Linux path
-                // valid inside the distro (the store materializes it there).
+                // Isolated run: reuse the REAL `ns` engine INSIDE the distro.
+                // There is no external shim — the `ns` model is in-process in
+                // `NsEngine::run` (unshare + pivot_root) — so we invoke a Linux
+                // `lightr` on the distro PATH with `run --engine ns --rootfs …`,
+                // which runs that same in-process ns path inside WSL2. The rootfs
+                // is a host (Windows) path; translate it to the WSL2 mount view
+                // (C:\x -> /mnt/c/x) so the in-distro process can see it.
                 //
-                // WIN-PATH: the in-distro `ns` entrypoint (lightr-init / a
-                // `lightr __ns-exec` shim) is invoked here; wiring the exact
-                // in-distro invocation is validated on a real Windows+WSL box.
+                // WIN-PATH: requires a Linux `lightr` installed in the default
+                // WSL2 distro; runtime-validated via the Windows runbook, not here.
                 Some(rootfs) => {
                     let rootfs_str = rootfs.to_str().ok_or_else(|| {
                         LightrError::InvalidRef(
@@ -803,13 +804,13 @@ mod wsl_impl {
                                 .to_string(),
                         )
                     })?;
-                    // `--` ends wsl.exe option parsing; everything after runs
-                    // in the distro. We invoke the in-distro ns runner with the
-                    // rootfs and the workload command.
+                    let wsl_rootfs = win_path_to_wsl(rootfs_str);
+                    // `--` ends wsl.exe option parsing; everything after runs in
+                    // the distro. Reuse the real ns engine via the public CLI.
                     cmd.arg("--");
-                    cmd.arg("lightr");
-                    cmd.arg("__ns-exec");
-                    cmd.arg(rootfs_str);
+                    cmd.args(["lightr", "run", "--engine", "ns", "--rootfs"]);
+                    cmd.arg(&wsl_rootfs);
+                    cmd.arg("--");
                     cmd.arg(prog);
                     cmd.args(args);
                 }
@@ -826,6 +827,23 @@ mod wsl_impl {
             let status = cmd.status().map_err(LightrError::Io)?;
             Ok(exit_code(status))
         }
+    }
+
+    /// Translate a Windows path (`C:\a\b`) to its WSL2 mount view (`/mnt/c/a/b`)
+    /// so an in-distro process can see a host-materialized rootfs. Already-Linux
+    /// paths pass through. WIN-PATH: covers drive-backed paths (the common case
+    /// for a materialized rootfs); validated end-to-end via the Windows runbook.
+    fn win_path_to_wsl(p: &str) -> String {
+        if p.starts_with('/') {
+            return p.to_string();
+        }
+        let bytes = p.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' {
+            let drive = (bytes[0] as char).to_ascii_lowercase();
+            let rest = p[2..].replace('\\', "/");
+            return format!("/mnt/{drive}{rest}");
+        }
+        p.replace('\\', "/")
     }
 }
 

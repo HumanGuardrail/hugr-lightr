@@ -48,7 +48,9 @@ jobs:
         # LIGHTR_NET_TESTS intentionally unset; network tests excluded.
 
   # Cross-typecheck targets with no native runner above (linux/aarch64), so a
-  # cfg break is caught. macOS-arm64 + windows-x86_64 are natively gated above.
+  # cfg break is caught. macOS-arm64 is natively gated above; Windows x86_64-msvc
+  # (the SHIPPED triple) is natively built+tested by the windows-latest gate job
+  # above — this cross-check covers aarch64-linux which has no native runner.
   cross-check:
     name: cross-check (${{ matrix.target }})
     runs-on: ubuntu-latest
@@ -80,7 +82,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo check (cross)
-        run: cargo check --workspace --target ${{ matrix.target }}
+        run: cargo check --workspace --all-targets --target ${{ matrix.target }}
 
   bench:
     name: bench (perf-regression visibility)

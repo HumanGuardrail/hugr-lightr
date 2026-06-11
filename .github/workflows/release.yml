@@ -10,10 +10,12 @@
 #   windows-latest → x86_64-pc-windows-msvc    (windows-x86_64, .zip)
 #
 # SIGNING/NOTARIZATION (macOS): present but GATED on secrets; unsigned artifacts
-# are clearly suffixed -unsigned and NEVER labelled as signed. macOS release
-# binaries are signed WITH the virtualization entitlement (packaging/
-# vz.entitlements) so `vz` works for end users out of the box. Owner supplies:
-# APPLE_CERT, APPLE_CERT_PASSWORD, AC_API_KEY, AC_API_KEY_ID.
+# are clearly suffixed -unsigned and NEVER labelled as signed. The signing step
+# applies the virtualization entitlement (packaging/vz.entitlements); note that
+# com.apple.security.virtualization is a RESTRICTED entitlement — notarization
+# may require Apple to provision it for the team, to be validated when secrets
+# are configured. Owner supplies: APPLE_CERT, APPLE_CERT_PASSWORD, AC_API_KEY,
+# AC_API_KEY_ID.
 #
 # CONCURRENCY: superseded tag runs on the same ref are cancelled.
 
@@ -113,7 +115,10 @@ jobs:
             printf '%s' "$APPLE_CERT" | base64 --decode -o "$CERT_PATH"
             security import "$CERT_PATH" -P "$APPLE_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
             security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-            # Hardened runtime + virtualization entitlement (so vz runs for users).
+            # Hardened runtime + virtualization entitlement. NOTE: the
+            # virtualization entitlement is RESTRICTED — if notarization rejects
+            # it for this team, drop --entitlements (vz still runs via local
+            # ad-hoc signing). To validate once Apple provisioning is configured.
             codesign --sign "Developer ID Application" --options runtime --timestamp \
               --entitlements packaging/vz.entitlements --verbose "$BINARY"
             AC_KEY_PATH="$RUNNER_TEMP/ac_api_key.json"
