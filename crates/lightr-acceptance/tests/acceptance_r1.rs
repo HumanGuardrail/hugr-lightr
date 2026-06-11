@@ -402,6 +402,101 @@ fn a11_gc() {
         .assert()
         .success();
     compare_trees(ws_live.path(), dest.path());
+
+    // --- min-age extension ---
+    // Create an exited detached run (run -d -- /bin/sh -c true; poll exit).
+    let det_ws = TempDir::new().unwrap();
+    let det_out = lightr_cmd(home.path())
+        .args([
+            "run",
+            "-d",
+            "--dir",
+            det_ws.path().to_str().unwrap(),
+            "--",
+            "/bin/sh",
+            "-c",
+            "true",
+        ])
+        .output()
+        .expect("run -d must launch");
+    assert_eq!(
+        det_out.status.code().unwrap_or(-1),
+        0,
+        "run -d must exit 0; stderr: {}",
+        String::from_utf8_lossy(&det_out.stderr)
+    );
+    let det_id = parse_id_from_stdout(&det_out.stdout);
+    let _det_guard = RunGuard::new(&det_id, home.path());
+
+    // Poll until exited.
+    let became_exited = poll_until(Duration::from_secs(5), || {
+        ps_is_exited(home.path(), &det_id)
+    });
+    assert!(
+        became_exited,
+        "detached run {det_id} must show running=false within 5 s"
+    );
+
+    let run_dir = home.path().join("run").join(&det_id);
+    assert!(
+        run_dir.exists(),
+        "run dir must exist before gc: {}",
+        run_dir.display()
+    );
+
+    // Sleep 1 s so the run dir's mtime is at least 1 second old.
+    // gc uses `now - mtime > min_age_secs`; with min_age=0, age must be ≥1 s.
+    std::thread::sleep(Duration::from_secs(1));
+
+    // gc --force --min-age 86400 → run_dirs_removed == 0 AND run dir still exists.
+    let gc_min_age = lightr_cmd(home.path())
+        .args(["gc", "--force", "--min-age", "86400", "--json"])
+        .output()
+        .expect("gc --force --min-age must launch");
+    assert_eq!(
+        gc_min_age.status.code().unwrap_or(-1),
+        0,
+        "gc --force --min-age must exit 0; stderr: {}",
+        String::from_utf8_lossy(&gc_min_age.stderr)
+    );
+    let gc_min_age_json: serde_json::Value =
+        serde_json::from_slice(&gc_min_age.stdout).expect("gc --json must emit valid JSON");
+    assert_eq!(
+        gc_min_age_json.get("run_dirs_removed").and_then(|v| v.as_u64()),
+        Some(0),
+        "gc --force --min-age 86400 must report run_dirs_removed=0 (young dir); got: {gc_min_age_json}"
+    );
+    assert!(
+        run_dir.exists(),
+        "gc --force --min-age 86400 must not remove young run dir: {}",
+        run_dir.display()
+    );
+
+    // gc --force --min-age 0 → run dir removed.
+    let gc_min_age_0 = lightr_cmd(home.path())
+        .args(["gc", "--force", "--min-age", "0", "--json"])
+        .output()
+        .expect("gc --force --min-age 0 must launch");
+    assert_eq!(
+        gc_min_age_0.status.code().unwrap_or(-1),
+        0,
+        "gc --force --min-age 0 must exit 0; stderr: {}",
+        String::from_utf8_lossy(&gc_min_age_0.stderr)
+    );
+    let gc_min_age_0_json: serde_json::Value =
+        serde_json::from_slice(&gc_min_age_0.stdout).expect("gc --json must emit valid JSON");
+    assert_eq!(
+        gc_min_age_0_json
+            .get("run_dirs_removed")
+            .and_then(|v| v.as_u64()),
+        Some(1),
+        "gc --force --min-age 0 must report run_dirs_removed=1; got: {gc_min_age_0_json}"
+    );
+    assert!(
+        !run_dir.exists(),
+        "gc --force --min-age 0 must remove the exited run dir: {}",
+        run_dir.display()
+    );
 }
 
 /// Recursively collect all regular file paths under `root`.
@@ -577,10 +672,19 @@ fn a13_bisect() {
     );
 
     let bisect_stdout = String::from_utf8_lossy(&bisect_out.stdout);
-    // The boundary index must be 1.
-    assert!(
-        bisect_stdout.contains('1'),
-        "bisect stdout must contain boundary index 1; got: {bisect_stdout}"
+    // Parse `index=<N>` from stdout and assert N == 1.
+    // Format: "index=<N> root=<hash>\n"
+    let index_val: u64 = bisect_stdout
+        .lines()
+        .find_map(|line| {
+            // Split on whitespace tokens, find one starting with "index="
+            line.split_whitespace()
+                .find_map(|tok| tok.strip_prefix("index=").and_then(|n| n.parse().ok()))
+        })
+        .unwrap_or_else(|| panic!("bisect stdout must contain 'index=<N>'; got: {bisect_stdout}"));
+    assert_eq!(
+        index_val, 1,
+        "bisect must report index=1 (first bad version); got index={index_val}; stdout: {bisect_stdout}"
     );
 }
 
@@ -628,6 +732,31 @@ fn a14_plan() {
         "plan snapshot must not ingest objects (object count must be unchanged)"
     );
 
+    // Object count UNCHANGED after plan hydrate (read-only).
+    let hydrate_dest = TempDir::new().unwrap();
+    // snapshot first so there is something to hydrate
+    lightr_cmd(home.path())
+        .current_dir(ws.path())
+        .args(["snapshot", "--dir", ".", "--name", "@t/p"])
+        .assert()
+        .success();
+    let obj_before_hydrate = count_files_under(&objects_root);
+    lightr_cmd(home.path())
+        .args([
+            "plan",
+            "hydrate",
+            hydrate_dest.path().to_str().unwrap(),
+            "--name",
+            "@t/p",
+        ])
+        .assert()
+        .code(0);
+    let obj_after_hydrate = count_files_under(&objects_root);
+    assert_eq!(
+        obj_before_hydrate, obj_after_hydrate,
+        "plan hydrate must not ingest objects (object count must be unchanged)"
+    );
+
     // plan run --dir . -- /bin/echo hi → prints predict=MISS.
     let plan_run_miss = lightr_cmd(home.path())
         .current_dir(ws.path())
@@ -644,6 +773,19 @@ fn a14_plan() {
     assert!(
         plan_run_miss_stdout.to_ascii_uppercase().contains("MISS"),
         "plan run must predict MISS before any real run; got: {plan_run_miss_stdout}"
+    );
+
+    // Object count UNCHANGED after plan run (read-only).
+    let obj_before_plan_run = count_files_under(&objects_root);
+    lightr_cmd(home.path())
+        .current_dir(ws.path())
+        .args(["plan", "run", "--dir", ".", "--", "/bin/echo", "hi"])
+        .assert()
+        .code(0);
+    let obj_after_plan_run = count_files_under(&objects_root);
+    assert_eq!(
+        obj_before_plan_run, obj_after_plan_run,
+        "plan run must not ingest objects (object count must be unchanged)"
     );
 
     // Real run.
@@ -780,14 +922,23 @@ fn a15_mcp() {
         }
     });
     writeln!(stdin, "{}", serde_json::to_string(&tools_call_req).unwrap()).unwrap();
+
+    // 5. unknown method (id=9) — must return JSON-RPC error -32601.
+    let unknown_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "unknown/method",
+        "params": {}
+    });
+    writeln!(stdin, "{}", serde_json::to_string(&unknown_req).unwrap()).unwrap();
     stdin.flush().unwrap();
 
-    // --- Read responses (id=1, id=2, id=3) ---
+    // --- Read responses (id=1, id=2, id=3, id=9) ---
     let reader = std::io::BufReader::new(stdout);
     let mut responses: Vec<serde_json::Value> = Vec::new();
     let read_deadline = Instant::now() + Duration::from_secs(5);
 
-    // We need 3 id-bearing responses (skip notifications from server if any).
+    // We need 4 id-bearing responses (skip notifications from server if any).
     'outer: for line in reader.lines() {
         if Instant::now() > read_deadline {
             break 'outer;
@@ -803,7 +954,7 @@ fn a15_mcp() {
         // Only collect id-bearing responses (not notifications).
         if v.get("id").is_some() {
             responses.push(v);
-            if responses.len() == 3 {
+            if responses.len() == 4 {
                 break 'outer;
             }
         }
@@ -830,11 +981,11 @@ fn a15_mcp() {
         "lightr mcp must exit 0 after stdin is closed"
     );
 
-    // We must have received 3 id-bearing responses.
+    // We must have received 4 id-bearing responses.
     assert_eq!(
         responses.len(),
-        3,
-        "mcp: expected 3 id-bearing responses; got {}",
+        4,
+        "mcp: expected 4 id-bearing responses; got {}",
         responses.len()
     );
 
@@ -862,6 +1013,26 @@ fn a15_mcp() {
         "tools/list must return ≥5 tools; got {}: {tools_resp}",
         tools.len()
     );
+
+    // Assert required tool names are present.
+    let tool_names: std::collections::HashSet<&str> = tools
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+        .collect();
+    for required in &[
+        "lightr_snapshot",
+        "lightr_hydrate",
+        "lightr_status",
+        "lightr_run",
+        "lightr_diff",
+    ] {
+        assert!(
+            tool_names.contains(required),
+            "tools/list must include '{}'; got names: {:?}",
+            required,
+            tool_names
+        );
+    }
 
     // id=3: tools/call status response — valid structure; content[0].type=="text".
     let call_resp = responses
@@ -894,6 +1065,22 @@ fn a15_mcp() {
         status_json.get("clean").and_then(|v| v.as_bool()),
         Some(true),
         "status JSON must have 'clean': true for a clean dir; got: {status_json}"
+    );
+
+    // id=9: unknown method — must return JSON-RPC error with code -32601.
+    let unknown_resp = responses
+        .iter()
+        .find(|v| v.get("id").and_then(|i| i.as_u64()) == Some(9))
+        .expect("response with id=9 must be present");
+    let error_code = unknown_resp
+        .pointer("/error/code")
+        .and_then(|c| c.as_i64())
+        .unwrap_or_else(|| {
+            panic!("unknown method response must have 'error.code'; got: {unknown_resp}")
+        });
+    assert_eq!(
+        error_code, -32601,
+        "unknown method error code must be -32601 (Method not found); got: {unknown_resp}"
     );
 }
 
@@ -986,6 +1173,61 @@ fn a16_events() {
         Some(true),
         "--events end JSON must have ok=true; got: {end_json}"
     );
+
+    // Both events must contain "verb" field.
+    assert!(
+        start_json.get("verb").and_then(|v| v.as_str()).is_some(),
+        "--events start JSON must have 'verb' field; got: {start_json}"
+    );
+    assert!(
+        end_json.get("verb").and_then(|v| v.as_str()).is_some(),
+        "--events end JSON must have 'verb' field; got: {end_json}"
+    );
+
+    // Failing run: end event must have ok:false (and exit:3 if present).
+    let fail_out = lightr_cmd(home.path())
+        .args([
+            "--events",
+            "run",
+            "--dir",
+            ws.path().to_str().unwrap(),
+            "--",
+            "/bin/sh",
+            "-c",
+            "exit 3",
+        ])
+        .output()
+        .expect("--events failing run must launch");
+    // The CLI exits with the child's exit code (3).
+    assert_eq!(
+        fail_out.status.code().unwrap_or(-1),
+        3,
+        "--events run 'exit 3' must exit 3; stderr: {}",
+        String::from_utf8_lossy(&fail_out.stderr)
+    );
+    let fail_stderr = String::from_utf8_lossy(&fail_out.stderr);
+    let fail_end_line = fail_stderr
+        .lines()
+        .find(|l| l.contains(r#""ev":"end""#) || l.contains(r#""ev": "end""#))
+        .unwrap_or_else(|| {
+            panic!("--events failing run stderr must have end event; got:\n{fail_stderr}")
+        });
+    let fail_end_json: serde_json::Value =
+        serde_json::from_str(fail_end_line).unwrap_or_else(|e| {
+            panic!("--events end line must be valid JSON; error: {e}; line: {fail_end_line}")
+        });
+    assert_eq!(
+        fail_end_json.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "--events end for failing run must have ok:false; got: {fail_end_json}"
+    );
+    // exit field is optional but if present must be 3.
+    if let Some(exit_code) = fail_end_json.get("exit").and_then(|v| v.as_i64()) {
+        assert_eq!(
+            exit_code, 3,
+            "--events end exit field must be 3; got: {fail_end_json}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1069,4 +1311,583 @@ fn walkdir_recurse(dir: &Path, out: &mut Vec<PathBuf>) {
             walkdir_recurse(&path, out);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// a9b — unknown run ids (logs/stop/exec each exit 2 with "unknown run id")
+// ---------------------------------------------------------------------------
+#[test]
+fn a9b_unknown_ids() {
+    let home = TempDir::new().unwrap();
+
+    // logs nope → exit 2, stderr contains "unknown run id"
+    let logs_out = lightr_cmd(home.path())
+        .args(["logs", "nope"])
+        .output()
+        .expect("logs must launch");
+    assert_eq!(
+        logs_out.status.code().unwrap_or(-1),
+        2,
+        "logs nope must exit 2; stderr: {}",
+        String::from_utf8_lossy(&logs_out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&logs_out.stderr).contains("unknown run id"),
+        "logs nope stderr must contain 'unknown run id'; got: {}",
+        String::from_utf8_lossy(&logs_out.stderr)
+    );
+
+    // stop nope → exit 2, stderr contains "unknown run id"
+    let stop_out = lightr_cmd(home.path())
+        .args(["stop", "nope"])
+        .output()
+        .expect("stop must launch");
+    assert_eq!(
+        stop_out.status.code().unwrap_or(-1),
+        2,
+        "stop nope must exit 2; stderr: {}",
+        String::from_utf8_lossy(&stop_out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&stop_out.stderr).contains("unknown run id"),
+        "stop nope stderr must contain 'unknown run id'; got: {}",
+        String::from_utf8_lossy(&stop_out.stderr)
+    );
+
+    // exec nope -- true → exit 2, stderr contains "unknown run id"
+    let exec_out = lightr_cmd(home.path())
+        .args(["exec", "nope", "--", "true"])
+        .output()
+        .expect("exec must launch");
+    assert_eq!(
+        exec_out.status.code().unwrap_or(-1),
+        2,
+        "exec nope must exit 2; stderr: {}",
+        String::from_utf8_lossy(&exec_out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&exec_out.stderr).contains("unknown run id"),
+        "exec nope stderr must contain 'unknown run id'; got: {}",
+        String::from_utf8_lossy(&exec_out.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// a13b — bisect error paths
+// ---------------------------------------------------------------------------
+#[test]
+fn a13b_bisect_errors() {
+    // Case 1: 1-version ref → InvalidRef → exit 2.
+    {
+        let home = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        fixture_tree(ws.path());
+
+        lightr_cmd(home.path())
+            .current_dir(ws.path())
+            .args(["snapshot", "--dir", ".", "--name", "@t/x"])
+            .assert()
+            .success();
+
+        let out = lightr_cmd(home.path())
+            .args(["bisect", "--name", "@t/x", "--", "/bin/true"])
+            .output()
+            .expect("bisect must launch");
+        assert_eq!(
+            out.status.code().unwrap_or(-1),
+            2,
+            "bisect on 1-version ref must exit 2 (InvalidRef); stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Case 2: 2-version ref where NEWEST is GOOD → endpoints-invalid → exit 1,
+    // stderr contains "endpoints".
+    // NOTE: spec §4 table maps endpoints-invalid to exit 1; fix list says exit 2
+    // (InvalidRef). Binary currently exits 1 per spec table. Test asserts exit 1
+    // to match binary behaviour; "endpoints" in stderr is asserted per fix list.
+    {
+        let home = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        fixture_tree(ws.path());
+
+        // 2 versions, no bad.marker anywhere → newest is GOOD → endpoints invalid.
+        lightr_cmd(home.path())
+            .current_dir(ws.path())
+            .args(["snapshot", "--dir", ".", "--name", "@t/x"])
+            .assert()
+            .success();
+        lightr_cmd(home.path())
+            .current_dir(ws.path())
+            .args(["snapshot", "--dir", ".", "--name", "@t/x"])
+            .assert()
+            .success();
+
+        let out = lightr_cmd(home.path())
+            .args([
+                "bisect",
+                "--name",
+                "@t/x",
+                "--",
+                "/bin/sh",
+                "-c",
+                "test ! -f bad.marker",
+            ])
+            .output()
+            .expect("bisect must launch");
+        // exit 1: endpoints-invalid per spec §4 table.
+        assert_eq!(
+            out.status.code().unwrap_or(-1),
+            1,
+            "bisect endpoints-invalid must exit 1; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("endpoints"),
+            "bisect endpoints-invalid stderr must contain 'endpoints'; got: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Case 3: bisect --name @t/nope → exit 2 (not found / InvalidRef).
+    {
+        let home = TempDir::new().unwrap();
+
+        let out = lightr_cmd(home.path())
+            .args(["bisect", "--name", "@t/nope", "--", "/bin/true"])
+            .output()
+            .expect("bisect must launch");
+        assert_eq!(
+            out.status.code().unwrap_or(-1),
+            2,
+            "bisect --name @t/nope must exit 2; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// a8b — --json payloads: gc, undo, diff, run
+// ---------------------------------------------------------------------------
+#[test]
+fn a8b_json_payloads() {
+    let home = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    fixture_tree(ws.path());
+
+    // Snapshot v1.
+    lightr_cmd(home.path())
+        .current_dir(ws.path())
+        .args(["snapshot", "--dir", ".", "--name", "@t/x"])
+        .assert()
+        .success();
+
+    // Snapshot v2 (identical — tests undo).
+    lightr_cmd(home.path())
+        .current_dir(ws.path())
+        .args(["snapshot", "--dir", ".", "--name", "@t/x"])
+        .assert()
+        .success();
+
+    // --- gc --json ---
+    let gc_out = lightr_cmd(home.path())
+        .args(["gc", "--json"])
+        .output()
+        .expect("gc --json must launch");
+    assert_eq!(
+        gc_out.status.code().unwrap_or(-1),
+        0,
+        "gc --json must exit 0"
+    );
+    let gc_json: serde_json::Value =
+        serde_json::from_slice(&gc_out.stdout).expect("gc --json must emit valid JSON");
+    for key in &[
+        "objects_total",
+        "reachable",
+        "swept",
+        "bytes_freed",
+        "run_dirs_removed",
+    ] {
+        assert!(
+            gc_json.get(key).is_some(),
+            "gc --json must have '{}' key; got: {gc_json}",
+            key
+        );
+    }
+
+    // --- undo --json ---
+    let undo_out = lightr_cmd(home.path())
+        .args(["undo", "--name", "@t/x", "--json"])
+        .output()
+        .expect("undo --json must launch");
+    assert_eq!(
+        undo_out.status.code().unwrap_or(-1),
+        0,
+        "undo --json must exit 0; stderr: {}",
+        String::from_utf8_lossy(&undo_out.stderr)
+    );
+    let undo_json: serde_json::Value =
+        serde_json::from_slice(&undo_out.stdout).expect("undo --json must emit valid JSON");
+    assert!(
+        undo_json.get("name").is_some(),
+        "undo --json must have 'name' key; got: {undo_json}"
+    );
+    assert!(
+        undo_json.get("root").is_some(),
+        "undo --json must have 'root' key; got: {undo_json}"
+    );
+
+    // --- diff --json (different versions) ---
+    // Snapshot v3 with a changed file.
+    let modified = ws.path().join("level1/sub1/deep1/file_0000.txt");
+    fs::write(&modified, b"a8b diff changed content").unwrap();
+    lightr_cmd(home.path())
+        .current_dir(ws.path())
+        .args(["snapshot", "--dir", ".", "--name", "@t/x"])
+        .assert()
+        .success();
+
+    let diff_out = lightr_cmd(home.path())
+        .args(["diff", "--name", "@t/x", "--at", "1", "--json"])
+        .output()
+        .expect("diff --json must launch");
+    // exit 1 = different
+    assert_eq!(
+        diff_out.status.code().unwrap_or(-1),
+        1,
+        "diff --json must exit 1 (different); stderr: {}",
+        String::from_utf8_lossy(&diff_out.stderr)
+    );
+    let diff_json: serde_json::Value =
+        serde_json::from_slice(&diff_out.stdout).expect("diff --json must emit valid JSON");
+    for key in &["added", "removed", "changed"] {
+        assert!(
+            diff_json.get(key).is_some(),
+            "diff --json must have '{}' key; got: {diff_json}",
+            key
+        );
+    }
+
+    // --- run --json stderr line ---
+    let run_out = lightr_cmd(home.path())
+        .current_dir(ws.path())
+        .args(["run", "--dir", ".", "--json", "--", "/bin/echo", "hi"])
+        .output()
+        .expect("run --json must launch");
+    assert_eq!(
+        run_out.status.code().unwrap_or(-1),
+        0,
+        "run --json must exit 0; stderr: {}",
+        String::from_utf8_lossy(&run_out.stderr)
+    );
+    let run_stderr = String::from_utf8_lossy(&run_out.stderr);
+    let json_line = run_stderr
+        .lines()
+        .find(|l| l.starts_with("lightr-json:"))
+        .unwrap_or_else(|| {
+            panic!("run --json stderr must contain 'lightr-json: ...' line; got:\n{run_stderr}")
+        });
+    let json_part = json_line.strip_prefix("lightr-json: ").unwrap_or_else(|| {
+        panic!("lightr-json line must start with 'lightr-json: '; got: {json_line}")
+    });
+    let run_json: serde_json::Value =
+        serde_json::from_str(json_part).expect("run --json payload must be valid JSON");
+    assert!(
+        run_json.get("key").is_some(),
+        "run --json payload must have 'key'; got: {run_json}"
+    );
+    assert!(
+        run_json.get("hit").is_some(),
+        "run --json payload must have 'hit'; got: {run_json}"
+    );
+    assert!(
+        run_json.get("exit_code").is_some(),
+        "run --json payload must have 'exit_code'; got: {run_json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// a9c — --mount grammar rejections
+// ---------------------------------------------------------------------------
+#[test]
+fn a9c_mount_grammar() {
+    let home = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    fixture_tree(ws.path());
+
+    // Snapshot @t/x so grammar failures aren't masked by missing-ref errors.
+    lightr_cmd(home.path())
+        .current_dir(ws.path())
+        .args(["snapshot", "--dir", ".", "--name", "@t/x"])
+        .assert()
+        .success();
+
+    // --mount badNAME!:x → invalid ref name → exit 2.
+    let out1 = lightr_cmd(home.path())
+        .args(["run", "--mount", "badNAME!:x", "--", "true"])
+        .output()
+        .expect("run must launch");
+    assert_eq!(
+        out1.status.code().unwrap_or(-1),
+        2,
+        "--mount badNAME!:x must exit 2; stderr: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+
+    // --mount @t/x:/abs/path → absolute target → exit 2.
+    let out2 = lightr_cmd(home.path())
+        .args(["run", "--mount", "@t/x:/abs/path", "--", "true"])
+        .output()
+        .expect("run must launch");
+    assert_eq!(
+        out2.status.code().unwrap_or(-1),
+        2,
+        "--mount @t/x:/abs/path must exit 2; stderr: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+
+    // --mount @t/x:../escape → path escape → exit 2.
+    let out3 = lightr_cmd(home.path())
+        .args(["run", "--mount", "@t/x:../escape", "--", "true"])
+        .output()
+        .expect("run must launch");
+    assert_eq!(
+        out3.status.code().unwrap_or(-1),
+        2,
+        "--mount @t/x:../escape must exit 2; stderr: {}",
+        String::from_utf8_lossy(&out3.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// a12b — diff --dir
+// ---------------------------------------------------------------------------
+#[test]
+fn a12b_diff_dir() {
+    let home = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    fixture_tree(ws.path());
+
+    // Snapshot @t/x.
+    lightr_cmd(home.path())
+        .current_dir(ws.path())
+        .args(["snapshot", "--dir", ".", "--name", "@t/x"])
+        .assert()
+        .success();
+
+    // Modified copy → diff --dir <copy> --name @t/x exits 1, names the path.
+    let modified_copy = TempDir::new().unwrap();
+    // Copy fixture manually using fs operations.
+    copy_dir_all(ws.path(), modified_copy.path());
+    let changed_file = modified_copy.path().join("level1/sub1/deep1/file_0000.txt");
+    fs::write(&changed_file, b"a12b modified content").unwrap();
+
+    let diff_mod = lightr_cmd(home.path())
+        .args([
+            "diff",
+            "--dir",
+            modified_copy.path().to_str().unwrap(),
+            "--name",
+            "@t/x",
+        ])
+        .output()
+        .expect("diff --dir must launch");
+    assert_eq!(
+        diff_mod.status.code().unwrap_or(-1),
+        1,
+        "diff --dir (modified copy) must exit 1; stderr: {}",
+        String::from_utf8_lossy(&diff_mod.stderr)
+    );
+    let diff_stdout = String::from_utf8_lossy(&diff_mod.stdout);
+    assert!(
+        diff_stdout.contains("file_0000.txt"),
+        "diff --dir must name the changed path; got: {diff_stdout}"
+    );
+
+    // Unmodified copy → exit 0.
+    let clean_copy = TempDir::new().unwrap();
+    copy_dir_all(ws.path(), clean_copy.path());
+
+    lightr_cmd(home.path())
+        .args([
+            "diff",
+            "--dir",
+            clean_copy.path().to_str().unwrap(),
+            "--name",
+            "@t/x",
+        ])
+        .assert()
+        .code(0);
+}
+
+/// Recursively copy `src` into `dst` (dst must exist).
+fn copy_dir_all(src: &Path, dst: &Path) {
+    for entry in fs::read_dir(src).unwrap().flatten() {
+        let path = entry.path();
+        let meta = fs::symlink_metadata(&path).unwrap();
+        let dest = dst.join(entry.file_name());
+        if meta.file_type().is_symlink() {
+            let target = fs::read_link(&path).unwrap();
+            std::os::unix::fs::symlink(target, &dest).unwrap();
+        } else if meta.file_type().is_dir() {
+            fs::create_dir_all(&dest).unwrap();
+            copy_dir_all(&path, &dest);
+        } else {
+            fs::copy(&path, &dest).unwrap();
+            let perms = meta.permissions();
+            fs::set_permissions(&dest, perms).unwrap();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// a9d — detach never populates the AC (plain run must be memo MISS)
+// ---------------------------------------------------------------------------
+#[test]
+fn a9d_detach_no_memo() {
+    let home = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    fixture_tree(ws.path());
+
+    // Detach an echo command.
+    let det_out = lightr_cmd(home.path())
+        .args([
+            "run",
+            "-d",
+            "--dir",
+            ws.path().to_str().unwrap(),
+            "--",
+            "/bin/echo",
+            "detach-memo-test",
+        ])
+        .output()
+        .expect("run -d must launch");
+    assert_eq!(
+        det_out.status.code().unwrap_or(-1),
+        0,
+        "run -d must exit 0; stderr: {}",
+        String::from_utf8_lossy(&det_out.stderr)
+    );
+    let det_id = parse_id_from_stdout(&det_out.stdout);
+    let _guard = RunGuard::new(&det_id, home.path());
+
+    // Wait for the detached run to exit.
+    let became_exited = poll_until(Duration::from_secs(5), || {
+        ps_is_exited(home.path(), &det_id)
+    });
+    assert!(
+        became_exited,
+        "detached run {det_id} must show running=false within 5 s"
+    );
+
+    // Plain run of the same command → must be memo MISS (detached never populated AC).
+    let run_out = lightr_cmd(home.path())
+        .args([
+            "run",
+            "--dir",
+            ws.path().to_str().unwrap(),
+            "--",
+            "/bin/echo",
+            "detach-memo-test",
+        ])
+        .output()
+        .expect("run must launch");
+    assert_eq!(
+        run_out.status.code().unwrap_or(-1),
+        0,
+        "plain run must exit 0; stderr: {}",
+        String::from_utf8_lossy(&run_out.stderr)
+    );
+    let run_stderr = String::from_utf8_lossy(&run_out.stderr);
+    assert!(
+        run_stderr.to_ascii_uppercase().contains("MISS"),
+        "plain run after detached run must be memo MISS; stderr: {run_stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// a9e — logs --stderr / --both stream separation
+// ---------------------------------------------------------------------------
+#[test]
+fn a9e_logs_streams() {
+    let home = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    fixture_tree(ws.path());
+
+    // Detach a run writing to both streams, then sleeping.
+    let det_out = lightr_cmd(home.path())
+        .args([
+            "run",
+            "-d",
+            "--dir",
+            ws.path().to_str().unwrap(),
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo out; echo err 1>&2; sleep 30",
+        ])
+        .output()
+        .expect("run -d must launch");
+    assert_eq!(
+        det_out.status.code().unwrap_or(-1),
+        0,
+        "run -d must exit 0; stderr: {}",
+        String::from_utf8_lossy(&det_out.stderr)
+    );
+    let det_id = parse_id_from_stdout(&det_out.stdout);
+    let _guard = RunGuard::new(&det_id, home.path());
+
+    // Wait until running.
+    let became_running = poll_until(Duration::from_secs(5), || {
+        ps_is_running(home.path(), &det_id)
+    });
+    assert!(
+        became_running,
+        "run {det_id} must show running=true within 5 s"
+    );
+
+    // Poll until both streams have content (give child ≤3 s to write).
+    let both_ready = poll_until(Duration::from_secs(3), || {
+        let both_out = lightr_cmd(home.path())
+            .args(["logs", &det_id, "--both"])
+            .output()
+            .expect("logs --both must launch");
+        let both_str = String::from_utf8_lossy(&both_out.stdout);
+        both_str.contains("out") && both_str.contains("err")
+    });
+    assert!(
+        both_ready,
+        "logs --both must contain 'out' and 'err' within 3 s"
+    );
+
+    // logs --stderr must contain "err" but NOT "out".
+    let stderr_out = lightr_cmd(home.path())
+        .args(["logs", &det_id, "--stderr"])
+        .output()
+        .expect("logs --stderr must launch");
+    let stderr_str = String::from_utf8_lossy(&stderr_out.stdout);
+    assert!(
+        stderr_str.contains("err"),
+        "logs --stderr must contain 'err'; got: {stderr_str}"
+    );
+    assert!(
+        !stderr_str.contains("out"),
+        "logs --stderr must NOT contain 'out' (stdout); got: {stderr_str}"
+    );
+
+    // logs --both must contain both "out" and "err".
+    let both_out = lightr_cmd(home.path())
+        .args(["logs", &det_id, "--both"])
+        .output()
+        .expect("logs --both must launch");
+    let both_str = String::from_utf8_lossy(&both_out.stdout);
+    assert!(
+        both_str.contains("out"),
+        "logs --both must contain 'out'; got: {both_str}"
+    );
+    assert!(
+        both_str.contains("err"),
+        "logs --both must contain 'err'; got: {both_str}"
+    );
+    // Guard will stop the run on drop.
 }
