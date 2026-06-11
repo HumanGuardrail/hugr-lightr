@@ -1,6 +1,6 @@
 # ADR-0005 — Engine posture v0.1: native-only, no Engine trait yet
 
-- **Status:** Proposed — ⚠️ UNDER REWORK (performance bar, 2026-06-11: see `../spec/performance-bar.md`)
+- **Status:** Superseded by ADR-0014 (engines are plural and real)
 - **Date:** 2026-06-11
 
 One line: v0.1 ships the `native` tier only, and it IS clw-run's process

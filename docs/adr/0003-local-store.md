@@ -1,6 +1,6 @@
 # ADR-0003 — LocalStore: local CAS/AC, fail-closed
 
-- **Status:** Proposed — ⚠️ UNDER REWORK (performance bar, 2026-06-11: see `../spec/performance-bar.md`)
+- **Status:** Superseded by ADR-0009 (content plane)
 - **Date:** 2026-06-11
 
 One line: `lightr-store::LocalStore` implements clw's `CasTransport` +

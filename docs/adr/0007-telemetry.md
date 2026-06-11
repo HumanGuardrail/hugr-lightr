@@ -1,6 +1,6 @@
 # ADR-0007 — Telemetry: zero in v0.1
 
-- **Status:** Proposed
+- **Status:** Accepted (owner overnight mandate 2026-06-11 — subject to morning review)
 - **Date:** 2026-06-11
 
 One line: the v0.1 binary contains **no telemetry, no phone-home, no update

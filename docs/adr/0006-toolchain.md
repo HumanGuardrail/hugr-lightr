@@ -1,6 +1,6 @@
 # ADR-0006 — Toolchain & edition
 
-- **Status:** Proposed
+- **Status:** Accepted (owner overnight mandate 2026-06-11 — subject to morning review)
 - **Date:** 2026-06-11
 
 One line: Rust **1.96.0** (the machine default), edition **2021** (matching

@@ -36,8 +36,9 @@ staged (`CAP-DEDUP-CROSS-TENANT`).
 
 ## Status
 
-**Design phase.** No code yet. The vision and architecture are written down;
-the execution core it builds on already exists across three sibling repos:
+**Spec complete (2026-06-11 overnight).** Whitepaper v2 (working backwards)
+is canon; the R0 wave is building the warp core. The platform it converges
+with already exists across three sibling repos:
 
 | Layer | Repo | Status |
 |---|---|---|

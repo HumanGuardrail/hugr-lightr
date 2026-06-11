@@ -1,5 +1,8 @@
 # MVP v0.1 — the first slice
 
+> **Superseded:** R0 scope now lives in `../spec/build-spec-v2.md` (perf
+> rework: own store/index, no clw hot path). Kept for history.
+
 One sprint of scope, built on what already exists. The goal is a binary a
 Mac dev can install and feel the thesis in under a minute — not a platform.
 

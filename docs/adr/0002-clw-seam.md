@@ -1,6 +1,6 @@
 # ADR-0002 — clw seam: path-dependencies on the sibling repo
 
-- **Status:** Proposed
+- **Status:** Accepted (owner overnight mandate 2026-06-11 — subject to morning review); ADR-0002 scope narrowed by ADR-0011 (bridge crates only)
 - **Date:** 2026-06-11
 
 One line: v0.1 consumes clw crates via Cargo **path-dependencies** on the

@@ -1,6 +1,6 @@
 # ADR-0001 — Workspace & crate architecture
 
-- **Status:** Proposed
+- **Status:** Accepted (owner overnight mandate 2026-06-11 — subject to morning review)
 - **Date:** 2026-06-11
 
 One line: a three-crate Cargo workspace — `lightr-store` (local CAS/AC),

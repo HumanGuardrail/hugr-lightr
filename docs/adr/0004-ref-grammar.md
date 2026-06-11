@@ -1,6 +1,6 @@
 # ADR-0004 — Ref grammar: `@namespace/name`
 
-- **Status:** Proposed
+- **Status:** Accepted (owner overnight mandate 2026-06-11 — subject to morning review)
 - **Date:** 2026-06-11
 
 One line: a ref is `name` or `@namespace/name`, matching
