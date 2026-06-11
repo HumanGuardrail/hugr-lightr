@@ -225,6 +225,18 @@ mod tests {
     use std::fs;
     use std::io::Write;
 
+    // LIGHTR_HOME is process-global (index dir): serialize tests and isolate
+    // each one in a tempdir home so ~ is never touched.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[must_use]
+    fn isolated_home() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("LIGHTR_HOME", home.path());
+        (home, guard)
+    }
+
     fn make_store(dir: &std::path::Path) -> Store {
         Store::open(dir.join("store")).expect("store open")
     }
@@ -243,6 +255,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn key_stability() {
+        let (_home, _env_guard) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
         // Create a file so the scan has something to digest
@@ -259,6 +272,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn key_changes_when_input_file_changes() {
+        let (_home, _env_guard) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
         fs::write(cwd.join("data.txt"), b"version1").unwrap();
@@ -280,6 +294,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn key_changes_when_arg_changes() {
+        let (_home, _env_guard) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
         fs::write(cwd.join("f.txt"), b"data").unwrap();
@@ -297,6 +312,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn key_changes_when_selected_env_changes() {
+        let (_home, _env_guard) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
         fs::write(cwd.join("f.txt"), b"data").unwrap();
@@ -326,9 +342,13 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn miss_then_hit() {
+        let (_home, _env_guard) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let cwd = tmp.path();
-        let store = make_store(cwd);
+        // inputs=[cwd] by law: keep store + side-effects OUTSIDE the input tree
+        let work = tmp.path().join("work");
+        fs::create_dir(&work).unwrap();
+        let cwd = work.as_path();
+        let store = make_store(tmp.path());
 
         // Side-effect file outside inputs
         let side_effect = tmp.path().join("side_effect.txt");
@@ -374,9 +394,13 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn exit_nonzero_never_memoized() {
+        let (_home, _env_guard) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let cwd = tmp.path();
-        let store = make_store(cwd);
+        // inputs=[cwd] by law: keep store + side-effects OUTSIDE the input tree
+        let work = tmp.path().join("work");
+        fs::create_dir(&work).unwrap();
+        let cwd = work.as_path();
+        let store = make_store(tmp.path());
 
         let side_effect = tmp.path().join("side_effect_fail.txt");
 
@@ -412,9 +436,13 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn output_cap_not_memoized() {
+        let (_home, _env_guard) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let cwd = tmp.path();
-        let store = make_store(cwd);
+        // inputs=[cwd] by law: keep store + side-effects OUTSIDE the input tree
+        let work = tmp.path().join("work");
+        fs::create_dir(&work).unwrap();
+        let cwd = work.as_path();
+        let store = make_store(tmp.path());
 
         let side_effect = tmp.path().join("side_effect_cap.txt");
 
@@ -475,9 +503,13 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn corrupt_ac_record_treated_as_miss() {
+        let (_home, _env_guard) = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
-        let cwd = tmp.path();
-        let store = make_store(cwd);
+        // inputs=[cwd] by law: keep store + side-effects OUTSIDE the input tree
+        let work = tmp.path().join("work");
+        fs::create_dir(&work).unwrap();
+        let cwd = work.as_path();
+        let store = make_store(tmp.path());
 
         let side_effect = tmp.path().join("side_effect_corrupt.txt");
 
