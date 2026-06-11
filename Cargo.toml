@@ -11,6 +11,7 @@ members = [
     "crates/lightr-oci",
     "crates/lightr-build",
     "crates/lightr-init",
+    "crates/lightr-views",
 ]
 
 [workspace.package]
@@ -44,6 +45,7 @@ lightr-run = { path = "crates/lightr-run" }
 lightr-oci = { path = "crates/lightr-oci" }
 lightr-engine = { path = "crates/lightr-engine" }
 lightr-build = { path = "crates/lightr-build" }
+lightr-views = { path = "crates/lightr-views" }
 
 [profile.release]
 lto = "fat"
