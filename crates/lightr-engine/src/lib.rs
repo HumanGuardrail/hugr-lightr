@@ -13,6 +13,10 @@ pub enum EngineKind {
     Native,
     Ns,
     Vz,
+    /// Windows isolation engine: runs the `ns` model inside the default WSL2
+    /// distro's utility VM. Analog of `Vz` (macOS) / `Ns` (Linux). The WSL2 VM
+    /// is the OS's, not ours — so "no daemon" still holds.
+    Wsl,
 }
 
 impl std::str::FromStr for EngineKind {
@@ -22,7 +26,56 @@ impl std::str::FromStr for EngineKind {
             "native" => Ok(EngineKind::Native),
             "ns" => Ok(EngineKind::Ns),
             "vz" => Ok(EngineKind::Vz),
+            "wsl" => Ok(EngineKind::Wsl),
             _ => Err(LightrError::InvalidRef(format!("unknown engine: {s}"))),
+        }
+    }
+}
+
+impl EngineKind {
+    /// Stable lowercase token (inverse of `FromStr`). Stable across cfg so
+    /// `engine ls` can render every kind on every platform.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EngineKind::Native => "native",
+            EngineKind::Ns => "ns",
+            EngineKind::Vz => "vz",
+            EngineKind::Wsl => "wsl",
+        }
+    }
+
+    /// Every engine kind, in display order. Provided so callers (e.g. the CLI's
+    /// `engine ls`) can iterate without re-hardcoding the variant set and
+    /// without an exhaustive `match` that breaks when a kind is added.
+    pub fn all() -> &'static [EngineKind] {
+        &[
+            EngineKind::Native,
+            EngineKind::Ns,
+            EngineKind::Vz,
+            EngineKind::Wsl,
+        ]
+    }
+
+    /// The isolation engine this platform selects by default:
+    /// macOS → `Vz`, Linux → `Ns`, Windows → `Wsl`, else `Native`.
+    /// `Native` always works everywhere; the platform isolation engine reports
+    /// its own honest availability via [`probe`].
+    pub fn platform_default() -> EngineKind {
+        #[cfg(target_os = "macos")]
+        {
+            EngineKind::Vz
+        }
+        #[cfg(target_os = "linux")]
+        {
+            EngineKind::Ns
+        }
+        #[cfg(target_os = "windows")]
+        {
+            EngineKind::Wsl
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            EngineKind::Native
         }
     }
 }
@@ -66,6 +119,7 @@ pub fn probe(kind: EngineKind) -> EngineCaps {
         },
         EngineKind::Ns => probe_ns(),
         EngineKind::Vz => probe_vz(),
+        EngineKind::Wsl => probe_wsl(),
     }
 }
 
@@ -76,12 +130,25 @@ pub fn pack_status() -> EngineCaps {
 
 #[cfg(target_os = "linux")]
 fn probe_ns() -> EngineCaps {
+    // ns runbook: this probe is a *compile-time* "we are on Linux" claim — it
+    // does NOT prove the kernel grants unprivileged user namespaces (the
+    // CLONE_NEWUSER unshare in `ns_impl::run_in_namespaces` can still EPERM on
+    // hosts with `kernel.unprivileged_userns_clone=0`, inside restrictive
+    // containers, or under a seccomp/AppArmor policy). The honest end-to-end
+    // proof is runtime: the Linux CI/runbook MUST exercise a real isolated run
+    // (e.g. `lightr run --engine ns` asserting a fresh PID namespace — PID 1
+    // inside, distinct mount tree via pivot_root, uid 0↔caller uid map) and
+    // assert correct exit-code/signal mapping. `unshare` failure surfaces as a
+    // real non-zero error from `run`, never a fabricated success.
     EngineCaps {
         available: true,
         detail: "linux namespaces".to_string(),
     }
 }
 
+// Honest non-Linux arm: ns is a Linux-only model. We do NOT overclaim on macOS
+// (or any non-Linux host) — namespaces don't exist there, so the probe reports
+// unavailable with the host OS named, and `engine_for(Ns)` fails closed.
 #[cfg(not(target_os = "linux"))]
 fn probe_ns() -> EngineCaps {
     let os = std::env::consts::OS;
@@ -128,6 +195,79 @@ fn probe_vz() -> EngineCaps {
     }
 }
 
+// ── probe_wsl (Windows isolation = WSL2) ────────────────────────────────────
+
+/// WSL2 probe (Windows). Honest, side-effect-free: detect that WSL2 exists and
+/// has at least one distro by invoking `wsl.exe`. We never fake a success — if
+/// WSL2 is absent we report unavailable with the install instruction.
+///
+/// "No daemon" still holds: the WSL2 utility VM is the OS's lightweight VM (a
+/// Microsoft-managed Hyper-V utility VM, shared & on-demand), not a daemon we
+/// run. We just exec into the user's default distro, the Windows analog of
+/// `vz` booting a guest on macOS or `ns` unsharing namespaces on Linux.
+#[cfg(target_os = "windows")]
+fn probe_wsl() -> EngineCaps {
+    // WIN-PATH: only meaningfully exercised on a real Windows box with WSL.
+    // `wsl.exe -l -q` lists installed distros, one per line; a non-empty list
+    // means WSL is installed *and* a distro is registered (so `wsl.exe -- …`
+    // can actually run). We prefer this over `--status` because it tells us a
+    // distro exists, not merely that the WSL feature is present.
+    match wsl_list_distros() {
+        Ok(distros) if !distros.is_empty() => EngineCaps {
+            available: true,
+            detail: format!(
+                "WSL2 ready (default distro runs the ns model); distros: {}",
+                distros.join(", ")
+            ),
+        },
+        Ok(_) => EngineCaps {
+            available: false,
+            detail: "WSL2 has no distro registered — run `wsl --install` (or \
+                     `wsl --install -d <distro>`) to add one"
+                .to_string(),
+        },
+        Err(reason) => EngineCaps {
+            available: false,
+            detail: format!("WSL2 not installed/enabled — run `wsl --install` ({reason})"),
+        },
+    }
+}
+
+/// List registered WSL distros via `wsl.exe -l -q`. Returns the trimmed,
+/// non-empty distro names, or an error string describing why detection failed.
+///
+/// WIN-PATH: validatable only on a real Windows box. `wsl.exe` emits UTF-16LE
+/// on older builds; we decode leniently (strip NULs, then `from_utf8_lossy`)
+/// so a `\0`-interleaved name still parses to its ASCII distro id.
+#[cfg(target_os = "windows")]
+fn wsl_list_distros() -> std::result::Result<Vec<String>, String> {
+    let output = std::process::Command::new("wsl.exe")
+        .args(["-l", "-q"])
+        .output()
+        .map_err(|e| format!("wsl.exe not found: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("wsl.exe -l -q exited {:?}", output.status.code()));
+    }
+    let raw: Vec<u8> = output.stdout.into_iter().filter(|&b| b != 0).collect();
+    let text = String::from_utf8_lossy(&raw);
+    let distros: Vec<String> = text
+        .lines()
+        .map(|l| l.trim().trim_matches('\r').to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    Ok(distros)
+}
+
+/// Honest non-Windows arm: WSL2 is a Windows-only engine.
+#[cfg(not(target_os = "windows"))]
+fn probe_wsl() -> EngineCaps {
+    let os = std::env::consts::OS;
+    EngineCaps {
+        available: false,
+        detail: format!("wsl engine requires Windows + WSL2 (this host is {os})"),
+    }
+}
+
 // ── ExecSpec ──────────────────────────────────────────────────────────────────
 
 pub struct ExecSpec<'a> {
@@ -159,6 +299,7 @@ pub fn engine_for(kind: EngineKind) -> Result<Box<dyn Engine>> {
         EngineKind::Native => Ok(Box::new(NativeEngine)),
         EngineKind::Ns => Ok(ns_engine_box()),
         EngineKind::Vz => Ok(vz_engine_box()),
+        EngineKind::Wsl => Ok(wsl_engine_box()),
     }
 }
 
@@ -599,6 +740,119 @@ fn vz_engine_box() -> Box<dyn Engine> {
     Box::new(VzEngineStub)
 }
 
+// ── WslEngine (Windows) ───────────────────────────────────────────────────────
+//
+// The Windows isolation engine. It is the Windows analog of `vz` (macOS) and
+// `ns` (Linux): isolation is provided by running the workload inside the WSL2
+// utility VM, then applying the SAME `ns` model (Linux user/mount/pid
+// namespaces + pivot_root) *inside* that distro. We do NOT run a daemon — the
+// WSL2 utility VM is the OS's own lightweight, on-demand Hyper-V VM, managed by
+// Windows, not by us; `wsl.exe` is a transient launcher. "No daemon" holds.
+//
+// Future ring (named, NOT built here): a Hyper-V microVM engine (the Windows
+// vz-analog) that boots our own kernel+initrd pack directly via the Host Compute
+// System / Hyper-V, bypassing WSL. That is a separate, later engine.
+
+#[cfg(target_os = "windows")]
+mod wsl_impl {
+    use super::{exit_code, Engine, ExecSpec};
+    use lightr_core::{LightrError, Result};
+
+    pub struct WslEngine;
+
+    impl Engine for WslEngine {
+        /// Run the workload inside the default WSL2 distro and return its REAL
+        /// exit code. The exit-code/signal law is the shared `exit_code`
+        /// helper: `wsl.exe` propagates the in-distro process's exit status,
+        /// and on Windows `ExitStatus::code()` carries it through.
+        fn run(&self, spec: &ExecSpec) -> Result<i32> {
+            // WIN-PATH: real execution, validatable only on a Windows box with
+            // WSL2 + a registered distro. Probe (probe_wsl) gates `engine_for`
+            // before we get here, so reaching this with no WSL is not expected;
+            // we still fail closed if `wsl.exe` cannot be spawned.
+            let (prog, args) = spec.command.split_first().ok_or_else(|| {
+                LightrError::InvalidRef("empty command".to_string())
+            })?;
+
+            let mut cmd = std::process::Command::new("wsl.exe");
+
+            // Run in the user's default distro. `--cd` sets the working
+            // directory *inside* the distro (a Linux path); fall back to the
+            // distro default when cwd is unusable as a Linux path.
+            if let Some(cwd) = spec.cwd.to_str() {
+                if cwd.starts_with('/') {
+                    cmd.args(["--cd", cwd]);
+                }
+            }
+
+            match spec.rootfs {
+                // Isolated run: apply the `ns` model INSIDE the distro. We hand
+                // the rootfs + command to the in-distro entrypoint, which
+                // performs the same unshare(user|mount|pid)+pivot_root sequence
+                // as `ns_impl` on native Linux. The rootfs is a Linux path
+                // valid inside the distro (the store materializes it there).
+                //
+                // WIN-PATH: the in-distro `ns` entrypoint (lightr-init / a
+                // `lightr __ns-exec` shim) is invoked here; wiring the exact
+                // in-distro invocation is validated on a real Windows+WSL box.
+                Some(rootfs) => {
+                    let rootfs_str = rootfs.to_str().ok_or_else(|| {
+                        LightrError::InvalidRef(
+                            "wsl engine: rootfs path is not valid UTF-8 for in-distro use"
+                                .to_string(),
+                        )
+                    })?;
+                    // `--` ends wsl.exe option parsing; everything after runs
+                    // in the distro. We invoke the in-distro ns runner with the
+                    // rootfs and the workload command.
+                    cmd.arg("--");
+                    cmd.arg("lightr");
+                    cmd.arg("__ns-exec");
+                    cmd.arg(rootfs_str);
+                    cmd.arg(prog);
+                    cmd.args(args);
+                }
+                // No rootfs: run the command directly in the distro (the WSL2
+                // VM is still the isolation boundary vs. the Windows host).
+                None => {
+                    cmd.arg("--");
+                    cmd.arg(prog);
+                    cmd.args(args);
+                }
+            }
+
+            // Inherit stdio (stdout/stderr passed through), like NativeEngine.
+            let status = cmd.status().map_err(LightrError::Io)?;
+            Ok(exit_code(status))
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn wsl_engine_box() -> Box<dyn Engine> {
+    Box::new(wsl_impl::WslEngine)
+}
+
+/// Stub for non-Windows builds so `engine_for` can name the `Wsl` arm. The
+/// probe (`probe_wsl`) gates before this is ever constructed in production, so
+/// this path is dead-code on unix in practice — it just keeps the match total.
+#[cfg(not(target_os = "windows"))]
+struct WslEngineStub;
+
+#[cfg(not(target_os = "windows"))]
+impl Engine for WslEngineStub {
+    fn run(&self, _spec: &ExecSpec) -> Result<i32> {
+        Err(LightrError::InvalidRef(
+            "wsl engine requires Windows + WSL2".to_string(),
+        ))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn wsl_engine_box() -> Box<dyn Engine> {
+    Box::new(WslEngineStub)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -612,6 +866,44 @@ mod tests {
         assert_eq!(EngineKind::from_str("native").unwrap(), EngineKind::Native);
         assert_eq!(EngineKind::from_str("ns").unwrap(), EngineKind::Ns);
         assert_eq!(EngineKind::from_str("vz").unwrap(), EngineKind::Vz);
+        assert_eq!(EngineKind::from_str("wsl").unwrap(), EngineKind::Wsl);
+    }
+
+    // as_str is the exact inverse of from_str for every kind in all().
+    #[test]
+    fn as_str_inverts_from_str_for_all_kinds() {
+        for &k in EngineKind::all() {
+            assert_eq!(
+                EngineKind::from_str(k.as_str()).unwrap(),
+                k,
+                "as_str/from_str roundtrip failed for {k:?}"
+            );
+        }
+    }
+
+    // all() lists every variant exactly once (guards future additions).
+    #[test]
+    fn all_lists_every_kind() {
+        let all = EngineKind::all();
+        assert!(all.contains(&EngineKind::Native));
+        assert!(all.contains(&EngineKind::Ns));
+        assert!(all.contains(&EngineKind::Vz));
+        assert!(all.contains(&EngineKind::Wsl));
+        assert_eq!(all.len(), 4, "exactly four engine kinds");
+    }
+
+    // platform_default picks this host's isolation engine; native always works.
+    #[test]
+    fn platform_default_matches_host() {
+        let d = EngineKind::platform_default();
+        #[cfg(target_os = "macos")]
+        assert_eq!(d, EngineKind::Vz);
+        #[cfg(target_os = "linux")]
+        assert_eq!(d, EngineKind::Ns);
+        #[cfg(target_os = "windows")]
+        assert_eq!(d, EngineKind::Wsl);
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        assert_eq!(d, EngineKind::Native);
     }
 
     #[test]
@@ -657,6 +949,37 @@ mod tests {
             "detail: {}",
             caps.detail
         );
+    }
+
+    // probe(Wsl) is false off-Windows with the host OS named (no overclaim).
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn probe_wsl_unavailable_off_windows() {
+        let caps = probe(EngineKind::Wsl);
+        assert!(!caps.available, "wsl must be unavailable off Windows");
+        assert!(
+            caps.detail.contains("Windows"),
+            "detail must mention Windows: {}",
+            caps.detail
+        );
+        assert!(
+            caps.detail.contains("WSL2"),
+            "detail must mention WSL2: {}",
+            caps.detail
+        );
+    }
+
+    // engine_for(Wsl) off-Windows fails closed with a Windows reason.
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn engine_for_wsl_off_windows_err_contains_windows() {
+        match engine_for(EngineKind::Wsl) {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains("Windows"), "error must mention Windows: {msg}");
+            }
+            Ok(_) => panic!("engine_for(Wsl) must fail off Windows"),
+        }
     }
 
     // probe(Vz) is false (feature off) with actionable detail
