@@ -1236,6 +1236,8 @@ pub fn parse_lrr1(bytes: &[u8]) -> Option<(lightr_core::Digest, lightr_core::Dig
 pub fn gc(store: &Store, dry_run: bool, min_age_secs: u64) -> Result<GcReport> {
     use std::collections::HashSet;
 
+    let _g = store.gc_guard()?;
+
     let mut mark: HashSet<lightr_core::Digest> = HashSet::new();
 
     // --- Mark phase: ref-log manifests + file entries ---

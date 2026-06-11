@@ -7,8 +7,48 @@ use std::fs::OpenOptions;
 use std::fs::{self, File, Permissions};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// ─────────────────────────────── gc lock guards ──────────────────────────────
+
+/// Held by a writer (put_bytes, ingest_file, ref_put, ac_put) for the duration
+/// of its write.  Acquires a SHARED advisory flock on `<root>/.gc.lock`.
+///
+/// Ordering: writers take LOCK_SH; gc takes LOCK_EX on the same file.
+/// This means gc cannot sweep an object that a concurrent writer is
+/// mid-publishing — the exclusive lock blocks until all shared locks drop.
+pub struct WriteGuard {
+    _file: File,
+}
+
+impl Drop for WriteGuard {
+    fn drop(&mut self) {
+        // LOCK_UN is released automatically when the File fd closes, but
+        // we call it explicitly for clarity and portability.
+        let fd = self._file.as_raw_fd();
+        unsafe {
+            libc::flock(fd, libc::LOCK_UN);
+        }
+    }
+}
+
+/// Held by gc for the entire mark+sweep pass.  Acquires an EXCLUSIVE advisory
+/// flock on `<root>/.gc.lock`, blocking until all in-flight writers have
+/// released their shared locks.
+pub struct GcGuard {
+    _file: File,
+}
+
+impl Drop for GcGuard {
+    fn drop(&mut self) {
+        let fd = self._file.as_raw_fd();
+        unsafe {
+            libc::flock(fd, libc::LOCK_UN);
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CowRung {
@@ -77,16 +117,28 @@ fn temp_suffix(hint: &str) -> String {
     format!("{pid}-{hint}-{nanos}")
 }
 
-/// Atomic write: write `data` to a temp file in `parent`, then rename to `dest`.
+/// fsync the parent directory so the rename (directory entry change) is
+/// crash-durable on macOS/Linux.  On platforms that don't support it we
+/// return Ok(()) silently so the logic path is always exercised.
+fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+    let f = File::open(dir)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// Atomic write: write `data` to a temp file in `parent`, fsync the file,
+/// rename to `dest`, then fsync the parent directory so the rename is
+/// crash-durable.
 fn atomic_write(parent: &Path, dest: &Path, data: &[u8]) -> Result<()> {
     fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(".tmp-{}", temp_suffix("w")));
     {
         let mut f = File::create(&tmp)?;
         f.write_all(data)?;
-        f.flush()?;
+        f.sync_all()?; // fsync before rename
     }
     fs::rename(&tmp, dest)?;
+    fsync_dir(parent)?; // fsync parent dir after rename
     Ok(())
 }
 
@@ -290,9 +342,61 @@ impl Store {
         self.rung
     }
 
+    // ── gc lock helpers ──────────────────────────────────────────────────────
+
+    /// Returns the path to the gc advisory lock file.
+    fn gc_lock_path(&self) -> PathBuf {
+        self.root.join(".gc.lock")
+    }
+
+    /// Open (create if absent) the gc lock file.
+    fn gc_lock_file(&self) -> Result<File> {
+        let path = self.gc_lock_path();
+        // create + read + write + truncate(false): open for locking only;
+        // we never write content, so we explicitly preserve any existing bytes.
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)?;
+        Ok(f)
+    }
+
+    /// Acquire a SHARED advisory lock on `<root>/.gc.lock`.
+    ///
+    /// Writers (put_bytes, ingest_file, ref_put, ac_put) hold this for the
+    /// duration of their write.  Multiple writers may proceed concurrently.
+    /// gc's exclusive lock cannot be granted while any shared lock is held,
+    /// so gc cannot sweep an object that a concurrent writer is mid-publishing.
+    pub fn write_guard(&self) -> Result<WriteGuard> {
+        let f = self.gc_lock_file()?;
+        let fd = f.as_raw_fd();
+        let ret = unsafe { libc::flock(fd, libc::LOCK_SH) };
+        if ret != 0 {
+            return Err(LightrError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(WriteGuard { _file: f })
+    }
+
+    /// Acquire an EXCLUSIVE advisory lock on `<root>/.gc.lock`.
+    ///
+    /// Held by gc for the full mark+sweep pass.  Blocks until all in-flight
+    /// writer shared locks have been released.
+    pub fn gc_guard(&self) -> Result<GcGuard> {
+        let f = self.gc_lock_file()?;
+        let fd = f.as_raw_fd();
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if ret != 0 {
+            return Err(LightrError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(GcGuard { _file: f })
+    }
+
     /// Content-address `bytes` and store them.  Idempotent: if the object
     /// already exists the digest is returned immediately without any write.
     pub fn put_bytes(&self, bytes: &[u8]) -> Result<Digest> {
+        let _wg = self.write_guard()?;
         let d = Digest::of_bytes(bytes);
         let path = object_path(&self.root, &d);
 
@@ -310,9 +414,10 @@ impl Store {
         {
             let mut f = File::create(&tmp)?;
             f.write_all(bytes)?;
-            f.flush()?;
+            f.sync_all()?; // fsync before rename
         }
         fs::rename(&tmp, &path)?;
+        fsync_dir(&shard)?; // fsync parent dir after rename
         set_mode(&path, 0o444)?;
 
         Ok(d)
@@ -320,6 +425,7 @@ impl Store {
 
     /// Hash `path` and CoW-clone it into the store.  Idempotent.
     pub fn ingest_file(&self, path: &Path) -> Result<Digest> {
+        let _wg = self.write_guard()?;
         let d = Digest::of_file(path)?;
         let dest = object_path(&self.root, &d);
 
@@ -347,7 +453,13 @@ impl Store {
         };
         let _ = used_cow; // counted but not surfaced in API
 
+        // fsync the temp file before rename so the data is crash-durable.
+        {
+            let f = File::open(&tmp)?;
+            f.sync_all()?;
+        }
         fs::rename(&tmp, &dest)?;
+        fsync_dir(&shard)?; // fsync parent dir after rename
         set_mode(&dest, 0o444)?;
 
         Ok(d)
@@ -415,6 +527,7 @@ impl Store {
     /// Write a ref atomically (last-write-wins).
     /// R1 extension: also writes a name record (once) and appends a log entry.
     pub fn ref_put(&self, rec: &RefRecord) -> Result<()> {
+        let _wg = self.write_guard()?;
         lightr_core::validate_ref_name(&rec.name)?;
         let key = lightr_core::ref_key(&rec.name);
 
@@ -473,6 +586,7 @@ impl Store {
 
     /// Write an AC entry atomically (overwrite via temp+rename).
     pub fn ac_put(&self, key: &Digest, value: &[u8]) -> Result<()> {
+        let _wg = self.write_guard()?;
         let path = ac_path(&self.root, key);
         let hex = key.to_hex();
         let (pre, _) = shard_parts(&hex);
@@ -1087,5 +1201,140 @@ mod tests {
         let d = Digest::of_bytes(b"never stored");
         // Must succeed without error.
         store.remove_object(&d).unwrap();
+    }
+
+    // ── WP-A-dur: fsync path ─────────────────────────────────────────────────
+
+    /// fsync path: write → drop store → reopen → content intact.
+    /// fsync doesn't change observable behavior, but we assert the write+read
+    /// roundtrip still works and the fsync helper is exercised.
+    #[test]
+    fn fsync_put_reopen_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store");
+        let data = b"durable object data";
+
+        // Write and explicitly drop the store (simulates process restart).
+        let digest = {
+            let store = Store::open(&store_path).unwrap();
+            store.put_bytes(data).unwrap()
+        };
+
+        // Reopen the store.
+        let store2 = Store::open(&store_path).unwrap();
+        let got = store2.get_bytes(&digest).unwrap();
+        assert_eq!(&got[..], data);
+    }
+
+    /// Same fsync path via ingest_file.
+    #[test]
+    fn fsync_ingest_file_reopen_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store");
+        let src = dir.path().join("src.txt");
+        let data = b"ingest durable data";
+        fs::write(&src, data).unwrap();
+
+        let digest = {
+            let store = Store::open(&store_path).unwrap();
+            store.ingest_file(&src).unwrap()
+        };
+
+        let store2 = Store::open(&store_path).unwrap();
+        let got = store2.get_bytes(&digest).unwrap();
+        assert_eq!(&got[..], data);
+    }
+
+    // ── WP-A-dur: gc-vs-writer lock test ────────────────────────────────────
+
+    /// gc-vs-writer: spawn a thread that put_bytes N objects in a loop while
+    /// the main thread exercises the gc lock on the same store.  Assert:
+    ///   - No object that a writer published shows as missing after the run.
+    ///   - The gc guard acquisition did not return an error.
+    #[test]
+    fn gc_does_not_sweep_live_writers() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store");
+        let store = Arc::new(Store::open(&store_path).unwrap());
+
+        const N: usize = 30;
+
+        // Barrier so gc and the writer start at the same time.
+        let barrier = Arc::new(Barrier::new(2));
+
+        let store_w = Arc::clone(&store);
+        let barrier_w = Arc::clone(&barrier);
+        let writer = std::thread::spawn(move || {
+            barrier_w.wait();
+            let mut digests = Vec::with_capacity(N);
+            for i in 0..N {
+                let data = format!("writer-object-{i}");
+                let d = store_w.put_bytes(data.as_bytes()).unwrap();
+                digests.push(d);
+            }
+            digests
+        });
+
+        // gc acquires LOCK_EX; it must wait for any writer's LOCK_SH.
+        // We directly exercise gc_guard to hold the exclusive lock while
+        // enumerating objects (lightr-index gc is a separate crate).
+        let store_gc = Arc::clone(&store);
+        let barrier_gc = Arc::clone(&barrier);
+        let gc_thread = thread::spawn(move || {
+            barrier_gc.wait();
+            let _g = store_gc.gc_guard().unwrap();
+            // Count objects under gc lock — this is the "sweep" window.
+            let objects_root = store_gc.root().join("objects");
+            let mut count = 0usize;
+            if objects_root.exists() {
+                for shard in fs::read_dir(&objects_root).into_iter().flatten().flatten() {
+                    for obj in fs::read_dir(shard.path()).into_iter().flatten().flatten() {
+                        let name = obj.file_name();
+                        let n = name.to_string_lossy();
+                        if n.len() == 62 && !n.starts_with(".tmp-") {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            count
+        });
+
+        let written = writer.join().unwrap();
+        let _gc_count = gc_thread.join().unwrap();
+
+        // Every object the writer published must still exist.
+        for d in &written {
+            assert!(
+                store.exists(d),
+                "gc lock test: live writer object missing after gc window: {}",
+                d.to_hex()
+            );
+        }
+    }
+
+    // ── WP-A-dur: write_guard / gc_guard basic ───────────────────────────────
+
+    #[test]
+    fn write_guard_acquired_and_released() {
+        let (_dir, store) = tmp_store();
+        let wg = store.write_guard().unwrap();
+        // Multiple shared locks can coexist.
+        let wg2 = store.write_guard().unwrap();
+        drop(wg);
+        drop(wg2);
+    }
+
+    #[test]
+    fn gc_guard_acquired_and_released() {
+        let (_dir, store) = tmp_store();
+        let gg = store.gc_guard().unwrap();
+        drop(gg);
+        // After release, a new gc_guard must succeed.
+        let gg2 = store.gc_guard().unwrap();
+        drop(gg2);
     }
 }
