@@ -9,7 +9,7 @@ use lightr_index::status;
 use lightr_store::Store;
 use serde::Serialize;
 
-use crate::exit::{die_from_error, exit_dirty, exit_ok};
+use crate::exit::die_internal;
 
 #[derive(Serialize)]
 struct StatusJson {
@@ -19,16 +19,16 @@ struct StatusJson {
     changed: Vec<String>,
 }
 
-pub fn run(dir: &str, name: &str, json: bool, _explain: bool) -> ! {
+pub fn run(dir: &str, name: &str, json: bool, _explain: bool) -> i32 {
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
-        Err(e) => die_from_error(&e),
+        Err(e) => return die_internal(&e),
     };
 
     let dir_path = std::path::Path::new(dir);
     let report = match status(dir_path, &store, name) {
         Ok(r) => r,
-        Err(e) => die_from_error(&e),
+        Err(e) => return die_internal(&e),
     };
 
     let is_clean = report.clean;
@@ -65,8 +65,8 @@ pub fn run(dir: &str, name: &str, json: bool, _explain: bool) -> ! {
     }
 
     if is_clean {
-        exit_ok()
+        0
     } else {
-        exit_dirty()
+        1
     }
 }

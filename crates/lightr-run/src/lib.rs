@@ -1617,3 +1617,8 @@ mod tests {
         assert!(hit2, "predict after run must be hit");
     }
 }
+
+/// Predict HIT/MISS without executing. Returns (key, hit).
+pub fn predict(_spec: &RunSpec, _store: &Store) -> Result<(Digest, bool)> {
+    todo!("R1-W2")
+}
