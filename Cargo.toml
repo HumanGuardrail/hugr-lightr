@@ -54,6 +54,7 @@ windows-sys = { version = "0.59", features = [
 lightr-core = { path = "crates/lightr-core" }
 lightr-store = { path = "crates/lightr-store" }
 lightr-index = { path = "crates/lightr-index" }
+lightr-init = { path = "crates/lightr-init" }
 lightr-run = { path = "crates/lightr-run" }
 lightr-oci = { path = "crates/lightr-oci" }
 lightr-engine = { path = "crates/lightr-engine" }
