@@ -18,6 +18,20 @@ cross-compile-clean; runtime on foreign hardware is a one-command runbook
   (Intel→x86_64 / ASi→arm64) and codesigns before any VM run; arm64 sibling at
   `spikes/s5-vz-boot-arm64/`.
 
+**vz boots for real on Intel — end-to-end GREEN (2026-06-12):**
+- `lightr run --engine vz` boots a real microVM on this Intel Mac (i7-9750H,
+  macOS 15.3.2) and returns the guest's REAL exit code: `echo`→0+stdout,
+  `sh -c 'exit 7'`→**7**, `true`→0 (missing exit file ⇒ 255 — never a fabricated 0).
+- Three root-cause bugs the never-run path had hidden: (1) the shim ran the VM on
+  the **main** dispatch queue while blocking a semaphore → wedged in `.starting`
+  forever (the real cause of the silent hangs) → now a **dedicated serial queue**;
+  (2) VZ-x86 boots a **bzImage**, not a `vmlinux` ELF/PVH (rejected "Internal
+  Virtualization error"); (3) virtiofs `VZMultipleDirectoryShare` nested the rootfs
+  under `/newroot/rootfs` → now **`VZSingleDirectoryShare`**.
+- Exit channel is the **file channel** (`CMD_FILE`/`EXIT_FILE` on the rootfs share);
+  macOS has no host AF_VSOCK, so the dead `vsock.rs` receiver was removed. Kernel
+  reproduced by `scripts/build-kernel-x86.sh` (Linux 6.18.5 bzImage). F-205 + F-206 → ✅.
+
 **Windows tier (NEW — zero `cfg(windows)` existed before):**
 - Native core port, additive behind `#[cfg(windows)]`: file locks→`LockFileEx`,
   fsync→`FlushFileBuffers` (dir-fsync = documented no-op), control socket→named

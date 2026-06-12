@@ -58,17 +58,15 @@ public func lightr_vz_run(
     let storePath  = String(cString: store)
 
     // ── 2. Linux bootloader ─────────────────────────────────────────────────
-    // BOOT-PATH: construct the kernel command line that tells PID 1 what to exec.
-    var cmdArgs: [String] = []
-    for i in 0..<Int(argc) {
-        if let ptr = argv[i] {
-            cmdArgs.append(String(cString: ptr))
-        }
-    }
-    // Encode command as LIGHTR_CMD=arg0\x1Farg1… (unit separator); the guest
-    // PID1 reads this from /proc/cmdline and execs it.
-    let cmdEncoded = cmdArgs.joined(separator: "\u{1F}")
-    let cmdLine    = "console=hvc0 LIGHTR_CMD=\(cmdEncoded)"
+    // The kernel must be an x86_64 bzImage (VZ on Intel boots via the x86 setup
+    // header / real-mode protocol; a raw vmlinux ELF — even a PVH one — is
+    // rejected with an "Internal Virtualization error"). console=hvc0 is the
+    // virtio console VZ exposes (the guest's only console). The command travels
+    // via the file channel (CMD_FILE on the rootfs share), NOT the kernel
+    // cmdline; argv is ignored here (kept in the C ABI for forward-compat).
+    _ = argc
+    _ = argv
+    let cmdLine    = "console=hvc0"
 
     let bootLoader = VZLinuxBootLoader(kernelURL: kernelURL)
     bootLoader.initialRamdiskURL = initrdURL
@@ -81,29 +79,42 @@ public func lightr_vz_run(
     // ── 4. Virtiofs shares ──────────────────────────────────────────────────
     var storages: [VZDirectorySharingDeviceConfiguration] = []
 
-    // rootfs share (tag "rootfs", read-write so the guest can pivot/write)
+    // rootfs share (tag "rootfs", read-write so the guest can pivot/write).
+    // SINGLE-directory share: the directory's CONTENTS appear directly at the
+    // guest mountpoint. A MultipleDirectoryShare would nest them under a
+    // subdirectory named after the key (guest saw /newroot/rootfs/… instead of
+    // /newroot/… — the cause of an early read_spec ENOENT).
     let rootfsShare = VZSharedDirectory(url: URL(fileURLWithPath: rootfsPath),
                                         readOnly: false)
     let rootfsDev   = VZVirtioFileSystemDeviceConfiguration(tag: "rootfs")
-    rootfsDev.share = VZMultipleDirectoryShare(directories: ["rootfs": rootfsShare])
+    rootfsDev.share = VZSingleDirectoryShare(directory: rootfsShare)
     storages.append(rootfsDev)
 
-    // store share (tag "store", read-only)
+    // store share (tag "store", read-only) — same single-directory semantics.
     if !storePath.isEmpty {
         let storeShare = VZSharedDirectory(url: URL(fileURLWithPath: storePath),
                                            readOnly: true)
         let storeDev   = VZVirtioFileSystemDeviceConfiguration(tag: "store")
-        storeDev.share = VZMultipleDirectoryShare(directories: ["store": storeShare])
+        storeDev.share = VZSingleDirectoryShare(directory: storeShare)
         storages.append(storeDev)
     }
 
-    // ── 5. Serial console → inherit host stdio ──────────────────────────────
-    // BOOT-PATH: attach /dev/hvc0 to the host's stdin/stdout so the guest's
-    // serial output flows through (inherit semantics per spec).
+    // ── 5. Serial console → host stdio (or a durable file for diagnosis) ─────
+    // BOOT-PATH: attach /dev/hvc0 to the host. Normally writes flow to stdout
+    // (inherit semantics). When LIGHTR_VZ_CONSOLE is set, the guest console is
+    // captured to that file instead — durable across a SIGTERM/timeout and free
+    // of any stdout/pipe/tty ambiguity (used to debug a silent boot).
+    let consoleWrite: FileHandle
+    if let p = ProcessInfo.processInfo.environment["LIGHTR_VZ_CONSOLE"], !p.isEmpty {
+        FileManager.default.createFile(atPath: p, contents: nil)
+        consoleWrite = FileHandle(forWritingAtPath: p) ?? FileHandle.standardOutput
+    } else {
+        consoleWrite = FileHandle.standardOutput
+    }
     let consolePort = VZVirtioConsoleDeviceSerialPortConfiguration()
     consolePort.attachment = VZFileHandleSerialPortAttachment(
         fileHandleForReading:  FileHandle.standardInput,
-        fileHandleForWriting:  FileHandle.standardOutput
+        fileHandleForWriting:  consoleWrite
     )
 
     // ── 6. Assemble configuration ───────────────────────────────────────────
@@ -122,45 +133,60 @@ public func lightr_vz_run(
     }
 
     // ── 7. Boot + wait ──────────────────────────────────────────────────────
-    // BOOT-PATH: VZVirtualMachine must be started on the main queue.
-    //
     // `vmStatus` is a LIFECYCLE status, never the guest exit code. The guest's
     // real exit code is delivered to the Rust host as a file on the shared
     // rootfs by PID1 (see the function doc + VzEngine::run); this shim only
     // signals whether the VM reached a clean stop. The old fabricated-success
     // assignment that pinned the result to zero on stop has been removed.
-    let vm        = VZVirtualMachine(configuration: config, queue: .main)
+    //
+    // CONCURRENCY (critical): the VM runs on a DEDICATED serial queue, NOT the
+    // main queue. VZ delivers `.state` transitions and the `start` completion
+    // handler ON the VM's own queue. If that queue were the main queue AND we
+    // block the calling thread on a semaphore (below), those callbacks could
+    // never run — the VM wedges in `.starting` forever (observed empirically:
+    // state -> 4 and the completion handler never fires). With a dedicated
+    // queue, the calling thread blocks on the semaphore while VZ's queue keeps
+    // servicing the VM all the way to `.stopped`.
+    let vmQueue   = DispatchQueue(label: "com.hugr.lightr.vz")
     let semaphore = DispatchSemaphore(value: 0)
     var vmStatus: Int32 = -1
+    var vm: VZVirtualMachine?
+    var observation: NSKeyValueObservation?
+    // Trace every lifecycle transition only when the console is being captured
+    // (LIGHTR_VZ_CONSOLE set = debug); quiet otherwise. Real errors always log.
+    let trace = !(ProcessInfo.processInfo.environment["LIGHTR_VZ_CONSOLE"] ?? "").isEmpty
 
-    // Observe stop (guest powered the VM down).
-    let observation = vm.observe(\.state, options: [.new]) { machine, _ in
-        switch machine.state {
-        case .stopped:
-            // BOOT-PATH: the VM stopped cleanly. We report lifecycle success
-            // ONLY; the actual guest exit code is on the shared rootfs (PID1
-            // wrote .lightr-exit-code). We do NOT invent a process exit code here.
-            vmStatus = 0
-            semaphore.signal()
-        case .error:
-            fputs("lightr-vz-shim: VM error\n", stderr)
-            vmStatus = -1
-            semaphore.signal()
-        default:
-            break
+    vmQueue.async {
+        let machine = VZVirtualMachine(configuration: config, queue: vmQueue)
+        vm = machine
+        observation = machine.observe(\.state, options: [.new]) { m, _ in
+            if trace { fputs("lightr-vz-shim: vm.state -> \(m.state.rawValue)\n", stderr) }
+            switch m.state {
+            case .stopped:
+                // BOOT-PATH: clean stop. Lifecycle success ONLY; the real guest
+                // exit code is on the shared rootfs (PID1 wrote .lightr-exit-code).
+                vmStatus = 0
+                semaphore.signal()
+            case .error:
+                fputs("lightr-vz-shim: VM entered error state\n", stderr)
+                vmStatus = -1
+                semaphore.signal()
+            default:
+                break
+            }
+        }
+        machine.start { result in
+            if case .failure(let error) = result {
+                fputs("lightr-vz-shim: boot failed: \(error)\n", stderr)
+                vmStatus = -1
+                semaphore.signal()
+            }
         }
     }
-    _ = observation  // keep alive
 
-    vm.start { result in
-        if case .failure(let error) = result {
-            fputs("lightr-vz-shim: boot failed: \(error)\n", stderr)
-            vmStatus = -1
-            semaphore.signal()
-        }
-    }
-
-    // Block until the VM stops (or fails), then hand the lifecycle status back.
+    // Block the CALLING thread (never vmQueue) until the VM stops or fails.
     semaphore.wait()
+    _ = vm           // keep the VM + observation alive until the wait returns
+    _ = observation
     return vmStatus
 }

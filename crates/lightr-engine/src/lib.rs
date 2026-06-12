@@ -4,7 +4,6 @@ use lightr_core::{LightrError, Result};
 use std::path::{Path, PathBuf};
 
 pub mod pack;
-pub mod vsock;
 
 // ── EngineKind ────────────────────────────────────────────────────────────────
 
@@ -599,17 +598,17 @@ mod vz_impl {
     extern "C" {
         /// C ABI exposed by shim/vz.swift (compiled to static lib by build.rs).
         ///
-        /// BOOT NOTE (S5 spike): this extern fn signature is frozen contract.
-        /// The actual microVM boot has NOT been validated on Intel x86_64 —
-        /// Apple's VZ save/restore is arm64-only; the boot path itself (cold
-        /// kernel start) may work on x86 with a suitable kernel+initrd pack,
-        /// but is only validated by the S5 owner spike when the pack exists.
+        /// VALIDATED end-to-end on Intel x86_64 (i7-9750H, macOS 15.3.2,
+        /// 2026-06-12): boots a bzImage microVM, runs the command, returns its
+        /// real exit code. The kernel MUST be an x86_64 bzImage — VZ boots via
+        /// the x86 setup-header / real-mode protocol; a raw `vmlinux` ELF (even a
+        /// PVH one) is rejected with "Internal Virtualization error".
         ///
-        /// RETURN CONTRACT (WP-B-vsock): this is a VM-LIFECYCLE status, NOT the
-        /// guest's exit code. `0` = the VM booted and stopped cleanly; a
-        /// negative value = boot/config failure. The guest's REAL exit code
-        /// arrives out-of-band on the host vsock receiver (see `super::vsock`),
-        /// never from this return value. The shim no longer fabricates `0`.
+        /// RETURN CONTRACT: this is a VM-LIFECYCLE status, NOT the guest's exit
+        /// code. `0` = the VM booted and stopped cleanly; a negative value =
+        /// boot/config failure. The guest's REAL exit code arrives via the file
+        /// channel on the shared rootfs (`EXIT_FILE`), read back by `run` below —
+        /// never from this return value. The shim never fabricates a `0`.
         fn lightr_vz_run(
             kernel: *const libc::c_char,
             initrd: *const libc::c_char,
@@ -625,18 +624,17 @@ mod vz_impl {
     impl Engine for VzEngine {
         /// Run the guest and return its REAL exit code.
         ///
-        /// Sequence (build-spec-prod §WP-B-vsock):
-        ///   1. Bind the host vsock exit receiver on CID_HOST:EXIT_PORT and
-        ///      start its accept+read on a thread BEFORE booting (so the guest
-        ///      can connect the instant PID1 comes up).
+        /// Sequence (file channel — macOS has NO host AF_VSOCK):
+        ///   1. Write the command spec (InitSpec JSON) to CMD_FILE on the
+        ///      writable rootfs share, and clear any stale EXIT_FILE.
         ///   2. Boot the VM via the Swift shim and block until it stops.
-        ///   3. Join the receiver for the guest's exit frame.
+        ///   3. Read the guest's REAL exit code back from EXIT_FILE.
         ///
         /// Exit-code law:
-        ///   - boot/config failure (shim < 0)            ⇒ `Err(LightrError)`
-        ///   - VM stopped but no exit frame (guest crash) ⇒ 255, NOT 0
+        ///   - boot/config failure (shim < 0)             ⇒ `Err(LightrError)`
+        ///   - VM stopped but no EXIT_FILE (guest crash)  ⇒ 255, NOT 0
         ///   - otherwise                                  ⇒ the guest's code
-        ///     parsed from the vsock frame by `vsock::read_exit_frame`.
+        ///     parsed from EXIT_FILE.
         fn run(&self, spec: &ExecSpec) -> Result<i32> {
             let dir = pack_dir();
             let kernel = dir.join("kernel");

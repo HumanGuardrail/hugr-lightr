@@ -14,6 +14,7 @@
 //!   - host writes the command [`InitSpec`] JSON to [`CMD_FILE`] before boot;
 //!   - guest reads it, runs the command, writes the REAL exit code to
 //!     [`EXIT_FILE`]; the host reads that back after the VM stops.
+//!
 //! The lifecycle never synthesizes a success — `sink.report()` always receives
 //! the actual `spawn_wait` result (or 127 when the command cannot be spawned).
 
