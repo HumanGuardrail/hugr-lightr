@@ -586,13 +586,13 @@ fn ns_engine_box() -> Box<dyn Engine> {
 
 #[cfg(all(target_os = "macos", feature = "vz"))]
 mod vz_impl {
-    use super::vsock::VsockExitReceiver;
     use super::{pack_dir, Engine, ExecSpec};
     use lightr_core::{LightrError, Result};
+    use lightr_init::{InitSpec, CMD_FILE, EXIT_FILE};
     use std::ffi::CString;
 
     /// Exit code returned when the VM booted (and stopped) but the guest never
-    /// delivered a vsock exit frame — i.e. PID1 crashed before reporting. NOT a
+    /// wrote a readable exit file — i.e. PID1 crashed before reporting. NOT a
     /// success: we surface a real, non-zero failure rather than fabricate 0.
     const GUEST_NO_REPORT_CODE: i32 = 255;
 
@@ -645,13 +645,38 @@ mod vz_impl {
                 LightrError::InvalidRef("vz engine requires a rootfs".to_string())
             })?;
 
+            // ── 1. Write the command spec onto the rootfs share BEFORE boot ──
+            // macOS has NO host AF_VSOCK, so the host↔guest channel is two files
+            // on the shared (writable) rootfs virtiofs share (decisions-log
+            // 2026-06-12): the host writes the command to CMD_FILE here; the guest
+            // PID1 reads it, runs it, and writes its REAL exit code to EXIT_FILE,
+            // which the host reads back after the VM stops. cwd "/" + a minimal
+            // PATH is the guest environment (ExecSpec.cwd is a host path).
+            let cmd_path = rootfs.join(CMD_FILE.trim_start_matches('/'));
+            let exit_path = rootfs.join(EXIT_FILE.trim_start_matches('/'));
+            // A stale exit file from a prior run must not be read as this run's
+            // result — clear it before boot.
+            let _ = std::fs::remove_file(&exit_path);
+            let init_spec = InitSpec {
+                command: spec.command.to_vec(),
+                cwd: "/".to_string(),
+                env: vec![(
+                    "PATH".to_string(),
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+                )],
+            };
+            std::fs::write(&cmd_path, init_spec.to_json()).map_err(LightrError::Io)?;
+
             let kernel_c = path_to_cstr(&kernel)?;
             let initrd_c = path_to_cstr(&initrd)?;
             let rootfs_c = path_to_cstr(rootfs)?;
-            // store path: not yet wired to a live store handle in R2;
-            // pass empty string — the Swift shim treats "" as no store mount.
+            // store path: empty → the Swift shim mounts no store share. The
+            // command travels via CMD_FILE on the rootfs, not argv/cmdline.
             let store_c = CString::new("").unwrap();
 
+            // argv is still handed to the shim (it sets LIGHTR_CMD on the kernel
+            // cmdline), but the guest reads CMD_FILE instead — pass it anyway for
+            // forward-compat + console debugging.
             let argv_cstrings: Vec<CString> = spec
                 .command
                 .iter()
@@ -665,14 +690,7 @@ mod vz_impl {
                 argv_cstrings.iter().map(|c| c.as_ptr()).collect();
             argv_ptrs.push(std::ptr::null());
 
-            // ── 1. Start the exit-code receiver BEFORE booting ──────────────
-            // BOOT-PATH (S5): the real AF_VSOCK bind only succeeds with a live
-            // VM subsystem. Bind first so we are listening before PID1 connects.
-            let receiver = VsockExitReceiver::bind().map_err(LightrError::Io)?;
-            let recv_handle = std::thread::spawn(move || receiver.recv());
-
             // ── 2. Boot the VM and block until it stops (or fails) ──────────
-            // BOOT-PATH (S5): see BOOT NOTE above — validated with a real pack.
             let vm_status = unsafe {
                 lightr_vz_run(
                     kernel_c.as_ptr(),
@@ -684,37 +702,28 @@ mod vz_impl {
                 )
             };
             if vm_status < 0 {
-                // The VM never booted (config/boot failure). The receiver thread
-                // is still blocked on accept; we abandon it (it unblocks on
-                // process teardown). There is no guest, so there is no code to
+                // The VM never booted (config/boot failure). No guest, no code to
                 // fake — surface a real error.
                 return Err(LightrError::InvalidRef(format!(
                     "vz engine: VM boot/config failed (shim status {vm_status})"
                 )));
             }
 
-            // ── 3. Join the receiver for the guest's REAL exit code ─────────
-            // BOOT-PATH (S5): the frame the guest wrote (parsed by the tested
-            // vsock::read_exit_frame) is the SOLE source of the exit code.
-            //
-            // BOOT-PATH (S5): a silent guest (VM stops but PID1 never connected)
-            // no longer hangs — the listener carries a generous SO_RCVTIMEO
-            // backstop (default 24h, env LIGHTR_VZ_EXIT_TIMEOUT_SECS; see
-            // vsock::Listener::bind), so a timed-out accept returns Err and maps
-            // to GUEST_NO_REPORT_CODE below, never a fabricated 0. The window is
-            // generous on purpose (a legit guest connects only when its job
-            // command exits, possibly hours in); the precise "cancel accept the
-            // instant the VM stops" fix is S5 work. Short-read/EOF also → 255.
-            match recv_handle.join() {
-                Ok(Ok(code)) => Ok(code),
-                // VM stopped but the guest never delivered a (full) frame:
-                // PID1 crashed before reporting ⇒ 255, never a fabricated 0.
-                Ok(Err(_)) => Ok(GUEST_NO_REPORT_CODE),
-                // Receiver thread panicked — also not a success.
-                Err(_) => Err(LightrError::InvalidRef(
-                    "vz engine: vsock exit receiver panicked".to_string(),
-                )),
+            // ── 3. Read the guest's REAL exit code from the rootfs share ─────
+            // PID1 wrote EXIT_FILE (fsync) then powered off cleanly, so it is
+            // durable on the host's materialized rootfs by the time the shim
+            // returns. A missing/unparsable file means the guest never reported
+            // (crashed before writing) ⇒ GUEST_NO_REPORT_CODE (255), never a
+            // fabricated 0. A brief retry covers any virtiofs flush lag.
+            for _ in 0..30 {
+                if let Ok(s) = std::fs::read_to_string(&exit_path) {
+                    if let Ok(code) = s.trim().parse::<i32>() {
+                        return Ok(code);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
+            Ok(GUEST_NO_REPORT_CODE)
         }
     }
 
@@ -1094,16 +1103,17 @@ mod tests {
         }
     }
 
-    // ── KEY INVARIANT (WP-B-vsock) ─────────────────────────────────────────
-    // There is NO code path where vz returns a hardcoded 0. The exit code
-    // ALWAYS originates from a real vsock frame parsed by vsock::read_exit_frame
-    // (or an explicit error / 255 when the guest didn't report). These two
-    // source-level tests pin that down so a future edit can't silently restore
-    // the fake success.
+    // ── KEY INVARIANT (WP-B exit channel) ──────────────────────────────────
+    // There is NO code path where vz returns a hardcoded 0. The command is
+    // handed to the guest via CMD_FILE on the shared rootfs; the exit code comes
+    // back via EXIT_FILE on that same share (macOS has no host AF_VSOCK). The
+    // shim return is a VM-lifecycle status only. A missing exit file ⇒ 255,
+    // never a fabricated 0. These source-level tests pin that down so a future
+    // edit can't silently restore a fake success.
 
-    /// The Swift shim must NOT contain the fabricated `exitCode = 0` it used to.
-    /// The shim now returns a VM-lifecycle status; the exit code is the Rust
-    /// vsock receiver's job.
+    /// The Swift shim must NOT contain the fabricated `exitCode = 0` it used to,
+    /// and must not name a guest exitCode at all — it reports only VM-lifecycle
+    /// status (vmStatus); the real code is a file on the shared rootfs.
     #[test]
     fn swift_shim_has_no_fabricated_exit_code_zero() {
         let shim = include_str!("../shim/vz.swift");
@@ -1114,37 +1124,33 @@ mod tests {
         assert!(
             !shim.contains("exitCode"),
             "vz.swift must not name a guest exitCode at all — it reports only \
-             VM-lifecycle status (vmStatus); the code comes from vsock"
+             VM-lifecycle status (vmStatus); the code is read from the rootfs file"
         );
-        // It must still document where the real code comes from.
         assert!(
-            shim.contains("vsock") && shim.contains("vmStatus"),
-            "vz.swift must report vmStatus and point at the vsock channel"
+            shim.contains("vmStatus"),
+            "vz.swift must report a VM-lifecycle status (vmStatus), not the code"
         );
     }
 
-    /// `read_exit_frame` is the SOLE parser of the guest exit code in the engine
-    /// source, and `VzEngine::run` routes through the vsock receiver (which
-    /// calls it) rather than trusting the shim's return value as the code.
+    /// `VzEngine::run` delivers the command via CMD_FILE and reads the exit code
+    /// from EXIT_FILE on the shared rootfs — it NEVER returns the shim's status
+    /// as the exit code, and a missing file maps to 255 (not a fabricated 0).
     #[test]
-    fn read_exit_frame_is_the_sole_exit_code_source() {
+    fn vz_exit_code_comes_from_the_rootfs_file_not_the_shim() {
         let lib = include_str!("lib.rs");
-        let vsock_src = include_str!("vsock.rs");
 
-        // The parser exists exactly once as a definition, in vsock.rs.
+        // Command delivered to the guest by writing CMD_FILE on the rootfs.
         assert!(
-            vsock_src.contains("pub fn read_exit_frame"),
-            "read_exit_frame must be defined in vsock.rs"
+            lib.contains("CMD_FILE") && lib.contains("init_spec.to_json()"),
+            "VzEngine::run must write the command spec to CMD_FILE"
         );
-
-        // VzEngine::run binds the receiver and joins it for the code; it does
-        // NOT return the shim status as the exit code.
+        // Exit code read back from EXIT_FILE on the rootfs, parsed as i32.
         assert!(
-            lib.contains("VsockExitReceiver::bind") && lib.contains("recv_handle.join()"),
-            "VzEngine::run must obtain the code via the vsock receiver"
+            lib.contains("EXIT_FILE") && lib.contains("parse::<i32>()"),
+            "VzEngine::run must read the exit code from EXIT_FILE"
         );
-        // The shim's return value is treated as a VM-lifecycle status only
-        // (named vm_status), never returned directly as the exit code.
+        // The shim return is a lifecycle status (vm_status), only checked for
+        // failure — never returned directly as the exit code.
         assert!(
             lib.contains("let vm_status") && lib.contains("vm_status < 0"),
             "the shim return must be handled as a lifecycle status (vm_status)"
@@ -1152,7 +1158,7 @@ mod tests {
         // The honest no-report fallback is 255, explicitly NOT 0.
         assert!(
             lib.contains("GUEST_NO_REPORT_CODE: i32 = 255"),
-            "a missing guest frame must map to 255, not a fabricated 0"
+            "a missing guest exit file must map to 255, not a fabricated 0"
         );
     }
 }

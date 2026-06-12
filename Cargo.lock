@@ -666,6 +666,7 @@ dependencies = [
  "libc",
  "lightr-core",
  "lightr-index",
+ "lightr-init",
  "lightr-store",
  "serde",
  "serde_json",
