@@ -222,3 +222,40 @@ DECISION PENDING (owner) — which exit-code rework for vz-on-macOS:
 Lead recommends (a). Caveat: even with the channel fixed, the VM boot itself
 (kernel → virtiofs mount → pivot_root → exec → write) is NOT yet validated green —
 that is the next step, not the last. No boot is claimed as validated.
+
+## 2026-06-12 — Intel vz boot GREEN (end-to-end, validated on this Mac)
+
+Took rework (a) file-on-virtiofs and drove the boot to GREEN end-to-end on the
+owner's Intel Mac (i7-9750H, macOS 15.3.2). `lightr run --engine vz` now boots a
+real microVM, runs the command, and returns its REAL exit code:
+- `/bin/echo s5-boot-ok` → exit 0 + `s5-boot-ok` on the guest console
+- `/bin/sh -c 'exit 7'`  → exit **7** (the channel carries a non-trivial code)
+- `/bin/true`            → exit 0
+- missing exit file      → 255 (honest; never a fabricated 0)
+
+THREE root-cause boot bugs, found + fixed (none catchable until the VM actually
+ran — the path had never executed before):
+1. **Concurrency deadlock (the true cause of every "silent mute hang"):** the
+   Swift shim created the VM on the **main** dispatch queue, then blocked the
+   main thread on a semaphore. VZ delivers `.state` transitions + the
+   start-completion handler on the VM's queue → with the main thread blocked the
+   VM wedged in `.starting` (state 4) forever, console mute. Fix: a **dedicated
+   serial queue**; the calling thread blocks while VZ's queue keeps servicing.
+2. **Kernel format:** VZ-x86 boots a **bzImage** (x86 setup-header / real-mode
+   protocol). A raw `vmlinux` ELF — even with CONFIG_PVH=y + the
+   `XEN_ELFNOTE_PHYS32_ENTRY` note (the Firecracker/Cloud-Hypervisor PVH path) —
+   is rejected `VZErrorDomain Code=1 "Internal Virtualization error"`. The PVH
+   hunt was a red herring; bzImage is the answer.
+3. **Virtiofs share nesting:** the shim used `VZMultipleDirectoryShare(["rootfs":
+   …])`, which nests the share under a subdir named after the key → the guest saw
+   `/newroot/rootfs/…` not `/newroot/…`, so `read_spec(/newroot/.lightr-cmd)` hit
+   ENOENT. Fix: `VZSingleDirectoryShare`.
+
+CLEANUP (no debt): removed the dead `crates/lightr-engine/src/vsock.rs` (the host
+AF_VSOCK receiver — orphaned: no guest counterpart, cannot work on macOS, and
+self-described as the "active honesty contract" it no longer is). The vz exit
+channel is now the file channel end to end; stale `lightr_vz_run` doc comments
+corrected. Kernel recipe formalized as `scripts/build-kernel-x86.sh` (bzImage;
+virtio-pci/console/fs =y). Gate: clippy `-D` clean (default + vz), host tests
+green, the 2 vz invariant source-tests still pin "no fabricated 0". F-205 + F-206
+→ ✅ in parity-audit.
