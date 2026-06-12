@@ -718,7 +718,17 @@ fn import_docker_save_tar(tar_path: &Path, store: &Store, name: &str) -> Result<
                 let mut buf = Vec::new();
                 entry.read_to_end(&mut buf).map_err(LightrError::Io)?;
                 manifest_json_bytes = Some(buf);
-            } else if path_str.ends_with(".tar") || path_str.ends_with("/layer.tar") {
+            } else if path_str.ends_with(".tar")
+                || path_str.ends_with("/layer.tar")
+                || path_str.trim_start_matches("./").starts_with("blobs/")
+            {
+                // Legacy docker-save names layers `<hash>/layer.tar` / `<hash>.tar`;
+                // MODERN docker-save (OCI-layout export, Docker 25+/containerd image
+                // store) names them `blobs/sha256/<digest>` with NO extension and a
+                // compat `manifest.json` whose `Layers` point at those blob paths.
+                // Collect both so the manifest's referenced paths resolve either way.
+                // (Non-layer blobs — config, index — are collected too but only the
+                // manifest's `Layers` are ever read back; they are small.)
                 let mut buf = Vec::new();
                 entry.read_to_end(&mut buf).map_err(LightrError::Io)?;
                 // Normalize the key: strip leading ./
@@ -752,6 +762,12 @@ fn import_docker_save_tar(tar_path: &Path, store: &Store, name: &str) -> Result<
         let data = layer_data.get(&key).cloned().ok_or_else(|| {
             LightrError::InvalidManifest(format!("docker save layer not found: {key}"))
         })?;
+        // Modern OCI-layout blobs embed their digest in the path
+        // (`blobs/sha256/<hex>`) — verify content integrity, fail-closed. Legacy
+        // path-named layers (`<hash>/layer.tar`) carry no digest to check.
+        if let Some(hex) = key.strip_prefix("blobs/sha256/") {
+            verify_sha256(&data, hex)?;
+        }
         blobs.push(LayerBlob::Bytes(data));
     }
 
@@ -1723,6 +1739,120 @@ mod tests {
         let greet = hydrate_dir.join("usr/bin/greet");
         assert!(greet.exists(), "usr/bin/greet must exist");
         assert_eq!(fs::read(&greet).unwrap(), b"hello from docker save\n");
+    }
+
+    /// Build a modern `docker save` outer tar (OCI-layout export, Docker
+    /// 25+/containerd image store): layers at `blobs/sha256/<digest>` (no
+    /// `.tar` suffix) + a compat `manifest.json` whose `Layers` point at those
+    /// blob paths. `corrupt_digest` flips the layer path's digest so the blob's
+    /// real sha256 no longer matches (to exercise fail-closed verification).
+    fn make_modern_docker_save(layer_tar: &[u8], corrupt_digest: bool) -> Vec<u8> {
+        let config = br#"{"architecture":"amd64","os":"linux"}"#.to_vec();
+        let config_hex = sha256_hex_of(&config);
+        let layer_hex = if corrupt_digest {
+            "0".repeat(64)
+        } else {
+            sha256_hex_of(layer_tar)
+        };
+        let manifest = serde_json::to_vec(&serde_json::json!([{
+            "Config": format!("blobs/sha256/{config_hex}"),
+            "RepoTags": ["modern:latest"],
+            "Layers": [format!("blobs/sha256/{layer_hex}")],
+        }]))
+        .unwrap();
+
+        let entries: Vec<(String, Vec<u8>)> = vec![
+            (
+                "oci-layout".to_string(),
+                br#"{"imageLayoutVersion":"1.0.0"}"#.to_vec(),
+            ),
+            ("manifest.json".to_string(), manifest),
+            (format!("blobs/sha256/{config_hex}"), config),
+            (format!("blobs/sha256/{layer_hex}"), layer_tar.to_vec()),
+        ];
+        let mut outer = Vec::new();
+        {
+            let mut tar = tar::Builder::new(&mut outer);
+            for (path, data) in &entries {
+                let mut h = tar::Header::new_gnu();
+                h.set_path(path).unwrap();
+                h.set_mode(0o644);
+                h.set_size(data.len() as u64);
+                h.set_entry_type(tar::EntryType::Regular);
+                h.set_cksum();
+                tar.append(&h, data.as_slice()).unwrap();
+            }
+            tar.finish().unwrap();
+        }
+        outer
+    }
+
+    /// Regression: modern `docker save` (blobs/sha256 layers) must import.
+    /// Pins the fix for `docker save layer not found: blobs/sha256/...`.
+    #[test]
+    fn test_docker_save_modern_oci_layout_imports() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let (_home, store) = tmp_store_and_home();
+
+        let mut layer_tar = Vec::new();
+        {
+            let mut t = tar::Builder::new(&mut layer_tar);
+            let content = b"modern docker save\n";
+            let mut h = tar::Header::new_gnu();
+            h.set_path("usr/bin/modern").unwrap();
+            h.set_mode(0o755);
+            h.set_size(content.len() as u64);
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_cksum();
+            t.append(&h, &content[..]).unwrap();
+            t.finish().unwrap();
+        }
+
+        let tar_path = tmp.path().join("modern-docker-save.tar");
+        fs::write(&tar_path, make_modern_docker_save(&layer_tar, false)).unwrap();
+
+        let report = import_layout(&tar_path, &store, "modern-test").unwrap();
+        assert_eq!(report.layers, 1);
+
+        let hydrate_dir = tmp.path().join("hydrated-modern");
+        fs::create_dir_all(&hydrate_dir).unwrap();
+        lightr_index::hydrate(&hydrate_dir, &store, "modern-test").unwrap();
+        let f = hydrate_dir.join("usr/bin/modern");
+        assert!(f.exists(), "usr/bin/modern must exist after modern import");
+        assert_eq!(fs::read(&f).unwrap(), b"modern docker save\n");
+    }
+
+    /// Fail-closed: a modern blob whose content does not match its
+    /// `blobs/sha256/<digest>` path digest must be rejected, not silently imported.
+    #[test]
+    fn test_docker_save_modern_rejects_sha_mismatch() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let (_home, store) = tmp_store_and_home();
+
+        let mut layer_tar = Vec::new();
+        {
+            let mut t = tar::Builder::new(&mut layer_tar);
+            let content = b"tampered\n";
+            let mut h = tar::Header::new_gnu();
+            h.set_path("x").unwrap();
+            h.set_mode(0o644);
+            h.set_size(content.len() as u64);
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_cksum();
+            t.append(&h, &content[..]).unwrap();
+            t.finish().unwrap();
+        }
+
+        let tar_path = tmp.path().join("bad-modern.tar");
+        fs::write(&tar_path, make_modern_docker_save(&layer_tar, true)).unwrap();
+
+        let res = import_layout(&tar_path, &store, "bad-modern");
+        assert!(
+            res.is_err(),
+            "a blobs/sha256 digest mismatch must be rejected (fail-closed)"
+        );
     }
 
     /// pull: network-gated test.

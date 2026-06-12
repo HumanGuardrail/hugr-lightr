@@ -32,6 +32,19 @@ cross-compile-clean; runtime on foreign hardware is a one-command runbook
   macOS has no host AF_VSOCK, so the dead `vsock.rs` receiver was removed. Kernel
   reproduced by `scripts/build-kernel-x86.sh` (Linux 6.18.5 bzImage). F-205 + F-206 → ✅.
 
+**OCI import + runbook fixes (2026-06-12):**
+- `lightr oci import` now accepts **modern `docker save` tars** (Docker 25+ /
+  containerd image store = OCI-layout: layers at `blobs/sha256/<digest>`, no `.tar`
+  suffix). The old importer only collected `*.tar`/`layer.tar` and died with
+  `docker save layer not found: blobs/sha256/...`. Modern blobs are now collected
+  AND sha256-verified against the digest in their path (fail-closed); legacy
+  docker-save still works. Regression-tested (`test_docker_save_modern_*`).
+  End-to-end proven: modern `docker save alpine` → `oci import` → boots in the vz
+  microVM (exit 0).
+- `spikes/s5-vz-boot{,-arm64}/run-s5*.sh`: corrected the run invocation
+  `@img/<ref>` → `--rootfs <ref>` (the real CLI syntax) and refreshed the stale
+  vsock prose to the file exit-channel.
+
 **Windows tier (NEW — zero `cfg(windows)` existed before):**
 - Native core port, additive behind `#[cfg(windows)]`: file locks→`LockFileEx`,
   fsync→`FlushFileBuffers` (dir-fsync = documented no-op), control socket→named
