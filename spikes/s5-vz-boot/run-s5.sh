@@ -182,16 +182,17 @@ log_pass
 
 # ── Assertion 1: echo returns exit 0, stdout has 's5-boot-ok', not 255 ────────
 #
-# Proves the full boot path: kernel loads -> lightr-init PID1 mounts rootfs ->
-# spawns /bin/echo -> writes exit frame over vsock -> host reads i32(0).
-# Exit 255 = GUEST_NO_REPORT_CODE (vsock chain broken); explicitly NOT a pass.
+# Proves the full boot path: kernel loads -> lightr-init PID1 mounts the rootfs
+# virtiofs share -> chroots -> spawns /bin/echo -> writes its exit code to
+# EXIT_FILE on the share -> host reads it back. Exit 255 = GUEST_NO_REPORT_CODE
+# (no EXIT_FILE); explicitly NOT a pass.
 log_step "Assertion 1: echo exits 0, stdout has 's5-boot-ok', not 255"
 
-ECHO_OUT=$("${LIGHTR}" run --engine vz "@img/${ALPINE_REF}" -- /bin/echo s5-boot-ok 2>/dev/null) || ECHO_EXIT=$?
+ECHO_OUT=$("${LIGHTR}" run --engine vz --rootfs "${ALPINE_REF}" -- /bin/echo s5-boot-ok 2>/dev/null) || ECHO_EXIT=$?
 ECHO_EXIT="${ECHO_EXIT:-0}"
 
 if [ "${ECHO_EXIT}" -eq 255 ]; then
-    log_fail "exit code 255 = GUEST_NO_REPORT_CODE — the vsock chain is broken; PID1 never sent an exit frame. F-205 NOT closed."
+    log_fail "exit code 255 = GUEST_NO_REPORT_CODE — no EXIT_FILE on the rootfs share; PID1 never wrote its exit code. F-205 NOT closed."
 fi
 if [ "${ECHO_EXIT}" -ne 0 ]; then
     log_fail "expected exit 0, got ${ECHO_EXIT}. stdout: '${ECHO_OUT}'"
@@ -203,16 +204,16 @@ log_pass
 
 # ── Assertion 2: non-zero guest exit code flows accurately ────────────────────
 #
-# Proves the REAL exit code (7) arrives over vsock and is not fabricated. A
-# constant 0 (old fake) or 255 (no-report) would be caught here.
+# Proves the REAL exit code (7) arrives via the EXIT_FILE channel and is not
+# fabricated. A constant 0 (old fake) or 255 (no-report) would be caught here.
 log_step "Assertion 2: guest 'exit 7' flows as real exit code 7 (not 0, not 255)"
 
 SH_EXIT=0
-"${LIGHTR}" run --engine vz "@img/${ALPINE_REF}" -- /bin/sh -c 'exit 7' \
+"${LIGHTR}" run --engine vz --rootfs "${ALPINE_REF}" -- /bin/sh -c 'exit 7' \
     > /dev/null 2>&1 || SH_EXIT=$?
 
 if [ "${SH_EXIT}" -ne 7 ]; then
-    log_fail "expected exit 7, got ${SH_EXIT}. If 0: exit code was fabricated (old fake behaviour). If 255: vsock chain broken (GUEST_NO_REPORT_CODE). F-206 NOT closed."
+    log_fail "expected exit 7, got ${SH_EXIT}. If 0: exit code was fabricated (old fake behaviour). If 255: no EXIT_FILE (GUEST_NO_REPORT_CODE). F-206 NOT closed."
 fi
 log_pass
 

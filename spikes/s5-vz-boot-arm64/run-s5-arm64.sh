@@ -199,18 +199,19 @@ log_pass
 # ── Assertion 1: echo returns exit 0, stdout has 's5-boot-ok', not 255 ────────
 #
 # This proves the full boot path:
-#   kernel loads → lightr-init PID1 mounts rootfs → spawns /bin/echo →
-#   writes exit frame over vsock → host reads i32(0) from the frame.
+#   kernel loads → lightr-init PID1 mounts the rootfs virtiofs share → chroots →
+#   spawns /bin/echo → writes its exit code to EXIT_FILE on the share → host
+#   reads it back.
 #
-# Exit code 255 is GUEST_NO_REPORT_CODE — the vsock chain is broken (the VM
-# booted but PID1 never sent an exit frame). 255 is explicitly NOT a pass.
+# Exit code 255 is GUEST_NO_REPORT_CODE — no EXIT_FILE (the VM booted but PID1
+# never wrote its exit code). 255 is explicitly NOT a pass.
 log_step "Assertion 1: echo exits 0, stdout has 's5-boot-ok', not 255"
 
 ECHO_EXIT=0
-ECHO_OUT=$("${LIGHTR}" run --engine vz "@img/${ALPINE_REF}" -- /bin/echo s5-boot-ok 2>/dev/null) || ECHO_EXIT=$?
+ECHO_OUT=$("${LIGHTR}" run --engine vz --rootfs "${ALPINE_REF}" -- /bin/echo s5-boot-ok 2>/dev/null) || ECHO_EXIT=$?
 
 if [ "${ECHO_EXIT}" -eq 255 ]; then
-    log_fail "exit code 255 = GUEST_NO_REPORT_CODE — the vsock chain is broken; PID1 never sent an exit frame. F-205 NOT closed."
+    log_fail "exit code 255 = GUEST_NO_REPORT_CODE — no EXIT_FILE on the rootfs share; PID1 never wrote its exit code. F-205 NOT closed."
 fi
 if [ "${ECHO_EXIT}" -ne 0 ]; then
     log_fail "expected exit 0, got ${ECHO_EXIT}. stdout: '${ECHO_OUT}'"
@@ -222,22 +223,21 @@ log_pass
 
 # ── Assertion 2: non-zero guest exit code flows accurately ────────────────────
 #
-# This proves the REAL exit code (7) arrives over vsock and is NOT a hardcoded
-# or fabricated value. If the engine always returned 0 (the old fake behaviour)
-# or always returned 255 (no-report fallback), this assertion would catch it.
+# This proves the REAL exit code (7) arrives via the EXIT_FILE channel and is NOT
+# a hardcoded or fabricated value. If the engine always returned 0 (the old fake
+# behaviour) or always returned 255 (no-report fallback), this assertion catches it.
 #
-# The code path: lightr-init spawns /bin/sh → shell exits 7 → init writes
-# i32(7) as a little-endian frame to CID_HOST:1024 → VsockExitReceiver reads
-# it via read_exit_frame → VzEngine::run returns 7.
+# The code path: lightr-init spawns /bin/sh → shell exits 7 → init writes "7" to
+# EXIT_FILE on the rootfs share → VzEngine::run reads it back after the VM stops.
 log_step "Assertion 2: guest 'exit 7' flows as real exit code 7 (not 0, not 255)"
 
 # Capture the exit code without aborting the script (set -e is active).
 SH_EXIT=0
-"${LIGHTR}" run --engine vz "@img/${ALPINE_REF}" -- /bin/sh -c 'exit 7' \
+"${LIGHTR}" run --engine vz --rootfs "${ALPINE_REF}" -- /bin/sh -c 'exit 7' \
     > /dev/null 2>&1 || SH_EXIT=$?
 
 if [ "${SH_EXIT}" -ne 7 ]; then
-    log_fail "expected exit 7, got ${SH_EXIT}. If 0: exit code was fabricated (old fake behaviour). If 255: vsock chain broken (GUEST_NO_REPORT_CODE). F-206 NOT closed."
+    log_fail "expected exit 7, got ${SH_EXIT}. If 0: exit code was fabricated (old fake behaviour). If 255: no EXIT_FILE (GUEST_NO_REPORT_CODE). F-206 NOT closed."
 fi
 log_pass
 
