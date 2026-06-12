@@ -114,10 +114,11 @@ log_pass
 # cpio /init executable, non-empty kernel) and copies it to
 # $LIGHTR_HOME/packs/linux — the path probe_vz checks.
 #
-# KERNEL: building a Linux kernel from source needs a cross toolchain the build
-# script detects and demands (it will NOT fake a kernel). To stay turnkey,
-# pre-obtain a vmlinux (see README §2.4) and export LIGHTR_KERNEL=/path/to/it;
-# it's passed through to --kernel and the from-source build is skipped.
+# KERNEL: build the arm64 Image first with `scripts/build-kernel-arm64.sh`
+# (cross-compiles linux-6.18.5 in a container → build/linux-pack-arm64/Image),
+# then export LIGHTR_KERNEL="$(pwd)/build/linux-pack-arm64/Image". It is passed
+# through to --kernel and the from-source build is skipped. Apple's VZ on arm64
+# boots the UNCOMPRESSED `Image` (not a bzImage/vmlinux ELF — those are x86).
 #
 # --arch aarch64 selects the aarch64-unknown-linux-musl guest target.
 # (Note: the build script accepts 'aarch64', not 'arm64'.)
@@ -135,7 +136,7 @@ if [ -n "${LIGHTR_KERNEL:-}" ]; then
         || log_fail "build-linux-pack.sh failed (see output above)"
 else
     bash "${BUILD_PACK_SCRIPT}" --arch aarch64 --out "${PACK_DIR}" 2>&1 \
-        || log_fail "build-linux-pack.sh failed — a kernel toolchain is missing. Pre-build a vmlinux and re-run with LIGHTR_KERNEL=/path/to/vmlinux (see README.md §2.4)"
+        || log_fail "build-linux-pack.sh failed — no kernel toolchain in-host. Run scripts/build-kernel-arm64.sh first, then re-run with LIGHTR_KERNEL=\$(pwd)/build/linux-pack-arm64/Image"
 fi
 # Install the built pack so the engine can find it.
 "${LIGHTR}" engine install-pack "${PACK_DIR}" 2>&1 \
