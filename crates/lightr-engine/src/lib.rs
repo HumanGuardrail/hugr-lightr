@@ -3,6 +3,7 @@
 use lightr_core::{LightrError, Result};
 use std::path::{Path, PathBuf};
 
+pub mod limits;
 pub mod pack;
 
 // ── EngineKind ────────────────────────────────────────────────────────────────
@@ -282,6 +283,10 @@ pub struct ExecSpec<'a> {
     pub command: &'a [String],
     /// ns/vz: CoW-materialized tree to pivot/boot into. Native: must be None.
     pub rootfs: Option<&'a Path>,
+    /// F-203 resource caps (build-spec-parity.md §A0.4). `Copy`; default =
+    /// unlimited. Applied per engine: native/ns via `crate::limits`, vz via the
+    /// VM config. NOT part of the memo key.
+    pub limits: lightr_core::ResourceLimits,
 }
 
 // ── Engine trait ──────────────────────────────────────────────────────────────
@@ -325,13 +330,12 @@ impl Engine for NativeEngine {
             .command
             .split_first()
             .ok_or_else(|| LightrError::InvalidRef("empty command".to_string()))?;
-        let status = std::process::Command::new(prog)
-            .args(args)
-            .current_dir(spec.cwd)
-            // inherit all env from parent
-            // inherit stdio (stdout/stderr passed through)
-            .status()
-            .map_err(LightrError::Io)?;
+        let mut cmd = std::process::Command::new(prog);
+        cmd.args(args).current_dir(spec.cwd);
+        // inherit all env from parent; inherit stdio (stdout/stderr passed through)
+        // F-203: apply resource caps. A0 stub is Ok(()); WP-A1 fills it.
+        crate::limits::apply_native(&mut cmd, &spec.limits)?;
+        let status = cmd.status().map_err(LightrError::Io)?;
         Ok(exit_code(status))
     }
 }
@@ -372,6 +376,7 @@ mod ns_impl {
             let rootfs_path = rootfs.to_owned();
             let cwd_str = spec.cwd.to_string_lossy().into_owned();
             let command: Vec<String> = spec.command.to_vec();
+            let limits = spec.limits;
 
             // Fork so the child becomes PID 1 in the new PID namespace.
             // Safety: standard fork+exec pattern; we exec immediately in child.
@@ -380,7 +385,7 @@ mod ns_impl {
                 -1 => Err(LightrError::Io(std::io::Error::last_os_error())),
                 0 => {
                     // ── child ──────────────────────────────────────────────
-                    let rc = run_in_namespaces(&rootfs_path, &cwd_str, &command);
+                    let rc = run_in_namespaces(&rootfs_path, &cwd_str, &command, &limits);
                     std::process::exit(rc);
                 }
                 child_pid => {
@@ -406,7 +411,12 @@ mod ns_impl {
         }
     }
 
-    fn run_in_namespaces(rootfs: &std::path::Path, cwd: &str, command: &[String]) -> i32 {
+    fn run_in_namespaces(
+        rootfs: &std::path::Path,
+        cwd: &str,
+        command: &[String],
+        limits: &lightr_core::ResourceLimits,
+    ) -> i32 {
         // unshare user+mount+pid namespaces
         let flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
         if unsafe { libc::unshare(flags) } != 0 {
@@ -519,6 +529,13 @@ mod ns_impl {
         };
         unsafe {
             libc::chdir(cwd_c.as_ptr());
+        }
+
+        // F-203: apply cgroup v2 caps before exec. A0 stub is Ok(()); WP-A1 fills
+        // it (honest Unsupported if cgroup v2 is unavailable / not delegated).
+        if let Err(e) = crate::limits::apply_cgroup(limits) {
+            eprintln!("lightr-engine ns: apply_cgroup failed: {e}");
+            return 1;
         }
 
         // exec command
@@ -689,6 +706,12 @@ mod vz_impl {
             argv_ptrs.push(std::ptr::null());
 
             // ── 2. Boot the VM and block until it stops (or fails) ──────────
+            // F-203 SEAM (build-spec-parity.md §A0.4): WP-A1 extends the
+            // `lightr_vz_run` FFI with `memory_mb`/`cpu_count` derived from
+            // `spec.limits` (cpus→ceil(millis/1000) vcpus min 1; memory→bytes
+            // min the VZ floor, else honest error) and sets them on the
+            // VZVirtualMachineConfiguration. A0 only threads the value here.
+            let _vz_limits = spec.limits;
             let vm_status = unsafe {
                 lightr_vz_run(
                     kernel_c.as_ptr(),
@@ -1044,6 +1067,7 @@ mod tests {
             cwd: &cwd,
             command: &command,
             rootfs: None,
+            limits: Default::default(),
         };
         let code = engine.run(&spec).expect("echo should not fail");
         assert_eq!(code, 0, "echo exits 0");
@@ -1063,6 +1087,7 @@ mod tests {
             cwd: &cwd,
             command: &command,
             rootfs: None,
+            limits: Default::default(),
         };
         let code = engine.run(&spec).expect("sh should not fail to launch");
         assert_eq!(code, 5, "exit code must be 5, got {code}");
@@ -1079,6 +1104,7 @@ mod tests {
             cwd: &cwd,
             command: &command,
             rootfs: Some(&rootfs),
+            limits: Default::default(),
         };
         let err = engine.run(&spec).unwrap_err();
         let msg = err.to_string();

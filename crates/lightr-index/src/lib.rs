@@ -1032,7 +1032,10 @@ mod tests {
         // Empty subdir must exist and be a directory.
         let emptydir = dp.join("emptydir");
         assert!(emptydir.exists(), "emptydir must exist after hydrate");
-        assert!(emptydir.is_dir(), "emptydir must be a directory after hydrate");
+        assert!(
+            emptydir.is_dir(),
+            "emptydir must be a directory after hydrate"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1060,8 +1063,16 @@ mod tests {
         let sr = status(rp, &store, "@t/status").unwrap();
         assert!(sr.clean, "status must be clean right after snapshot");
         assert!(sr.added.is_empty(), "added must be empty: {:?}", sr.added);
-        assert!(sr.removed.is_empty(), "removed must be empty: {:?}", sr.removed);
-        assert!(sr.changed.is_empty(), "changed must be empty: {:?}", sr.changed);
+        assert!(
+            sr.removed.is_empty(),
+            "removed must be empty: {:?}",
+            sr.removed
+        );
+        assert!(
+            sr.changed.is_empty(),
+            "changed must be empty: {:?}",
+            sr.changed
+        );
 
         // Mutate the working tree: add, remove, modify.
         fs::write(rp.join("new.txt"), b"brand-new").unwrap();

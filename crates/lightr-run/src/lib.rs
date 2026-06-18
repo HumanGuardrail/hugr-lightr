@@ -7,6 +7,11 @@ use lightr_store::Store;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+// Per-feature seam modules (build-spec-parity.md §1). A0 wires the call sites
+// to honest stubs in these files; A1/A3 fill the bodies.
+pub mod limits;
+pub mod secrets;
+
 pub struct RunSpec {
     pub cwd: PathBuf,
     pub inputs: Vec<PathBuf>,
@@ -15,11 +20,22 @@ pub struct RunSpec {
     // R1: mounts hydrated CoW into <cwd>/<target> pre-key/pre-exec
     // (build-spec-r1 §2); part of the memo key in order.
     pub mounts: Vec<Mount>,
+    // F-309 (build-spec-parity.md §0/§A0.2): store-backed inputs. IN the memo
+    // key (a different secret/config ⇒ a different run). Hydrated on miss to
+    // <cwd>/.lightr/secrets/<name> (0600) / <cwd>/.lightr/configs/<name> (0644).
+    pub secrets: Vec<StoreFile>,
+    pub configs: Vec<StoreFile>,
 }
 
 pub struct Mount {
     pub ref_name: String,
     pub target: String,
+}
+
+/// A store-backed file injected into a run. `ref_name` resolves via lightr_index.
+pub struct StoreFile {
+    pub name: String,
+    pub ref_name: String,
 }
 
 pub struct RunOutcome {
@@ -190,6 +206,11 @@ fn assemble_key(spec: &RunSpec, store: &Store, hydrate_mounts: bool) -> Result<D
         hasher.update(&rec.root.0);
     }
 
+    // F-309: secrets then configs contribute to the key (build-spec-parity.md §0).
+    // A0 stub is a no-op so existing keys are unchanged; WP-A3 fills it.
+    crate::secrets::contribute_to_key(&mut hasher, &spec.secrets, b"secret\0");
+    crate::secrets::contribute_to_key(&mut hasher, &spec.configs, b"config\0");
+
     Ok(Digest(*hasher.finalize().as_bytes()))
 }
 
@@ -246,10 +267,28 @@ fn build_key(spec: &RunSpec) -> Result<Digest> {
     hasher.update(triple.as_bytes());
 
     // No mount contribution (mounts empty in all existing callers)
+
+    // F-309: secrets then configs contribute to the key (build-spec-parity.md §0).
+    // A0 stub is a no-op so existing keys are unchanged; WP-A3 fills it.
+    crate::secrets::contribute_to_key(&mut hasher, &spec.secrets, b"secret\0");
+    crate::secrets::contribute_to_key(&mut hasher, &spec.configs, b"config\0");
+
     Ok(Digest(*hasher.finalize().as_bytes()))
 }
 
 pub fn run_memoized(spec: &RunSpec, store: &Store) -> Result<RunOutcome> {
+    run_memoized_with(spec, store, &lightr_core::ResourceLimits::default())
+}
+
+/// Run with explicit resource caps. `limits` are a **separate** exec parameter,
+/// NOT part of the memo key (build-spec-parity.md §0): resource caps don't
+/// change deterministic output, so an OOM-kill is an environmental failure, not
+/// a cached result. The 16 callers of `run_memoized` keep unlimited defaults.
+pub fn run_memoized_with(
+    spec: &RunSpec,
+    store: &Store,
+    limits: &lightr_core::ResourceLimits,
+) -> Result<RunOutcome> {
     // For specs with no mounts, use fast path (no store needed for key)
     let key = if spec.mounts.is_empty() {
         build_key(spec)?
@@ -290,6 +329,9 @@ pub fn run_memoized(spec: &RunSpec, store: &Store) -> Result<RunOutcome> {
         }
     }
 
+    // F-309: hydrate secrets/configs (only on miss). A0 stub is Ok(()); WP-A3 fills it.
+    crate::secrets::hydrate(&spec.cwd, store, &spec.secrets, &spec.configs)?;
+
     if spec.command.is_empty() {
         return Err(LightrError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -297,11 +339,11 @@ pub fn run_memoized(spec: &RunSpec, store: &Store) -> Result<RunOutcome> {
         )));
     }
 
-    let output = std::process::Command::new(&spec.command[0])
-        .args(&spec.command[1..])
-        .current_dir(&spec.cwd)
-        .output()
-        .map_err(LightrError::Io)?;
+    let mut cmd = std::process::Command::new(&spec.command[0]);
+    cmd.args(&spec.command[1..]).current_dir(&spec.cwd);
+    // F-203: apply resource caps to the spawn. A0 stub is Ok(()); WP-A1 fills it.
+    crate::limits::apply_native(&mut cmd, limits)?;
+    let output = cmd.output().map_err(LightrError::Io)?;
 
     let exit_code = {
         #[cfg(unix)]
@@ -1427,6 +1469,8 @@ mod tests {
             command: command.into_iter().map(|s| s.to_string()).collect(),
             env_keys: vec![],
             mounts: vec![],
+            secrets: vec![],
+            configs: vec![],
         }
     }
 
@@ -1505,6 +1549,8 @@ mod tests {
             command: vec!["/bin/echo".to_string(), "x".to_string()],
             env_keys: vec!["LIGHTR_TEST_VAR_KCW".to_string()],
             mounts: vec![],
+            secrets: vec![],
+            configs: vec![],
         };
         let k1 = build_key(&spec1).expect("k1");
 
@@ -1547,6 +1593,8 @@ mod tests {
             command: cmd,
             env_keys: vec![],
             mounts: vec![],
+            secrets: vec![],
+            configs: vec![],
         };
 
         // First run: miss
@@ -1598,6 +1646,8 @@ mod tests {
             command: cmd,
             env_keys: vec![],
             mounts: vec![],
+            secrets: vec![],
+            configs: vec![],
         };
 
         let out1 = run_memoized(&spec, &store).expect("run1");
@@ -1655,6 +1705,8 @@ mod tests {
             command: cmd,
             env_keys: vec![],
             mounts: vec![],
+            secrets: vec![],
+            configs: vec![],
         };
 
         // First run: miss (output too large)
@@ -1709,6 +1761,8 @@ mod tests {
             command: cmd,
             env_keys: vec![],
             mounts: vec![],
+            secrets: vec![],
+            configs: vec![],
         };
 
         // First run: miss, gets memoized
@@ -1891,6 +1945,8 @@ mod tests {
             command: vec!["sleep".to_string(), "30".to_string()],
             env_keys: vec![],
             mounts: vec![],
+            secrets: vec![],
+            configs: vec![],
         };
 
         let handle = spawn_detached(&spec, &store).expect("spawn_detached");
@@ -1989,6 +2045,8 @@ mod tests {
                 ref_name: "testmount".to_string(),
                 target: "mounted".to_string(),
             }],
+            secrets: vec![],
+            configs: vec![],
         };
 
         let out1 = run_memoized(&spec, &store).expect("run1 with mount");
@@ -2047,6 +2105,8 @@ mod tests {
             command: vec!["/bin/echo".to_string(), "predict-test".to_string()],
             env_keys: vec![],
             mounts: vec![],
+            secrets: vec![],
+            configs: vec![],
         };
 
         // predict before run: should be miss
@@ -2092,6 +2152,8 @@ mod tests {
             ],
             env_keys: vec![],
             mounts: vec![],
+            secrets: vec![],
+            configs: vec![],
         };
         let cfg = DeepMemoConfig { enabled: false };
 
@@ -2164,6 +2226,8 @@ mod tests {
             ],
             env_keys: vec![],
             mounts: vec![],
+            secrets: vec![],
+            configs: vec![],
         };
         let cfg_on = DeepMemoConfig { enabled: true };
 

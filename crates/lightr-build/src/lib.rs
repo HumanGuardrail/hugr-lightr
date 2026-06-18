@@ -510,6 +510,7 @@ pub fn build(
                     cwd: &cwd,
                     command: argv,
                     rootfs: None, // native — no isolation
+                    limits: Default::default(),
                 };
                 // Propagate accumulated ENV to the subprocess
                 let mut cmd_builder = std::process::Command::new(&argv[0]);
@@ -1197,6 +1198,8 @@ fn start_service_detached(stack_dir: &Path, svc: &ServiceSpec) -> Result<()> {
         command: svc.command.clone(),
         env_keys: svc.env.iter().map(|(k, _)| k.clone()).collect(),
         mounts: Vec::new() as Vec<Mount>,
+        secrets: Vec::new(),
+        configs: Vec::new(),
     };
 
     // Set env vars before spawning

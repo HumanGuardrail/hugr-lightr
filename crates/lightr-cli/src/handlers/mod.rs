@@ -1,5 +1,6 @@
 //! Verb handler modules.
 pub mod bench;
+pub mod bench_compare;
 pub mod bisect;
 pub mod build;
 pub mod compose;
@@ -19,4 +20,5 @@ pub mod schema;
 pub mod snapshot;
 pub mod status;
 pub mod stop;
+pub mod supervise;
 pub mod undo;

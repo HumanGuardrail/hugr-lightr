@@ -346,6 +346,8 @@ fn handle_tools_call(id: Value, params: &Value) -> Value {
                 .into_iter()
                 .filter(|_| false)
                 .collect(),
+                secrets: vec![],
+                configs: vec![],
             };
             match run_memoized(&spec, &store) {
                 Ok(outcome) => {

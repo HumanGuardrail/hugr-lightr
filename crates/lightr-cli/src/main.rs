@@ -200,6 +200,33 @@ pub enum OciCmd {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// SuperviseCmd sub-enum (F-308 — OS-supervisor unit generation)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum SuperviseCmd {
+    /// Generate + write an OS-supervisor unit for a restart policy
+    Install {
+        #[arg(long)]
+        name: String,
+        /// Restart policy: no | always | on-failure[:N] | unless-stopped
+        #[arg(long, default_value = "always")]
+        restart: String,
+        #[arg(long, default_value = ".")]
+        dir: String,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Remove a previously installed unit
+    Uninstall {
+        #[arg(long)]
+        name: String,
+    },
+    /// List installed units
+    List,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Shell enum (for `lightr completions <shell>`)
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -262,6 +289,27 @@ enum Cmd {
         /// Process-tree memoization (opt-in; honest fallback to whole-run memo)
         #[arg(long)]
         deep_memo: bool,
+        /// Memory cap (Docker-style: 512m, 1g, 2048k, or bare bytes) — F-203
+        #[arg(long, value_name = "SIZE")]
+        memory: Option<String>,
+        /// CPU cap as a core count (0.5, 1, 1.5) — F-203
+        #[arg(long, value_name = "N")]
+        cpus: Option<String>,
+        /// Inject a store-backed secret file (repeatable): NAME=REF — F-309
+        #[arg(long, value_name = "NAME=REF")]
+        secret: Vec<String>,
+        /// Inject a store-backed config file (repeatable): NAME=REF — F-309
+        #[arg(long, value_name = "NAME=REF")]
+        config: Vec<String>,
+        /// Healthcheck command (probed when detached) — F-309
+        #[arg(long, value_name = "CMD")]
+        health_cmd: Option<String>,
+        /// Healthcheck interval in seconds — F-309
+        #[arg(long, default_value_t = 30)]
+        health_interval: u64,
+        /// Healthcheck retries before Unhealthy — F-309
+        #[arg(long, default_value_t = 3)]
+        health_retries: u32,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
@@ -391,9 +439,27 @@ enum Cmd {
     },
     /// Print the roff man page to stdout
     Man,
+    /// Generate an OS-supervisor unit (launchd/systemd) for a restart policy — no daemon of ours.
+    Supervise {
+        #[command(subcommand)]
+        subcmd: SuperviseCmd,
+    },
+    /// Head-to-head benchmark vs Docker/OrbStack/Apple container on identical workloads.
+    BenchCompare {
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "docker,orbstack,container"
+        )]
+        vs: Vec<String>,
+        #[arg(long, default_value = "all")]
+        workload: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// [internal] Supervise a detached run (hidden)
     #[command(name = "__supervise", hide = true)]
-    Supervise { dir: String },
+    SuperviseDetached { dir: String },
     /// [internal] Supervise a compose stack (hidden)
     #[command(name = "__compose-supervise", hide = true)]
     ComposeSupervisor { stack_dir: String },
@@ -440,7 +506,13 @@ fn main() {
         Cmd::Docker { .. } => "docker",
         Cmd::Completions { .. } => "completions",
         Cmd::Man => "man",
-        Cmd::Supervise { .. } => "__supervise",
+        Cmd::Supervise { subcmd } => match subcmd {
+            SuperviseCmd::Install { .. } => "supervise-install",
+            SuperviseCmd::Uninstall { .. } => "supervise-uninstall",
+            SuperviseCmd::List => "supervise-list",
+        },
+        Cmd::BenchCompare { .. } => "bench-compare",
+        Cmd::SuperviseDetached { .. } => "__supervise",
         Cmd::ComposeSupervisor { .. } => "__compose-supervise",
     };
 
@@ -470,6 +542,13 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
             engine,
             rootfs,
             deep_memo,
+            memory,
+            cpus,
+            secret,
+            config,
+            health_cmd,
+            health_interval,
+            health_retries,
             command,
         } => handlers::run::run(
             &dir,
@@ -483,6 +562,13 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
             &engine,
             rootfs.as_deref(),
             deep_memo,
+            memory.as_deref(),
+            cpus.as_deref(),
+            &secret,
+            &config,
+            health_cmd.as_deref(),
+            health_interval,
+            health_retries,
         ),
         Cmd::Engine { subcmd } => match subcmd {
             EngineCmd::Ls => handlers::engine::ls(json),
@@ -538,7 +624,20 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
         Cmd::Docker { args } => handlers::docker::run(&args, json, explain),
         Cmd::Completions { shell } => generate_completions(shell),
         Cmd::Man => generate_man(),
-        Cmd::Supervise { dir } => match lightr_run::supervise(std::path::Path::new(&dir)) {
+        Cmd::Supervise { subcmd } => match subcmd {
+            SuperviseCmd::Install {
+                name,
+                restart,
+                dir,
+                command,
+            } => handlers::supervise::install(&name, &restart, &dir, &command),
+            SuperviseCmd::Uninstall { name } => handlers::supervise::uninstall(&name),
+            SuperviseCmd::List => handlers::supervise::list(),
+        },
+        Cmd::BenchCompare { vs, workload, json } => {
+            handlers::bench_compare::run(&vs, &workload, json)
+        }
+        Cmd::SuperviseDetached { dir } => match lightr_run::supervise(std::path::Path::new(&dir)) {
             Ok(exit_code) => exit_code,
             Err(e) => {
                 eprintln!("lightr: supervise error: {e}");
@@ -1289,6 +1388,13 @@ mod tests {
             "bogus",
             None,
             false,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            30,
+            3,
         );
         assert_eq!(code, 2, "bad engine string must exit 2");
     }

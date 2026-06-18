@@ -26,10 +26,12 @@
 
 use std::io::Write;
 
-use lightr_core::validate_ref_name;
+use lightr_core::{validate_ref_name, ResourceLimits};
 use lightr_engine::{engine_for, EngineKind, ExecSpec};
 use lightr_index;
-use lightr_run::{run_memoized, run_memoized_deep, spawn_detached, DeepMemoConfig, Mount, RunSpec};
+use lightr_run::{
+    run_memoized_deep, run_memoized_with, spawn_detached, DeepMemoConfig, Mount, RunSpec, StoreFile,
+};
 use lightr_store::Store;
 use serde::Serialize;
 
@@ -71,6 +73,25 @@ fn parse_mount(raw: &str) -> Result<Mount, i32> {
     })
 }
 
+/// Parse a raw "NAME=REF" secret/config string into a `StoreFile`.
+/// Returns Err(exit_code) on a missing '=' (already printed to stderr).
+fn parse_store_file(raw: &str, kind: &str) -> Result<StoreFile, i32> {
+    let eq = raw.find('=').ok_or_else(|| {
+        eprintln!("lightr: invalid --{kind} value (missing '='): {raw}");
+        2i32
+    })?;
+    let name = &raw[..eq];
+    let ref_name = &raw[eq + 1..];
+    if name.is_empty() || ref_name.is_empty() {
+        eprintln!("lightr: invalid --{kind} value (expected NAME=REF): {raw}");
+        return Err(2);
+    }
+    Ok(StoreFile {
+        name: name.to_string(),
+        ref_name: ref_name.to_string(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     dir: &str,
@@ -84,12 +105,43 @@ pub fn run(
     engine_str: &str,
     rootfs_ref: Option<&str>,
     deep_memo: bool,
+    memory: Option<&str>,
+    cpus: Option<&str>,
+    secrets_raw: &[String],
+    configs_raw: &[String],
+    // Healthcheck flags are parsed at the CLI surface (A0.5) but the probe is
+    // wired by WP-A3; accepted here as an honest no-op so the surface is frozen.
+    _health_cmd: Option<&str>,
+    _health_interval: u64,
+    _health_retries: u32,
 ) -> i32 {
     // Parse engine kind — bad value ⇒ exit 2
     let engine_kind = match engine_str.parse::<EngineKind>() {
         Ok(k) => k,
         Err(e) => return die_lightr(&e),
     };
+
+    // Parse resource caps (F-203). Malformed ⇒ exit 2 (fail closed).
+    let limits = match ResourceLimits::parse(memory, cpus) {
+        Ok(l) => l,
+        Err(e) => return die_lightr(&e),
+    };
+
+    // Parse secrets/configs (F-309) — split NAME=REF.
+    let mut secrets: Vec<StoreFile> = Vec::new();
+    for raw in secrets_raw {
+        match parse_store_file(raw, "secret") {
+            Ok(sf) => secrets.push(sf),
+            Err(code) => return code,
+        }
+    }
+    let mut configs: Vec<StoreFile> = Vec::new();
+    for raw in configs_raw {
+        match parse_store_file(raw, "config") {
+            Ok(sf) => configs.push(sf),
+            Err(code) => return code,
+        }
+    }
 
     // Decide path: native + no rootfs ⇒ memoized path (unchanged R0/R1 behaviour).
     // Any other combination ⇒ engine path (NOT memoized, per §4).
@@ -144,6 +196,7 @@ pub fn run(
             cwd: &cwd,
             command,
             rootfs: rootfs_path.as_deref(),
+            limits,
         };
 
         let code = match engine.run(&spec) {
@@ -171,6 +224,8 @@ pub fn run(
         command: command.to_vec(),
         env_keys: env_keys.to_vec(),
         mounts,
+        secrets,
+        configs,
     };
 
     // Detach path: spawn detached and print the run id
@@ -207,7 +262,7 @@ pub fn run(
             Err(e) => return die_lightr(&e),
         }
     } else {
-        match run_memoized(&spec, &store) {
+        match run_memoized_with(&spec, &store, &limits) {
             Ok(o) => o,
             Err(e) => return die_lightr(&e),
         }
