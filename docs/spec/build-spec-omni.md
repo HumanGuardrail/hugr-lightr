@@ -59,6 +59,7 @@ Rosetta-in-VM (arm64), VZ save/restore (arm64), views runtime (S1/S3).
 | WP-ENGINE-PLAT | `crates/lightr-engine/**` | opus | host test -p + win cross-check -p + linux/ns notes |
 | WP-VIEWS-PLAT | `crates/lightr-views/**` | sonnet | host test -p + win cross-check -p |
 | WP-ARM-RUNBOOK | `spikes/s5-vz-boot-arm64/**` (new) | sonnet | shellcheck + bash -n |
+| WP-WSLRUNBOOK | `spikes/wsl-run/**` (new) | sonnet | bash -n (owner/HW-gated: requires Windows+WSL2) |
 
 ## Per-WP frozen contracts (código-âncora = symbols)
 
@@ -126,6 +127,15 @@ Rosetta-in-VM (arm64), VZ save/restore (arm64), views runtime (S1/S3).
   Mac) + `run-s5-arm64.sh` (build `--features vz`, codesign w/ entitlement, build
   pack arm64, install-pack, `lightr run --engine vz alpine`, assert exit 0
   `s5-boot-ok` + exit 7, never 255). shellcheck + `bash -n` clean.
+
+### WP-WSLRUNBOOK — `spikes/wsl-run/` (new dir, fully disjoint)
+- Windows WSL2 engine press-go runbook. Owner/hardware-gated: requires Windows
+  10/11 + WSL2 + a registered distro. `run-wsl.sh` (locate `lightr.exe`,
+  `engine ls` must show `wsl available`, import Alpine, assert A1: `lightr run
+  --engine wsl --rootfs alpine -- /bin/echo wsl-ok` → exit 0 + stdout `wsl-ok`
+  + not 255; assert A2: `lightr run --engine wsl --rootfs alpine -- /bin/sh -c
+  'exit 7'` → exit 7; print_summary). `bash -n` clean. WSL runbook now lives at
+  `spikes/wsl-run/run-wsl.sh`.
 
 ## Lead-owned (NOT delegated)
 
