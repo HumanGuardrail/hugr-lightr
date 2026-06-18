@@ -24,6 +24,11 @@ lightr-oci = { workspace = true }
 lightr-engine = { workspace = true }
 lightr-build = { workspace = true }
 clap = { workspace = true }
+# Exact-pinned to versions compatible with the workspace clap 4.x (Cargo.lock:
+# clap 4.6.1). clap_complete 4.6.5 needs clap ^4.5.20; clap_mangen 0.3.0 needs
+# clap ^4.0.0 — both satisfied. Public-release CLI polish (completions + man).
+clap_complete = "=4.6.5"
+clap_mangen = "=0.3.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tar = { workspace = true }
