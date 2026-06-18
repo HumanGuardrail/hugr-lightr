@@ -20,12 +20,28 @@
 //! side's methodology (`median_of`). The exact command each probe runs is
 //! documented on the function and surfaced in the methodology doc.
 //!
-//! WP-D1 fills these bodies. Until then each returns an honest SKIP so the seam
-//! compiles and the table renders truthfully (docker cells SKIP, not fabricated).
+//! ## Timeout discipline (no `wait_timeout`, no new dependency)
+//! There is no `wait_timeout` in std and we add no crate for it. [`run_op`] spawns
+//! the child with stdout/stderr nulled, then polls [`std::process::Child::try_wait`]
+//! in a short sleep loop until a wall-clock deadline; on the deadline it kills and
+//! reaps the child and reports failure. Every spawned op — setup or timed — goes
+//! through `run_op`, bounded by [`OP_TIMEOUT`] (or [`SETUP_TIMEOUT`] for the heavy
+//! 1 GB materialize setup). The timed value is the wall-clock `Instant` around
+//! spawn→completion.
+//!
+//! ## Fallible sampling
+//! `bench_compare::median_of` takes an INFALLIBLE `FnMut() -> Duration`, so it
+//! cannot express a docker op that failed. The timed ops here use [`sample_median`]
+//! instead: one warmup (failure → SKIP), then `SAMPLES` timed runs (ANY failure →
+//! SKIP), then the median of the sorted samples. Warmup + median-of-N mirrors the
+//! Lightr side.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
-use super::bench_compare::MaterializeSize;
+use super::bench_compare::{dur_ms, MaterializeSize, SAMPLES};
 
 /// One competitor measurement. `Skip` carries a STATIC reason so it maps directly
 /// onto `bench_compare::Cell::Skip(&'static str)` with no allocation.
@@ -36,10 +52,330 @@ pub(crate) enum Outcome {
     Skip(&'static str),
 }
 
-/// The reason emitted by every stub until WP-D1 lands. Distinct from the
-/// tense-law guard skip so the table reader can tell "not implemented yet" from
-/// "spawn disabled in this context".
-const STUB: &str = "docker head-to-head not yet implemented (WP-D1)";
+/// Hard wall-clock ceiling on any single spawned docker op (run / build-warm /
+/// cp / inspect / pull / create / rm). On the deadline the child is killed and the
+/// op is treated as a failure (→ honest SKIP), never a fabricated number.
+pub(crate) const OP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Hard wall-clock ceiling on the heavy materialize SETUP (build the 1 GB tree,
+/// build the layer-carrying image, `docker create`). Exceeding it → honest SKIP.
+pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Per-process counter for unique resource names (NOT timestamps — a clock can
+/// repeat under load; a monotonic counter cannot collide within this process, and
+/// `std::process::id()` separates concurrent processes).
+static NAME_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// A unique, docker-legal resource name for `kind` (e.g. an image tag or a build
+/// context dir-name), namespaced by this process id and a monotonic counter.
+fn unique_name(kind: &str) -> String {
+    let n = NAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("lightr-bench-{kind}-{}-{n}", std::process::id())
+}
+
+/// Spawn `cmd` with stdout/stderr nulled, then poll `try_wait` until it exits or
+/// `timeout` elapses. Returns the wall-clock duration spawn→exit on a clean
+/// success (exit status 0). On a spawn error, a non-zero exit, or a timeout (child
+/// killed + reaped) returns `Err(())` — the caller maps that to an honest SKIP.
+///
+/// This is the ONLY way ops are run here, so every spawned op is bounded.
+fn run_op(cmd: &mut Command, timeout: Duration) -> Result<Duration, ()> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let start = Instant::now();
+    let mut child = cmd.spawn().map_err(|_| ())?;
+    let poll = Duration::from_millis(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let elapsed = start.elapsed();
+                return if status.success() {
+                    Ok(elapsed)
+                } else {
+                    Err(())
+                };
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    // Deadline blown: kill + reap so we never leak a child, and
+                    // report failure — a timed-out op is a SKIP, never a number.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(());
+                }
+                std::thread::sleep(poll);
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(());
+            }
+        }
+    }
+}
+
+/// Build a `docker` `Command` for `args` against the resolved binary path.
+fn docker(docker_bin: &Path, args: &[&str]) -> Command {
+    let mut c = Command::new(docker_bin);
+    c.args(args);
+    c
+}
+
+/// Run a single setup op bounded by `OP_TIMEOUT`; returns `true` on clean success.
+/// Setup is UNTIMED for the result, but still bounded (tense law).
+fn setup_ok(docker_bin: &Path, args: &[&str]) -> bool {
+    run_op(&mut docker(docker_bin, args), OP_TIMEOUT).is_ok()
+}
+
+/// The fallible, identical-methodology timed sampler. `op` performs ONE timed
+/// docker op and returns its duration (or `Err` on spawn/exit/timeout failure).
+///
+/// - one warmup run; if it fails → `Err(skip_reason)`,
+/// - then `SAMPLES` timed runs; if ANY fails → `Err(skip_reason)`,
+/// - else sort the durations and take the median (index `n / 2`).
+///
+/// Mirrors `bench_compare::median_of` (warmup + median-of-N) but is FALLIBLE, so a
+/// failed docker op becomes an honest SKIP rather than a fabricated 0.
+fn sample_median<F>(skip_reason: &'static str, mut op: F) -> Result<Duration, &'static str>
+where
+    F: FnMut() -> Result<Duration, ()>,
+{
+    // Warmup (untimed) — its failure means we cannot honestly measure at all.
+    op().map_err(|_| skip_reason)?;
+    let mut samples: Vec<Duration> = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        samples.push(op().map_err(|_| skip_reason)?);
+    }
+    samples.sort();
+    Ok(samples[SAMPLES / 2])
+}
+
+/// Convert a `sample_median` result into an `Outcome` (ms on success, SKIP on the
+/// static reason).
+fn median_outcome(r: Result<Duration, &'static str>) -> Outcome {
+    match r {
+        Ok(d) => Outcome::Measured(dur_ms(d)),
+        Err(reason) => Outcome::Skip(reason),
+    }
+}
+
+/// The tiny image every run/re-run probe uses.
+const TINY_IMAGE: &str = "alpine:latest";
+
+/// Ensure `TINY_IMAGE` is present (UNTIMED setup): inspect it; if absent, pull it;
+/// if the pull fails AND it is still absent → `Err` (→ honest SKIP). Both the
+/// inspect and the pull are bounded by `OP_TIMEOUT`.
+fn ensure_tiny_image(docker_bin: &Path) -> Result<(), &'static str> {
+    if setup_ok(docker_bin, &["image", "inspect", TINY_IMAGE]) {
+        return Ok(());
+    }
+    // Absent (or inspect failed): try the idiomatic pull, then re-check presence.
+    let _ = setup_ok(docker_bin, &["pull", TINY_IMAGE]);
+    if setup_ok(docker_bin, &["image", "inspect", TINY_IMAGE]) {
+        Ok(())
+    } else {
+        Err("tiny image unavailable (docker pull failed)")
+    }
+}
+
+/// Indicator #8 — cold-run: run a trivial container once. Docker's idiomatic
+/// path is `docker run --rm <tiny-image> true` (image ensured-present in setup).
+/// Returns the timed run median in ms.
+pub(crate) fn cold_run_ms(docker_bin: &Path, _scratch: &Path) -> Outcome {
+    // SETUP (untimed): ensure the tiny image is present.
+    if let Err(reason) = ensure_tiny_image(docker_bin) {
+        return Outcome::Skip(reason);
+    }
+    // TIMED: the cost to run a trivial container once.
+    median_outcome(sample_median(
+        "docker op failed/timed out during sampling",
+        || {
+            run_op(
+                &mut docker(docker_bin, &["run", "--rm", TINY_IMAGE, "true"]),
+                OP_TIMEOUT,
+            )
+        },
+    ))
+}
+
+/// Indicator #4 — re-run: run the SAME trivial job again. Docker has no memo, so
+/// the idiomatic path is the SAME `docker run` repeated — it re-does the work
+/// every time. Returns the steady-state run median in ms.
+pub(crate) fn re_run_ms(docker_bin: &Path, _scratch: &Path) -> Outcome {
+    // SETUP (untimed): same as cold_run — ensure the tiny image is present.
+    if let Err(reason) = ensure_tiny_image(docker_bin) {
+        return Outcome::Skip(reason);
+    }
+    // TIMED: the SAME `docker run` repeated — no memo, full work every time.
+    median_outcome(sample_median(
+        "docker op failed/timed out during sampling",
+        || {
+            run_op(
+                &mut docker(docker_bin, &["run", "--rm", TINY_IMAGE, "true"]),
+                OP_TIMEOUT,
+            )
+        },
+    ))
+}
+
+/// Indicator #4/#8 — build the same 3-step Dockerfile a SECOND time (warm layer
+/// cache). Docker's idiomatic path is `docker build` over an identical context
+/// (built via the shared `make_bench_dockerfile`). Returns the cached-build
+/// median in ms.
+pub(crate) fn build_ms(docker_bin: &Path, scratch: &Path) -> Outcome {
+    // SETUP (untimed): create the SAME 3-step build context the Lightr side uses.
+    let ctx = scratch.join(unique_name("build-ctx"));
+    if std::fs::create_dir_all(&ctx).is_err() {
+        return Outcome::Skip("docker build context setup failed");
+    }
+    if super::bench_compare::make_bench_dockerfile(&ctx).is_err() {
+        return Outcome::Skip("docker build context setup failed");
+    }
+    let tag = unique_name("build");
+    let ctx_str = ctx.to_string_lossy().to_string();
+
+    // SETUP (untimed): one COLD build to warm the layer cache.
+    if !setup_ok(docker_bin, &["build", "-t", &tag, &ctx_str]) {
+        return Outcome::Skip("docker cold build (cache warm) failed");
+    }
+
+    // TIMED: the 2nd build (warm cache hit) — the fair cache-vs-memo race.
+    let out = median_outcome(sample_median(
+        "docker op failed/timed out during sampling",
+        || {
+            run_op(
+                &mut docker(docker_bin, &["build", "-t", &tag, &ctx_str]),
+                OP_TIMEOUT,
+            )
+        },
+    ));
+
+    // Clean up the image (best-effort — cleanup failures never affect the result).
+    let _ = setup_ok(docker_bin, &["rmi", "-f", &tag]);
+    out
+}
+
+/// Indicator #3 — materialize a 1 GB tree into a usable host directory. Lightr
+/// uses `clonefile` CoW from CAS; Docker's idiomatic host-side path is
+/// `docker cp <container>:/data <dest>` from a container carrying the SAME bytes
+/// (built via the shared `build_materialize_fixture`). Returns the timed median
+/// in ms. SETUP (untimed): build/load the 1 GB-layer image + `docker create`.
+pub(crate) fn materialize_ms(docker_bin: &Path, scratch: &Path, size: MaterializeSize) -> Outcome {
+    // SETUP (untimed, bounded by SETUP_TIMEOUT overall): build the SAME 1 GB tree.
+    let setup_start = Instant::now();
+    let ctx = scratch.join(unique_name("mat-ctx"));
+    let tree = ctx.join("tree");
+    if std::fs::create_dir_all(&tree).is_err() {
+        return Outcome::Skip("docker materialize setup failed");
+    }
+    if super::bench_compare::build_materialize_fixture(&tree, size).is_err() {
+        return Outcome::Skip("docker materialize fixture build failed");
+    }
+    if setup_start.elapsed() >= SETUP_TIMEOUT {
+        return Outcome::Skip("docker materialize setup exceeded timeout");
+    }
+
+    // Dockerfile carrying the tree as an image layer: FROM alpine; COPY tree /data.
+    if std::fs::write(ctx.join("Dockerfile"), b"FROM alpine\nCOPY tree /data\n").is_err() {
+        return Outcome::Skip("docker materialize setup failed");
+    }
+    let tag = unique_name("mat");
+    let ctx_str = ctx.to_string_lossy().to_string();
+
+    // Build the layer-carrying image (untimed). Each setup op is bounded by
+    // OP_TIMEOUT; the cumulative SETUP_TIMEOUT is re-checked between heavy steps.
+    if !setup_ok(docker_bin, &["build", "-t", &tag, &ctx_str]) {
+        let _ = setup_ok(docker_bin, &["rmi", "-f", &tag]);
+        return Outcome::Skip("docker materialize image build failed");
+    }
+    if setup_start.elapsed() >= SETUP_TIMEOUT {
+        let _ = setup_ok(docker_bin, &["rmi", "-f", &tag]);
+        return Outcome::Skip("docker materialize setup exceeded timeout");
+    }
+
+    // `docker create` a container from the image → capture its id (untimed). We
+    // need stdout here (the cid), so this one op does not go through run_op's
+    // null-stdout path; it is still bounded by OP_TIMEOUT via output_bounded.
+    let cid = match create_container(docker_bin, &tag) {
+        Some(cid) => cid,
+        None => {
+            let _ = setup_ok(docker_bin, &["rmi", "-f", &tag]);
+            return Outcome::Skip("docker create (materialize) failed");
+        }
+    };
+
+    // TIMED: extract the 1 GB tree to a FRESH host dir each sample —
+    // `docker cp <cid>:/data <dest>`, a full byte copy across the VM (mirrors
+    // Lightr's clonefile hydrate). Fresh dest per sample so no copy is a no-op.
+    let dest_base = ctx.join("dest");
+    let _ = std::fs::create_dir_all(&dest_base);
+    let mut counter = 0usize;
+    let src = format!("{cid}:/data");
+    let out = median_outcome(sample_median(
+        "docker op failed/timed out during sampling",
+        || {
+            counter += 1;
+            let dest = dest_base.join(format!("d{counter}"));
+            // Fresh dest each sample; cp creates the final component itself.
+            let dest_str = dest.to_string_lossy().to_string();
+            run_op(
+                &mut docker(docker_bin, &["cp", &src, &dest_str]),
+                OP_TIMEOUT,
+            )
+        },
+    ));
+
+    // Clean up container + image (best-effort).
+    let _ = setup_ok(docker_bin, &["rm", "-f", &cid]);
+    let _ = setup_ok(docker_bin, &["rmi", "-f", &tag]);
+    out
+}
+
+/// `docker create <tag>` bounded by `OP_TIMEOUT`, capturing the container id from
+/// stdout. Returns the trimmed cid on a clean success, `None` on any failure /
+/// timeout / empty id. Unlike `run_op` this captures stdout (the cid is the goal),
+/// but it polls `try_wait` against the SAME deadline so it is still bounded.
+fn create_container(docker_bin: &Path, tag: &str) -> Option<String> {
+    let mut child = docker(docker_bin, &["create", tag])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let start = Instant::now();
+    let poll = Duration::from_millis(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                break;
+            }
+            Ok(None) => {
+                if start.elapsed() >= OP_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(poll);
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let out = child.wait_with_output().ok()?;
+    let cid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if cid.is_empty() {
+        None
+    } else {
+        Some(cid)
+    }
+}
 
 /// Indicator #1 — install footprint. Lightr is its single static binary; Docker
 /// is the installed `Docker.app` bundle on disk. We sum the regular-file sizes
@@ -106,45 +442,15 @@ fn dir_size_bytes(root: &Path) -> Option<u64> {
     Some(total)
 }
 
-/// Indicator #8 — cold-run: run a trivial container once. Docker's idiomatic
-/// path is `docker run --rm <tiny-image> true` (image ensured-present in setup).
-/// Returns the timed run median in ms.
-pub(crate) fn cold_run_ms(_docker_bin: &Path, _scratch: &Path) -> Outcome {
-    Outcome::Skip(STUB)
-}
-
-/// Indicator #4 — re-run: run the SAME trivial job again. Docker has no memo, so
-/// the idiomatic path is the SAME `docker run` repeated — it re-does the work
-/// every time. Returns the steady-state run median in ms.
-pub(crate) fn re_run_ms(_docker_bin: &Path, _scratch: &Path) -> Outcome {
-    Outcome::Skip(STUB)
-}
-
-/// Indicator #4/#8 — build the same 3-step Dockerfile a SECOND time (warm layer
-/// cache). Docker's idiomatic path is `docker build` over an identical context
-/// (built via the shared `make_bench_dockerfile`). Returns the cached-build
-/// median in ms.
-pub(crate) fn build_ms(_docker_bin: &Path, _scratch: &Path) -> Outcome {
-    Outcome::Skip(STUB)
-}
-
-/// Indicator #3 — materialize a 1 GB tree into a usable host directory. Lightr
-/// uses `clonefile` CoW from CAS; Docker's idiomatic host-side path is
-/// `docker cp <container>:/data <dest>` from a container carrying the SAME bytes
-/// (built via the shared `build_materialize_fixture`). Returns the timed median
-/// in ms. SETUP (untimed): build/load the 1 GB-layer image + `docker create`.
-pub(crate) fn materialize_ms(
-    _docker_bin: &Path,
-    _scratch: &Path,
-    _size: MaterializeSize,
-) -> Outcome {
-    Outcome::Skip(STUB)
-}
-
 // ──────────────────────────────────────────────────────────────────────────────
 // Tests — portable, NO container spawn. (The spawn probes are exercised by the
 // operator at marketing time on a real box; their command construction is
 // reviewed, not unit-run, so `cargo test`/CI never launch a container.)
+//
+// What is unit-tested here is the PURE logic we factored out of the spawn probes:
+// the timeout/poll helper against non-docker child processes (`true`/`sleep`),
+// the fallible median sampler, and the unique-name generator. None of these spawn
+// docker.
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -195,5 +501,124 @@ mod tests {
                 .any(|p| p == Path::new("/Applications/Docker.app")),
             "a *.app ancestor of the binary must be a candidate"
         );
+    }
+
+    // ── Timeout/poll helper (drives `true`/`sleep`, NOT docker) ────────────────
+
+    #[test]
+    fn run_op_returns_a_duration_on_clean_success() {
+        // `true` exits 0 immediately → a real, non-negative duration, never an err.
+        let d = run_op(&mut Command::new("true"), OP_TIMEOUT).expect("true exits 0");
+        assert!(d >= Duration::ZERO);
+    }
+
+    #[test]
+    fn run_op_nonzero_exit_is_err_never_a_number() {
+        // `false` exits 1 → Err (would become an honest SKIP), NOT a fabricated 0.
+        assert!(
+            run_op(&mut Command::new("false"), OP_TIMEOUT).is_err(),
+            "a non-zero exit must be a failure, never a measured number"
+        );
+    }
+
+    #[test]
+    fn run_op_spawn_error_is_err() {
+        // A binary that cannot exist → spawn fails → Err (honest failure upstream).
+        assert!(
+            run_op(
+                &mut Command::new("definitely-not-a-real-binary-xyz-9999"),
+                OP_TIMEOUT
+            )
+            .is_err(),
+            "a spawn error must be a failure, never a measured number"
+        );
+    }
+
+    #[test]
+    fn run_op_kills_on_timeout_and_reports_failure() {
+        // `sleep 30` against a tiny timeout must be killed and reported as failure
+        // well before the 30s — proving the deadline bounds every spawned op.
+        let start = Instant::now();
+        let r = run_op(Command::new("sleep").arg("30"), Duration::from_millis(150));
+        assert!(
+            r.is_err(),
+            "a timed-out op must be a failure, never a number"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the op must be killed near the deadline, not run to completion"
+        );
+    }
+
+    // ── Fallible median sampler (pure; no spawn) ───────────────────────────────
+
+    #[test]
+    fn sample_median_picks_the_middle_of_sorted_samples() {
+        // Deterministic durations 5,1,3,2,4 ms (+ a warmup we ignore). After sort:
+        // 1,2,3,4,5 → median index SAMPLES/2 = 2 → 3 ms. SAMPLES is 5.
+        assert_eq!(SAMPLES, 5, "this test assumes the frozen SAMPLES = 5");
+        let mut seq = [
+            5u64, // warmup (discarded)
+            5, 1, 3, 2, 4, // the 5 timed samples
+        ]
+        .into_iter();
+        let d = sample_median("unused", || Ok(Duration::from_millis(seq.next().unwrap())))
+            .expect("all samples ok");
+        assert_eq!(d, Duration::from_millis(3));
+    }
+
+    #[test]
+    fn sample_median_warmup_failure_is_skip() {
+        // The FIRST call (warmup) fails → SKIP with the static reason, no number.
+        let r = sample_median("warmup boom", || Err(()));
+        assert_eq!(r, Err("warmup boom"));
+    }
+
+    #[test]
+    fn sample_median_any_sample_failure_is_skip() {
+        // Warmup + first sample ok, then a failure → SKIP (never a partial median).
+        let mut n = 0usize;
+        let r = sample_median("sampling boom", || {
+            n += 1;
+            // call 1 = warmup ok, call 2 = sample ok, call 3 = fail.
+            if n >= 3 {
+                Err(())
+            } else {
+                Ok(Duration::from_millis(1))
+            }
+        });
+        assert_eq!(r, Err("sampling boom"));
+    }
+
+    #[test]
+    fn median_outcome_maps_ok_to_measured_and_err_to_skip() {
+        match median_outcome(Ok(Duration::from_millis(7))) {
+            Outcome::Measured(ms) => assert!((ms - 7.0).abs() < 1e-9),
+            Outcome::Skip(_) => panic!("ok must map to Measured"),
+        }
+        match median_outcome(Err("nope")) {
+            Outcome::Skip(r) => assert_eq!(r, "nope"),
+            Outcome::Measured(_) => panic!("err must map to Skip"),
+        }
+    }
+
+    // ── Unique names (no timestamps; collision-free within a process) ──────────
+
+    #[test]
+    fn unique_name_is_namespaced_and_monotonic() {
+        let a = unique_name("build");
+        let b = unique_name("build");
+        let pid = std::process::id();
+        assert!(a.starts_with(&format!("lightr-bench-build-{pid}-")));
+        assert!(b.starts_with(&format!("lightr-bench-build-{pid}-")));
+        assert_ne!(a, b, "successive names must differ (monotonic counter)");
+    }
+
+    #[test]
+    fn unique_name_distinguishes_kinds() {
+        let img = unique_name("mat");
+        let ctx = unique_name("mat-ctx");
+        assert!(img.contains("-mat-"));
+        assert!(ctx.contains("-mat-ctx-"));
     }
 }
