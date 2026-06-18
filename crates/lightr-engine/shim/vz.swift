@@ -63,6 +63,15 @@ public func lightr_vz_run(
     // LIGHTR_VZ_TIMING is set, to break down VM create / start / run / teardown.
     let t0 = DispatchTime.now()
     let vztiming = !(ProcessInfo.processInfo.environment["LIGHTR_VZ_TIMING"] ?? "").isEmpty
+    // Networking is OPT-IN (LIGHTR_VZ_NET) — same env-config pattern as
+    // LIGHTR_VZ_CONSOLE. A non-published run skips the NIC + `ip=dhcp`, avoiding
+    // ~0.6s DHCP at boot AND the network-teardown cost at poweroff. The host sets
+    // this only when `-p`/networking is requested.
+    let wantsNet = !(ProcessInfo.processInfo.environment["LIGHTR_VZ_NET"] ?? "").isEmpty
+    // Fast-teardown: when set, poll this host path for the guest's durable exit
+    // code and force-stop the VM the instant it parses — skipping the guest's slow
+    // clean poweroff + VZ stop-detection (~2s). Empty → wait for a clean stop.
+    let exitFilePath = ProcessInfo.processInfo.environment["LIGHTR_VZ_EXITFILE"] ?? ""
     func tlog(_ label: String) {
         if vztiming {
             let ms = Double(DispatchTime.now().uptimeNanoseconds &- t0.uptimeNanoseconds) / 1_000_000
@@ -89,7 +98,7 @@ public func lightr_vz_run(
     // virtio-net interface up + leases an IP from the NAT attachment's DHCP server
     // at boot — no userspace DHCP client needed in the guest. Harmless when no NIC
     // is present. (WAVE-VZ networking.)
-    let cmdLine    = "console=hvc0 ip=dhcp"
+    let cmdLine    = wantsNet ? "console=hvc0 ip=dhcp" : "console=hvc0"
 
     let bootLoader = VZLinuxBootLoader(kernelURL: kernelURL)
     bootLoader.initialRamdiskURL = initrdURL
@@ -176,10 +185,14 @@ public func lightr_vz_run(
     // forward). The kernel is built with CONFIG_VIRTIO_NET=y + CONFIG_IP_PNP_DHCP,
     // so the guest can auto-configure. The MAC is pinned (locally-administered)
     // so the host can discover the guest IP from the DHCP lease table by MAC.
-    let netDevice = VZVirtioNetworkDeviceConfiguration()
-    netDevice.attachment = VZNATNetworkDeviceAttachment()
-    if let mac = VZMACAddress(string: "0a:00:00:24:18:01") {
-        netDevice.macAddress = mac
+    var netDevices: [VZVirtioNetworkDeviceConfiguration] = []
+    if wantsNet {
+        let netDevice = VZVirtioNetworkDeviceConfiguration()
+        netDevice.attachment = VZNATNetworkDeviceAttachment()
+        if let mac = VZMACAddress(string: "0a:00:00:24:18:01") {
+            netDevice.macAddress = mac
+        }
+        netDevices = [netDevice]
     }
 
     // ── 6. Assemble configuration ───────────────────────────────────────────
@@ -189,7 +202,7 @@ public func lightr_vz_run(
     config.memorySize   = memBytes
     config.serialPorts  = [consolePort]
     config.directorySharingDevices = storages
-    config.networkDevices = [netDevice]
+    config.networkDevices = netDevices
 
     do {
         try config.validate()
@@ -250,6 +263,26 @@ public func lightr_vz_run(
                 vmStatus = -1
                 semaphore.signal()
             }
+        }
+
+        // Fast-teardown: once the guest's EXIT_FILE holds a parseable code, the
+        // result is durable — force-stop the VM rather than waiting for its slow
+        // clean poweroff. The `.stopped` observer then signals the semaphore. The
+        // parse check tolerates a partial write (keeps polling until complete).
+        if !exitFilePath.isEmpty {
+            func pollExit() {
+                if machine.state == .stopped || machine.state == .error { return }
+                if let s = try? String(contentsOfFile: exitFilePath, encoding: .utf8),
+                   Int32(s.trimmingCharacters(in: .whitespacesAndNewlines)) != nil {
+                    tlog("exit-file ready, force-stopping")
+                    if machine.canStop {
+                        machine.stop { _ in }
+                    }
+                    return
+                }
+                vmQueue.asyncAfter(deadline: .now() + .milliseconds(15)) { pollExit() }
+            }
+            vmQueue.asyncAfter(deadline: .now() + .milliseconds(30)) { pollExit() }
         }
     }
 

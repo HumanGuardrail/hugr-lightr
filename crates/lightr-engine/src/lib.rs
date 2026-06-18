@@ -721,6 +721,14 @@ mod vz_impl {
             //   memory → MB, rounded UP. Below the VZ floor the shim returns a
             //          config failure (< 0) → the honest `Err` below.
             //   `0` for either field means "use the shim default" (unlimited).
+            // Fast-teardown: tell the shim the host path of the guest's durable
+            // EXIT_FILE. The shim polls it and force-stops the VM the instant the
+            // result is captured, instead of waiting for the guest's slow clean
+            // poweroff + VZ stop-detection (~2s). Safe: PID1 fsyncs EXIT_FILE
+            // before it would power off, and the rootfs is a throwaway CoW dir, so
+            // nothing but EXIT_FILE is read back. Same-process, set before the FFI
+            // call spawns any thread.
+            unsafe { std::env::set_var("LIGHTR_VZ_EXITFILE", &exit_path) };
             let (memory_mb, cpu_count) = vz_caps(&spec.limits);
             let vm_status = unsafe {
                 lightr_vz_run(
