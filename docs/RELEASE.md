@@ -22,14 +22,10 @@ GitHub Release exists and the artifacts verify.
 publish = true
 ```
 
-Every publishable crate inherits this via `publish.workspace = true`. Two crates
-override it locally to `publish = false` and **stay that way** — do not touch
-them: `lightr-acceptance` (test harness) and `lightr-init` (guest PID1 binary).
-
-> **BLOCKER to resolve before step B (see note at the bottom):** `lightr-engine`
-> (publish=true) has a path dependency on `lightr-init` (publish=false). crates.io
-> rejects a crate whose dependency is unpublished. This must be settled before
-> `cargo publish lightr-engine` will succeed.
+Every publishable crate inherits this via `publish.workspace = true`. One crate
+overrides it locally to `publish = false` and **stays that way** — do not touch
+it: `lightr-acceptance` (test harness). `lightr-init` inherits the workspace gate
+and is publishable (it is a dependency of `lightr-engine`).
 
 ---
 
@@ -37,20 +33,21 @@ them: `lightr-acceptance` (test harness) and `lightr-init` (guest PID1 binary).
 
 Order computed from each crate's internal `[dependencies]` (path deps on other
 workspace crates). Each crate is published only after every crate it depends on.
-`lightr-core` has no internal deps → first; `lightr-cli` depends on everything →
-last. **Skip `lightr-acceptance` and `lightr-init` (publish=false).**
+`lightr-core` and `lightr-init` have no internal deps → first tier; `lightr-cli`
+depends on everything → last. **Skip `lightr-acceptance` (test harness only).**
 
 Internal dependency edges (publishable crates):
 
 | crate | internal deps |
 |---|---|
 | `lightr-core` | _(none)_ |
+| `lightr-init` | _(none)_ |
 | `lightr-store` | core |
 | `lightr-index` | core, store |
 | `lightr-run` | core, store, index |
 | `lightr-oci` | core, store, index |
 | `lightr-views` | core, store |
-| `lightr-engine` | core, store, index, **init** ⚠️ (publish=false) |
+| `lightr-engine` | core, store, index, init |
 | `lightr-build` | core, store, index, run, oci, engine |
 | `lightr-cli` | core, store, index, run, oci, engine, build |
 
@@ -58,14 +55,21 @@ Internal dependency edges (publishable crates):
 the next so the index is fresh):**
 
 ```sh
+# Tier 1 — no internal deps (order between these two does not matter)
 cargo publish -p lightr-core
+cargo publish -p lightr-init
+# Tier 2
 cargo publish -p lightr-store
 cargo publish -p lightr-index
+# Tier 3 — mutually independent, each needs core/store/index
 cargo publish -p lightr-run
 cargo publish -p lightr-oci
 cargo publish -p lightr-views
-cargo publish -p lightr-engine    # ⚠️ requires the lightr-init blocker resolved first
+# Tier 4
+cargo publish -p lightr-engine
+# Tier 5
 cargo publish -p lightr-build
+# Tier 6
 cargo publish -p lightr-cli       # the `lightr` binary
 ```
 
@@ -164,19 +168,7 @@ validated.** Only Intel x86_64 vz is runtime-validated today (F-205/F-206).
 
 ---
 
-## Blocker noted during this runbook's authoring (resolve before publish)
+## RESOLVED 2026-06-17: lightr-init now inherits the publish gate
 
-`lightr-engine` is `publish=true` but path-depends on `lightr-init`
-(`publish=false`). `cargo publish -p lightr-engine` will be **rejected** by
-crates.io because `lightr-init` is not on the registry. Options for the owner to
-decide before step B:
-
-1. Make `lightr-init` publishable (flip its local `publish=false`), and insert
-   it into the order immediately before `lightr-engine` (its only internal dep is
-   none — it depends on no other workspace crate, so it can publish right after
-   `lightr-core` or any time before `lightr-engine`); **or**
-2. Restructure so `lightr-engine` does not require `lightr-init` at publish time
-   (e.g. make the dependency optional / dev-only).
-
-This is recorded as a fact found while reading the crate manifests — it is not
-resolved here.
+`lightr-init` is a real library (`InitSpec`/`CMD_FILE`/`EXIT_FILE` consumed by
+`lightr-engine`) and now uses `publish.workspace = true`. No publish blocker remains.

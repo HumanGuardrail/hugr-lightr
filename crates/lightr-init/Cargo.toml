@@ -3,7 +3,7 @@ name = "lightr-init"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false # internal: not published
+publish.workspace = true
 description = "Linux guest PID 1 for Lightr microVM workloads (vz boot, host-portable logic)."
 repository.workspace = true
 homepage.workspace = true
@@ -21,7 +21,7 @@ path = "src/bin/init.rs"
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Real guest PID1 syscalls (mount(2) + AF_VSOCK) live in bin/init.rs behind
+# Real guest PID1 syscalls (mount(2), chroot, reboot) live in bin/init.rs behind
 # cfg(target_os="linux"); the library + host stub need no libc.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
