@@ -66,8 +66,11 @@ if ! command -v zig >/dev/null 2>&1; then
     exit 3
 fi
 
-# 2. cargo-zigbuild
-if ! cargo zigbuild --version >/dev/null 2>&1; then
+# 2. cargo-zigbuild — probe the binary directly. (Do NOT use
+# `cargo zigbuild --version`: cargo-zigbuild's `zigbuild` subcommand rejects
+# `--version` with "unexpected argument", so that check fails even when it IS
+# installed. `command -v` mirrors the zig check above and is robust.)
+if ! command -v cargo-zigbuild >/dev/null 2>&1; then
     echo "build-init: 'cargo-zigbuild' not found." >&2
     echo "  Fix: cargo install cargo-zigbuild" >&2
     exit 3
