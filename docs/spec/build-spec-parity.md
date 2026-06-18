@@ -329,4 +329,50 @@ WP-A0 (freeze, lead)  ──┬──► WP-A1 (limits)     [core parse, run/lim
   parity-audit row updated: <F-id→status> | NO decisions taken (or: BLOCKED on <x>)`.
 - **DoD (all):** no stub on main; honest per-platform errors (never silent no-op);
   tense law; real tests; gate green; parity-audit truth-synced.
-```
+
+---
+
+## §7 — WP-D: the FULL Docker head-to-head (supersedes §5's no-spawn limit)
+
+§5 shipped `bench-compare` but, to stay CI-safe, left every competitor cell except
+`idle` as an honest SKIP ("no container spawn"). §7 makes the head-to-head **real**:
+it spawns Docker for the timed axes, behind a structural spawn-guard, and adds the
+install-footprint axis. Results doc: `docs/spec/benchmark-results.md`.
+
+**§7.0 — WP-D0 (lead scaffold, committed `dc8140e`):**
+- New axis **install footprint (#1)**, measured NOW (no spawn): `du` of the
+  `Docker.app` bundle vs this `lightr` binary's own size.
+- **`ProbePolicy` spawn-guard:** only the real CLI `run()` passes `Spawn`; tests/CI
+  pass `NeverSpawn`, so a PRESENT docker still SKIPs. `cargo test` cannot launch a
+  container even on a docker-equipped runner. Locked by a test.
+- New module `handlers/bench_compete_docker.rs`: install probe implemented +
+  tested; `cold_run_ms` / `re_run_ms` / `build_ms` / `materialize_ms` are
+  honest-SKIP stubs with the per-fn fairness doctrine documented.
+- Shared fixtures + timing exposed `pub(crate)` (`build_materialize_fixture`,
+  `make_bench_dockerfile`, `median_of`, `SAMPLES`, `dur_ms`) so the probes race
+  over IDENTICAL bytes with IDENTICAL methodology.
+
+**§7.1 — WP-D1 (agent, fills the frozen stubs):** the four spawn probes, each its
+tool's idiomatic command for the same goal, over the same bytes:
+- `cold_run`: `docker run --rm alpine:latest true` (image ensured-present, untimed).
+- `re_run`: the SAME `docker run … true` repeated — Docker has no memo, it re-does
+  the work (vs Lightr's memo HIT).
+- `build`: `docker build` an unchanged 3-step context a 2nd time (warm layer cache)
+  vs Lightr's memoized 2nd build.
+- `materialize`: `docker cp <container>:/data <dest>` of the SAME 1 GB tree
+  (image carries it) vs Lightr's `clonefile` hydrate from CAS.
+
+**§7.2 — Fairness doctrine (FROZEN, do not relitigate):** idiomatic command per
+tool; identical bytes; **setup untimed**, only the user-goal op timed; median-of-N
+after one warmup; **every spawned op has a hard timeout → SKIP on timeout/failure,
+never a fabricated number**; competitor spawn only from the real CLI entry.
+
+**§7.3 — Lead owns:** integration (cherry-pick after cold-review), the
+**authoritative benchmark run**, filling the measured numbers into
+`benchmark-results.md`, and the `parity-audit.md` F-602 truth-up.
+
+**§7.4 — Honest boundaries:** snapshot (#5) and disk-dedup (#6) have no faithful /
+cheap Docker mirror → measured Lightr-side only, NOT claimed as a head-to-head win.
+The absolute **≤10 ms** re-run (#4) binds to views-O(1) on Apple Silicon; the
+head-to-head factor stands on the shipped CoW path, and the ≤10 ms headline is
+marked HW-gated wherever it appears.
