@@ -10,24 +10,34 @@ cached.
 ```
 # What runs today (build from source — see Quickstart):
 $ lightr snapshot --dir . --name @me/proj
-$ lightr hydrate /tmp/fresh --name @me/proj       # content-addressed, CoW
-$ lightr run --input src -- make test             # memoized: 2nd run = HIT
-$ lightr oci import alpine.tar --name @img/alpine # OCI image → store
-$ lightr build -t @app/web .                      # Dockerfile, step-memoized
-$ lightr bench --vs-docker                         # run the table yourself
+$ lightr hydrate /tmp/fresh --name @me/proj        # content-addressed, CoW
+$ lightr run --input src -- make test              # memoized: 2nd run = HIT
+$ lightr oci import alpine.tar --name @docker/alpine  # OCI/docker tar → store
+$ lightr run --rootfs @docker/alpine -- echo hi    # CoW rootfs, memoized
+$ lightr build -t @app/web .                       # Dockerfile, step-memoized
+$ lightr bench --vs-docker                          # run the table yourself
 ```
 
 > **Honest status (read this first).** What ships today is the **local**
-> engine — store, memoized `run`/`build`, OCI import, the time-axis verbs,
-> and the agent/MCP surface — genuinely fast and fully tested (379 tests).
-> What is **NOT yet real**: running a Linux container on a Mac via a microVM
-> (the `vz` engine is built behind a feature flag, boot path unvalidated —
-> needs Apple-Silicon validation, spike S5), the O(1) "views" materialization
-> layer (designed, not built), and a published `brew`/release (the project
-> is **Apache-2.0** per ADR-0008, but release *timing* is gated on
-> GTM/Runners M1). The headline perf numbers (~ms materialize,
-> boot-never) bind to Apple Silicon + the views layer and are **targets, not
-> measurements**. Full feature-by-feature truth ledger:
+> engine — store, memoized `run`/`build`, OCI import (sha256-verified), the
+> time-axis verbs, lazy compose, docker compat, and the agent/MCP surface —
+> genuinely fast and fully tested (411 tests, 0 failures). Workspace
+> materialization ships as **CoW hydrate** (real + tested). The **`vz` engine
+> is runtime-validated end-to-end on Intel x86_64** — `lightr run --engine vz`
+> boots a real microVM and returns the guest's real exit code (F-205/F-206);
+> the arm64 sibling is **press-go on Apple Silicon** via the runbook in
+> `spikes/s5-vz-boot-arm64/` (code-complete, not yet claimed validated).
+> What is **NOT yet validated/built**: the `ns` (Linux) and `wsl` (Windows)
+> engines are code-complete but hardware-gated (runbooks/CI, none claimed
+> validated); the **O(1) "views" backends** (composefs/NFS-loopback/projfs)
+> are a planned perf optimization (ADR-0013 spike, honest `Unsupported`,
+> unwired — the shipped runtime already materializes via CoW hydrate); and a
+> published `brew`/release is owner-gated (`G-PUBLISH` — the project is
+> **Apache-2.0** per ADR-0008, naming cleared, metadata ready; see
+> [`docs/RELEASE.md`](docs/RELEASE.md)). The headline ~ms / boot-never perf
+> targets bind to the O(1) views layer + Apple Silicon and remain **targets,
+> not measurements** (the measured release numbers are in `spikes/RESULTS.md`).
+> Full feature-by-feature truth ledger:
 > [`docs/spec/parity-audit.md`](docs/spec/parity-audit.md).
 
 ## The bet
@@ -41,8 +51,9 @@ Docker is three products glued together, and the glue is why it is heavy:
 Lightr unbundles them. Distribution is replaced by CoreLink's CAS (chunk-level
 dedup beats layer tarballs), the daemon is deleted (one static binary, no
 background process), and isolation becomes à la carte — none for trusted
-local dev, namespaces on trusted Linux, Firecracker microVMs for hostile
-multi-tenant cloud.
+local dev, namespaces on trusted Linux, a Virtualization.framework microVM
+(`vz`, validated on Intel macOS) for Linux-on-Mac, and Firecracker (`fc`,
+staged) for hostile multi-tenant cloud.
 
 The isolation primitives are commodity (~5% of the value). The
 content-addressed substrate underneath — instant pulls, chunk-level dedup,
@@ -52,12 +63,14 @@ staged (`CAP-DEDUP-CROSS-TENANT`).
 
 ## Status
 
-**R0–R4 + prod hardening delivered (2026-06-12).** A ~4 MB release binary;
-379 tests green (A1–A30 + prod hardening) end-to-end; `lightr bench --check` green on the
-Intel dev box (snapshot warm 233 ms, status 34 ms, memo HIT 51 ms — see
-`spikes/RESULTS.md`; ~ms targets bind to R2 views + Apple Silicon, tense
-law). Whitepaper v2 (working backwards) is canon. The platform it
-converges with already exists across three sibling repos:
+**R0–R4 + go-live hardening delivered (2026-06-17).** A **1.9 MB** release
+binary (measured, `spikes/RESULTS.md` B7); **411 tests, 0 failures**, clippy
+`-D` clean (default + `--features vz`), fmt clean; `lightr bench --check` green
+on the Intel dev box (snapshot warm 233 ms, status 34 ms, memo HIT 51 ms — see
+`spikes/RESULTS.md`; the ~ms / boot-never targets bind to the O(1) views layer +
+Apple Silicon, tense law). The `vz` engine is runtime-validated end-to-end on
+Intel x86_64 (F-205/F-206). Whitepaper v2 (working backwards) is canon. The
+platform it converges with already exists across three sibling repos:
 
 | Layer | Repo | Status |
 |---|---|---|
@@ -72,13 +85,27 @@ tier creates has somewhere to convert.
 ## Quickstart (today, on this machine)
 
 ```
-$ cargo build --release          # bin: target/release/lightr (~4 MB)
+$ cargo build --release          # bin: target/release/lightr (~1.9 MB)
 $ lightr snapshot --dir . --name @me/proj
 $ lightr hydrate /tmp/fresh --name @me/proj     # CoW, instant-ish
 $ lightr run --input src -- make test           # memoized: 2nd run = HIT
 $ lightr status --name @me/proj --json          # agent-ready output
+$ lightr run --rootfs @docker/alpine -- echo hi # CoW rootfs (native engine)
 $ lightr bench --vs-docker                      # run the table yourself
 ```
+
+Boot a real Linux microVM on Intel macOS (validated end-to-end, F-205/F-206 —
+needs `--features vz`; the arm64 sibling is press-go via `spikes/s5-vz-boot-arm64/`):
+
+```
+$ cargo build --release --features vz
+$ lightr run --engine vz --rootfs @docker/alpine -- /bin/sh -c 'exit 7'  # → 7
+```
+
+Command surface beyond the verbs above: `lightr --version` (git-sha +
+build-date), `lightr completions <shell>`, `lightr man`, `lightr schema`,
+`lightr mcp` (the agent/MCP server), plus `ps`/`logs`/`exec`/`stop`,
+`undo`/`diff`/`bisect`, `build`/`compose`/`docker`, and `gc`.
 
 Nothing runs between invocations (`pgrep lightr` proves it). No daemon,
 no images. The local verbs touch no network; only `oci pull` reaches a

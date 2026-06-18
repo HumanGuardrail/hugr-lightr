@@ -3,10 +3,9 @@
 //! a17d (hardlink), A18 strengthened, A21 strengthened.
 //!
 //! Gate: cargo fmt --check · cargo clippy -p lightr-acceptance --all-targets
-//!       -D warnings · cargo check -p lightr-acceptance --all-targets.
-//! The binary is expected to have the R2 verbs merged in; these tests are
-//! authored red-first (compile-only gate until the post-merge green run).
-//! Do NOT weaken assertions.
+//!       -D warnings · cargo test -p lightr-acceptance.
+//! The R2 verbs are merged; these are real, running acceptance tests with
+//! live assertions (authored red-first, now green). Do NOT weaken assertions.
 //!
 //! Fixture form for A17: docker-save TAR. The fixture contains manifest.json
 //! plus two uncompressed layer tars (built with the `tar` crate). No sha2 dep

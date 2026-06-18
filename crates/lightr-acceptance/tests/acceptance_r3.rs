@@ -1,10 +1,10 @@
-//! A22–A26 per build-spec-r3.md §6 — authored by WP-R4 (red-first, compile-only gate).
+//! A22–A26 per build-spec-r3.md §6 — authored by WP-R4 (red-first).
 //!
 //! Gate: cargo fmt --check · cargo clippy -p lightr-acceptance --all-targets
-//!       -D warnings · cargo check -p lightr-acceptance --all-targets.
+//!       -D warnings · cargo test -p lightr-acceptance.
 //!
-//! The binary does NOT yet have the R3 verbs (build/compose/docker); every test
-//! here is RED until the CLI lands. Do NOT weaken assertions.
+//! The R3 verbs (build/compose/docker) are merged; every test here is a real,
+//! running acceptance test with live assertions (now green). Do NOT weaken assertions.
 //!
 //! # Native-engine note
 //!

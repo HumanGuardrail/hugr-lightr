@@ -85,7 +85,8 @@ impl InitSpec { pub fn from_json(b: &[u8]) -> Result<Self, String>;
                 pub fn to_json(&self) -> Vec<u8>; }
 
 /// Where PID1 reports the guest process exit code (the fix for the fake
-/// exitCode=0). Seam so tests use a Vec; the real impl writes a vsock.
+/// exitCode=0). Seam so tests use a Vec; the real impl writes the code to
+/// `EXIT_FILE` on the rootfs virtiofs share (macOS has no host AF_VSOCK).
 pub trait ExitSink { fn report(&mut self, code: i32) -> std::io::Result<()>; }
 
 /// The init lifecycle, parameterized over the OS actions (mount, spawn) so
@@ -94,8 +95,9 @@ pub fn run_init<M: GuestOps>(spec: &InitSpec, ops: &mut M, sink: &mut dyn ExitSi
     -> std::io::Result<i32>;
 pub trait GuestOps { /* mount_virtiofs(tag,dest), spawn_wait(cmd,cwd,env)->i32 */ }
 ```
-The `bin/init.rs` wires the REAL Linux impl (mount syscalls + vsock sink)
-behind `#[cfg(target_os="linux")]`; the lib + a `FakeOps`/`VecSink` make the
+The `bin/init.rs` wires the REAL Linux impl (mount syscalls + a file sink that
+writes the exit code to `EXIT_FILE` on the rootfs share; the host reads it
+back) behind `#[cfg(target_os="linux")]`; the lib + a `FakeOps`/`VecSink` make the
 lifecycle fully testable on Intel/macOS now. Tests: spec json roundtrip,
 run_init drives mount→spawn→report in order, exit code propagates, sink
 receives it. **No fake success: the code path that reports the exit is real
