@@ -5,7 +5,35 @@
 mod exit;
 mod handlers;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Version string: <pkg> (<git-sha>, <build-date>) — sha/date from build.rs.
+// ──────────────────────────────────────────────────────────────────────────────
+
+const LIGHTR_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("LIGHTR_GIT_SHA"),
+    ", ",
+    env!("LIGHTR_BUILD_DATE"),
+    ")"
+);
+
+/// Real, copy-pasteable examples shown under `lightr --help`.
+const AFTER_HELP: &str = "\
+EXAMPLES:
+  # Run a command inside a pulled image's rootfs (CoW), memoized
+  lightr run --rootfs alpine -- echo hello
+
+  # Snapshot the current directory into the store under a ref
+  lightr snapshot --dir . --name @me/proj
+
+  # Import a docker-save tar (or OCI layout) into the store
+  lightr oci import ./image.tar --name @docker/myimg
+
+  # Measure the indicator table on this machine, compared to docker
+  lightr bench --vs-docker";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Utility helpers
@@ -45,8 +73,9 @@ pub fn emit_event(w: &mut impl std::io::Write, ev: &str, verb: &str, extra: &str
 #[derive(Parser)]
 #[command(
     name = "lightr",
-    version,
-    about = "So light it isn't there. (native execution — reproducibility, not a sandbox)"
+    version = LIGHTR_VERSION,
+    about = "So light it isn't there. (native execution — reproducibility, not a sandbox)",
+    after_long_help = AFTER_HELP
 )]
 struct Cli {
     /// Machine-readable output (stable keys)
@@ -159,6 +188,19 @@ pub enum OciCmd {
         #[arg(long)]
         name: String,
     },
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Shell enum (for `lightr completions <shell>`)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
+    Elvish,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -332,6 +374,14 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Print a shell completion script to stdout
+    Completions {
+        /// Target shell
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+    /// Print the roff man page to stdout
+    Man,
     /// [internal] Supervise a detached run (hidden)
     #[command(name = "__supervise", hide = true)]
     Supervise { dir: String },
@@ -379,6 +429,8 @@ fn main() {
             ComposeCmd::Down { .. } => "compose-down",
         },
         Cmd::Docker { .. } => "docker",
+        Cmd::Completions { .. } => "completions",
+        Cmd::Man => "man",
         Cmd::Supervise { .. } => "__supervise",
         Cmd::ComposeSupervisor { .. } => "__compose-supervise",
     };
@@ -475,6 +527,8 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
             ComposeCmd::Down { file } => handlers::compose::down(file.as_deref()),
         },
         Cmd::Docker { args } => handlers::docker::run(&args, json, explain),
+        Cmd::Completions { shell } => generate_completions(shell),
+        Cmd::Man => generate_man(),
         Cmd::Supervise { dir } => match lightr_run::supervise(std::path::Path::new(&dir)) {
             Ok(exit_code) => exit_code,
             Err(e) => {
@@ -500,6 +554,41 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
     }
 
     code
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// completions / man generators
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Write the shell completion script for `shell` to stdout.
+fn generate_completions(shell: Shell) -> i32 {
+    use clap_complete::Shell as CcShell;
+    let cc: CcShell = match shell {
+        Shell::Bash => CcShell::Bash,
+        Shell::Zsh => CcShell::Zsh,
+        Shell::Fish => CcShell::Fish,
+        Shell::Powershell => CcShell::PowerShell,
+        Shell::Elvish => CcShell::Elvish,
+    };
+    let mut cmd = Cli::command();
+    let bin = cmd.get_name().to_string();
+    clap_complete::generate(cc, &mut cmd, bin, &mut std::io::stdout());
+    0
+}
+
+/// Render the roff man page for the top-level command to stdout.
+fn generate_man() -> i32 {
+    let man = clap_mangen::Man::new(Cli::command());
+    let mut out = Vec::new();
+    if let Err(e) = man.render(&mut out) {
+        eprintln!("lightr: man render error: {e}");
+        return 1;
+    }
+    use std::io::Write as _;
+    if std::io::stdout().write_all(&out).is_err() {
+        return 1;
+    }
+    0
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1494,5 +1583,49 @@ mod tests {
         use super::handlers::docker::run as docker_run;
         let code = docker_run(&[], false, false);
         assert_eq!(code, 2);
+    }
+
+    // ── completions / man ──────────────────────────────────────────────────────
+
+    #[test]
+    fn completions_parses_each_shell() {
+        for s in ["bash", "zsh", "fish", "powershell", "elvish"] {
+            let cli = parse(&["completions", s]);
+            match &cli.cmd {
+                super::Cmd::Completions { .. } => {}
+                _ => panic!("expected Completions for {s}"),
+            }
+        }
+    }
+
+    #[test]
+    fn completions_requires_shell() {
+        assert!(try_parse(&["completions"]).is_err());
+    }
+
+    #[test]
+    fn completions_rejects_unknown_shell() {
+        assert!(try_parse(&["completions", "tcsh"]).is_err());
+    }
+
+    #[test]
+    fn man_parses() {
+        let cli = parse(&["man"]);
+        match &cli.cmd {
+            super::Cmd::Man => {}
+            _ => panic!("expected Man"),
+        }
+    }
+
+    #[test]
+    fn cli_command_verifies() {
+        // clap asserts internal consistency (incl. after_long_help) on debug_assert.
+        use clap::CommandFactory as _;
+        super::Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn version_string_contains_pkg_version() {
+        assert!(super::LIGHTR_VERSION.starts_with(env!("CARGO_PKG_VERSION")));
     }
 }
