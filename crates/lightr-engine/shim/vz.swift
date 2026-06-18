@@ -59,6 +59,17 @@ public func lightr_vz_run(
     argv:     UnsafePointer<UnsafePointer<CChar>?>
 ) -> Int32 {
 
+    // WAVE-VZ boot-time instrumentation: wall-clock from shim entry, printed when
+    // LIGHTR_VZ_TIMING is set, to break down VM create / start / run / teardown.
+    let t0 = DispatchTime.now()
+    let vztiming = !(ProcessInfo.processInfo.environment["LIGHTR_VZ_TIMING"] ?? "").isEmpty
+    func tlog(_ label: String) {
+        if vztiming {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds &- t0.uptimeNanoseconds) / 1_000_000
+            fputs(String(format: "lightr-vz-timing: %-22@ %8.1f ms\n", label, ms), stderr)
+        }
+    }
+
     // ── 1. Paths ────────────────────────────────────────────────────────────
     let kernelURL  = URL(fileURLWithPath: String(cString: kernel))
     let initrdURL  = URL(fileURLWithPath: String(cString: initrd))
@@ -186,6 +197,7 @@ public func lightr_vz_run(
         fputs("lightr-vz-shim: configuration invalid: \(error)\n", stderr)
         return -1
     }
+    tlog("config validated")
 
     // ── 7. Boot + wait ──────────────────────────────────────────────────────
     // `vmStatus` is a LIFECYCLE status, never the guest exit code. The guest's
@@ -216,6 +228,7 @@ public func lightr_vz_run(
         vm = machine
         observation = machine.observe(\.state, options: [.new]) { m, _ in
             if trace { fputs("lightr-vz-shim: vm.state -> \(m.state.rawValue)\n", stderr) }
+            tlog("vm.state=\(m.state.rawValue)")
             switch m.state {
             case .stopped:
                 // BOOT-PATH: clean stop. Lifecycle success ONLY; the real guest
@@ -230,6 +243,7 @@ public func lightr_vz_run(
                 break
             }
         }
+        tlog("machine.start() called")
         machine.start { result in
             if case .failure(let error) = result {
                 fputs("lightr-vz-shim: boot failed: \(error)\n", stderr)
@@ -241,6 +255,7 @@ public func lightr_vz_run(
 
     // Block the CALLING thread (never vmQueue) until the VM stops or fails.
     semaphore.wait()
+    tlog("returning status=\(vmStatus)")
     _ = vm           // keep the VM + observation alive until the wait returns
     _ = observation
     return vmStatus
