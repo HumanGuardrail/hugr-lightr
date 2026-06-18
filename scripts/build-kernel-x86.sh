@@ -23,6 +23,19 @@
 # as virtio-pci), virtio-console (the guest's only console, hvc0), virtiofs +
 # FUSE (the rootfs/store shares + the host<->guest file channel).
 #
+# ── NO-DOCKER NOTES ──────────────────────────────────────────────────────────
+# lightr-init (the guest PID 1 binary) is built DOCKER-FREE via
+#   scripts/build-init.sh
+# which cross-compiles to <arch>-unknown-linux-musl on macOS using zig as the
+# linker (cargo-zigbuild). No container is needed for the init binary.
+#
+# The KERNEL, however, requires a Linux build environment (the kernel does not
+# cross-build natively on macOS). Docker is one option (this script). Alternatives:
+#   • Apple's Containerization framework ships a prebuilt arm64 VZ kernel that
+#     works directly on Apple Silicon — no kernel build required for arm64.
+#   • Build the kernel on a Linux target machine and copy out the bzImage.
+# ─────────────────────────────────────────────────────────────────────────────
+#
 # Usage:  scripts/build-kernel-x86.sh [--out <dir>]        (default: build/linux-pack-x86)
 #
 # Gates: bash -n clean; shellcheck-clean if shellcheck is present.
