@@ -659,6 +659,15 @@ pub struct Service {
     pub ports: Vec<(u16, u16)>,
     pub env: Vec<(String, String)>,
     pub eager: bool,
+    /// F-309: store-backed secrets, each `(name, ref)`. Hydrated to
+    /// `<cwd>/.lightr/secrets/<name>` (0600) on a cache miss. In the memo key.
+    pub secrets: Vec<(String, String)>,
+    /// F-309: store-backed configs, each `(name, ref)`. Hydrated to
+    /// `<cwd>/.lightr/configs/<name>` (0644) on a cache miss. In the memo key.
+    pub configs: Vec<(String, String)>,
+    /// F-309: optional healthcheck `(cmd, interval_s, retries)`. Post-result
+    /// probe surfaced via `ps`; NOT in the memo key.
+    pub healthcheck: Option<(String, u64, u32)>,
 }
 
 pub struct Compose {
@@ -682,6 +691,60 @@ pub struct Compose {
 /// ```
 /// Unknown keys are silently ignored. Returns `InvalidManifest` with the
 /// 1-based line number on any structural parse error.
+/// Parse a Docker-compose duration into whole seconds. Accepts `"30s"`,
+/// `"1m"`, `"2m30s"` (s/m/h suffixes), or a bare integer (seconds). Returns
+/// `None` on malformed input (fail closed at the call site).
+fn parse_duration_secs(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Bare integer ⇒ seconds.
+    if let Ok(n) = s.parse::<u64>() {
+        return Some(n);
+    }
+    // Suffixed form: sum consecutive <number><unit> groups.
+    let mut total: u64 = 0;
+    let mut num = String::new();
+    let mut saw_unit = false;
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            num.push(ch);
+        } else {
+            let n: u64 = num.parse().ok()?;
+            num.clear();
+            let mult = match ch {
+                's' => 1,
+                'm' => 60,
+                'h' => 3600,
+                _ => return None,
+            };
+            total = total.checked_add(n.checked_mul(mult)?)?;
+            saw_unit = true;
+        }
+    }
+    // A trailing number with no unit is malformed in suffixed form.
+    if !num.is_empty() || !saw_unit {
+        return None;
+    }
+    Some(total)
+}
+
+/// A fresh service with the given name and all-empty fields.
+fn empty_service(name: String) -> Service {
+    Service {
+        name,
+        image_ref: String::new(),
+        command: None,
+        ports: Vec::new(),
+        env: Vec::new(),
+        eager: false,
+        secrets: Vec::new(),
+        configs: Vec::new(),
+        healthcheck: None,
+    }
+}
+
 pub fn parse_compose(yaml: &str) -> Result<Compose> {
     enum ParseState {
         Top,
@@ -689,6 +752,11 @@ pub fn parse_compose(yaml: &str) -> Result<Compose> {
         Service(String),     // service name
         Ports(String),       // current service, collecting ports
         Environment(String), // current service, collecting env
+        // F-309 list collectors: `secrets:` / `configs:` (items `- NAME=REF`).
+        Secrets(String),
+        Configs(String),
+        // F-309 nested map: `healthcheck:` (test/cmd, interval, retries).
+        Healthcheck(String),
     }
 
     let mut state = ParseState::Top;
@@ -717,17 +785,7 @@ pub fn parse_compose(yaml: &str) -> Result<Compose> {
             ParseState::Services => {
                 if indent == 2 && content.ends_with(':') {
                     let svc_name = content.trim_end_matches(':').to_string();
-                    services.insert(
-                        svc_name.clone(),
-                        Service {
-                            name: svc_name.clone(),
-                            image_ref: String::new(),
-                            command: None,
-                            ports: Vec::new(),
-                            env: Vec::new(),
-                            eager: false,
-                        },
-                    );
+                    services.insert(svc_name.clone(), empty_service(svc_name.clone()));
                     service_order.push(svc_name.clone());
                     state = ParseState::Service(svc_name);
                 }
@@ -737,17 +795,7 @@ pub fn parse_compose(yaml: &str) -> Result<Compose> {
                 if indent == 2 && content.ends_with(':') {
                     // new service at same level
                     let new_svc = content.trim_end_matches(':').to_string();
-                    services.insert(
-                        new_svc.clone(),
-                        Service {
-                            name: new_svc.clone(),
-                            image_ref: String::new(),
-                            command: None,
-                            ports: Vec::new(),
-                            env: Vec::new(),
-                            eager: false,
-                        },
-                    );
+                    services.insert(new_svc.clone(), empty_service(new_svc.clone()));
                     service_order.push(new_svc.clone());
                     state = ParseState::Service(new_svc);
                     continue;
@@ -769,6 +817,12 @@ pub fn parse_compose(yaml: &str) -> Result<Compose> {
                     state = ParseState::Ports(svc);
                 } else if content == "environment:" {
                     state = ParseState::Environment(svc);
+                } else if content == "secrets:" {
+                    state = ParseState::Secrets(svc);
+                } else if content == "configs:" {
+                    state = ParseState::Configs(svc);
+                } else if content == "healthcheck:" {
+                    state = ParseState::Healthcheck(svc);
                 } else if let Some(val) = content.strip_prefix("image:") {
                     if let Some(s) = services.get_mut(&svc) {
                         s.image_ref = val.trim().to_string();
@@ -806,17 +860,7 @@ pub fn parse_compose(yaml: &str) -> Result<Compose> {
                     state = ParseState::Service(svc.clone());
                     if indent == 2 && content.ends_with(':') {
                         let new_svc = content.trim_end_matches(':').to_string();
-                        services.insert(
-                            new_svc.clone(),
-                            Service {
-                                name: new_svc.clone(),
-                                image_ref: String::new(),
-                                command: None,
-                                ports: Vec::new(),
-                                env: Vec::new(),
-                                eager: false,
-                            },
-                        );
+                        services.insert(new_svc.clone(), empty_service(new_svc.clone()));
                         service_order.push(new_svc.clone());
                         state = ParseState::Service(new_svc);
                     } else if is_subkey {
@@ -853,17 +897,7 @@ pub fn parse_compose(yaml: &str) -> Result<Compose> {
                     state = ParseState::Service(svc.clone());
                     if indent == 2 && content.ends_with(':') {
                         let new_svc = content.trim_end_matches(':').to_string();
-                        services.insert(
-                            new_svc.clone(),
-                            Service {
-                                name: new_svc.clone(),
-                                image_ref: String::new(),
-                                command: None,
-                                ports: Vec::new(),
-                                env: Vec::new(),
-                                eager: false,
-                            },
-                        );
+                        services.insert(new_svc.clone(), empty_service(new_svc.clone()));
                         service_order.push(new_svc.clone());
                         state = ParseState::Service(new_svc);
                     } else if is_subkey && content == "ports:" {
@@ -929,6 +963,136 @@ pub fn parse_compose(yaml: &str) -> Result<Compose> {
                     }
                 }
             }
+            // F-309: `secrets:` / `configs:` list collectors. Each item is
+            // `- NAME=REF` (mirrors the `environment:` list form). On a de-indent
+            // or a new indent==4 sub-key we leave the list (back to Service).
+            // Convention: like ports/environment, list keys come after scalar
+            // keys (image/command) for a service.
+            ParseState::Secrets(svc) | ParseState::Configs(svc) => {
+                let svc = svc.clone();
+                let is_secrets = matches!(state, ParseState::Secrets(_));
+                let is_subkey = indent == 4 && content.ends_with(':') && !content.starts_with('-');
+                if indent < 4 || is_subkey {
+                    state = ParseState::Service(svc.clone());
+                    if indent == 2 && content.ends_with(':') {
+                        let new_svc = content.trim_end_matches(':').to_string();
+                        services.insert(new_svc.clone(), empty_service(new_svc.clone()));
+                        service_order.push(new_svc.clone());
+                        state = ParseState::Service(new_svc);
+                    } else if is_subkey {
+                        // Re-dispatch the recognized list/map sub-keys inline so a
+                        // `secrets:`→`ports:` (etc.) transition is not lost.
+                        match content {
+                            "ports:" => state = ParseState::Ports(svc),
+                            "environment:" => state = ParseState::Environment(svc),
+                            "secrets:" => state = ParseState::Secrets(svc),
+                            "configs:" => state = ParseState::Configs(svc),
+                            "healthcheck:" => state = ParseState::Healthcheck(svc),
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                // list item: "- NAME=REF"
+                let item = content.trim_start_matches("- ").trim().trim_matches('"');
+                if let Some((name, refn)) = item.split_once('=') {
+                    let pair = (name.trim().to_string(), refn.trim().to_string());
+                    if let Some(s) = services.get_mut(&svc) {
+                        if is_secrets {
+                            s.secrets.push(pair);
+                        } else {
+                            s.configs.push(pair);
+                        }
+                    }
+                }
+            }
+            // F-309: nested `healthcheck:` map. Keys (indent==6): `test:` or
+            // `cmd:` (the probe command), `interval:` (seconds), `retries:`.
+            // Any de-indent to a service-level key (indent<=4) leaves the map.
+            ParseState::Healthcheck(svc) => {
+                let svc = svc.clone();
+                if indent <= 4 {
+                    state = ParseState::Service(svc.clone());
+                    if indent == 2 && content.ends_with(':') {
+                        let new_svc = content.trim_end_matches(':').to_string();
+                        services.insert(new_svc.clone(), empty_service(new_svc.clone()));
+                        service_order.push(new_svc.clone());
+                        state = ParseState::Service(new_svc);
+                    } else if indent == 4 && content.ends_with(':') {
+                        match content {
+                            "ports:" => state = ParseState::Ports(svc),
+                            "environment:" => state = ParseState::Environment(svc),
+                            "secrets:" => state = ParseState::Secrets(svc),
+                            "configs:" => state = ParseState::Configs(svc),
+                            "healthcheck:" => state = ParseState::Healthcheck(svc),
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                // indent >= 6: a healthcheck sub-key.
+                if let Some(s) = services.get_mut(&svc) {
+                    // Ensure the tuple exists with sane defaults; refine per key.
+                    let hc = s.healthcheck.get_or_insert((String::new(), 30, 3));
+                    if let Some(val) = content
+                        .strip_prefix("test:")
+                        .or_else(|| content.strip_prefix("cmd:"))
+                    {
+                        let raw = val.trim();
+                        // Accept a JSON array (Docker `["CMD","..."]`) or a bare
+                        // shell string. For an array we join argv into a shell
+                        // line (the probe runs via `/bin/sh -c`).
+                        let cmd = if raw.starts_with('[') {
+                            match serde_json::from_str::<Vec<String>>(raw) {
+                                Ok(mut parts) => {
+                                    // Drop a leading "CMD"/"CMD-SHELL" marker.
+                                    if parts
+                                        .first()
+                                        .map(|p| p == "CMD" || p == "CMD-SHELL")
+                                        .unwrap_or(false)
+                                    {
+                                        parts.remove(0);
+                                    }
+                                    parts.join(" ")
+                                }
+                                Err(e) => {
+                                    return Err(LightrError::InvalidManifest(format!(
+                                        "line {lineno}: bad healthcheck test array: {e}"
+                                    )))
+                                }
+                            }
+                        } else {
+                            raw.trim_matches('"').to_string()
+                        };
+                        hc.0 = cmd;
+                    } else if let Some(val) = content.strip_prefix("interval:") {
+                        hc.1 = parse_duration_secs(val.trim()).ok_or_else(|| {
+                            LightrError::InvalidManifest(format!(
+                                "line {lineno}: bad healthcheck interval: {}",
+                                val.trim()
+                            ))
+                        })?;
+                    } else if let Some(val) = content.strip_prefix("retries:") {
+                        hc.2 = val.trim().parse().map_err(|_| {
+                            LightrError::InvalidManifest(format!(
+                                "line {lineno}: bad healthcheck retries: {}",
+                                val.trim()
+                            ))
+                        })?;
+                    }
+                    // unknown healthcheck sub-keys silently ignored
+                }
+            }
+        }
+    }
+
+    // Drop a healthcheck that never got a command (e.g. only interval set):
+    // a probe with no command is meaningless, so treat it as absent.
+    for s in services.values_mut() {
+        if let Some((cmd, _, _)) = &s.healthcheck {
+            if cmd.is_empty() {
+                s.healthcheck = None;
+            }
         }
     }
 
@@ -967,6 +1131,18 @@ pub struct ServiceSpec {
     pub eager: bool,
     /// Run dir if started (populated by supervisor)
     pub run_dir: Option<String>,
+    /// F-309: store-backed secrets `(name, ref)` → hydrated to
+    /// `<cwd>/.lightr/secrets/<name>` (0600). In the run's memo key.
+    #[serde(default)]
+    pub secrets: Vec<(String, String)>,
+    /// F-309: store-backed configs `(name, ref)` → hydrated to
+    /// `<cwd>/.lightr/configs/<name>` (0644). In the run's memo key.
+    #[serde(default)]
+    pub configs: Vec<(String, String)>,
+    /// F-309: optional healthcheck `(cmd, interval_s, retries)`. Post-result
+    /// probe surfaced via `ps`; NOT in the memo key.
+    #[serde(default)]
+    pub healthcheck: Option<(String, u64, u32)>,
 }
 
 fn lightr_home() -> PathBuf {
@@ -1021,6 +1197,9 @@ pub fn compose_up(c: &Compose, store: &Store, ttl_secs: u64) -> Result<ComposeHa
             env: s.env.clone(),
             eager: s.eager,
             run_dir: None,
+            secrets: s.secrets.clone(),
+            configs: s.configs.clone(),
+            healthcheck: s.healthcheck.clone(),
         })
         .collect();
 
@@ -1182,7 +1361,8 @@ fn prepare_service_cwd(svc: &ServiceSpec, store: &Store) -> Result<PathBuf> {
 /// Spawn a service as a detached lightr run.
 /// Writes the run dir into the stack spec's service entry.
 fn start_service_detached(stack_dir: &Path, svc: &ServiceSpec) -> Result<()> {
-    use lightr_run::{Mount, RunSpec};
+    use lightr_run::healthcheck::Healthcheck;
+    use lightr_run::{Mount, RunSpec, StoreFile};
 
     // We need a store both to hydrate the image ref and to call spawn_detached;
     // open the default store before choosing cwd.
@@ -1192,14 +1372,26 @@ fn start_service_detached(stack_dir: &Path, svc: &ServiceSpec) -> Result<()> {
     // cwd is a clean per-service dir, hydrated from the service's image_ref.
     let cwd = prepare_service_cwd(svc, &store)?;
 
+    // F-309: map compose secrets/configs `(name, ref)` → RunSpec StoreFiles.
+    // These are IN the run's memo key and are hydrated (fail-closed) on a miss.
+    let to_store_files = |pairs: &[(String, String)]| -> Vec<StoreFile> {
+        pairs
+            .iter()
+            .map(|(name, ref_name)| StoreFile {
+                name: name.clone(),
+                ref_name: ref_name.clone(),
+            })
+            .collect()
+    };
+
     let spec = RunSpec {
         cwd: cwd.clone(),
         inputs: Vec::new(),
         command: svc.command.clone(),
         env_keys: svc.env.iter().map(|(k, _)| k.clone()).collect(),
         mounts: Vec::new() as Vec<Mount>,
-        secrets: Vec::new(),
-        configs: Vec::new(),
+        secrets: to_store_files(&svc.secrets),
+        configs: to_store_files(&svc.configs),
     };
 
     // Set env vars before spawning
@@ -1207,7 +1399,17 @@ fn start_service_detached(stack_dir: &Path, svc: &ServiceSpec) -> Result<()> {
         std::env::set_var(k, v);
     }
 
-    let handle = lightr_run::spawn_detached(&spec, &store)?;
+    // F-309: a service healthcheck becomes the detached supervisor's probe.
+    let hc = svc
+        .healthcheck
+        .as_ref()
+        .map(|(cmd, interval_s, retries)| Healthcheck {
+            cmd: cmd.clone(),
+            interval_s: *interval_s,
+            retries: *retries,
+        });
+
+    let handle = lightr_run::spawn_detached_with_health(&spec, &store, hc.as_ref())?;
 
     // Record run dir in the stack spec
     let spec_path = stack_dir.join("spec.json");
@@ -1760,6 +1962,85 @@ services:
         assert_eq!(cmd, &["/bin/sh", "-c", "sleep 30"]);
     }
 
+    // F-309: secrets/configs lists + nested healthcheck map parse into the
+    // service spec.
+    #[test]
+    fn parse_compose_secrets_configs_healthcheck() {
+        let yaml = r#"
+services:
+  api:
+    image: apiimg
+    command: serve
+    secrets:
+      - db_password=secret/db-pass
+      - api_key=secret/api-key
+    configs:
+      - app_conf=config/app
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "localhost:8080/health"]
+      interval: 15s
+      retries: 5
+"#;
+        let c = parse_compose(yaml).unwrap();
+        assert_eq!(c.services.len(), 1);
+        let api = &c.services[0];
+        assert_eq!(api.image_ref, "apiimg");
+        assert_eq!(
+            api.secrets,
+            vec![
+                ("db_password".to_string(), "secret/db-pass".to_string()),
+                ("api_key".to_string(), "secret/api-key".to_string()),
+            ]
+        );
+        assert_eq!(
+            api.configs,
+            vec![("app_conf".to_string(), "config/app".to_string())]
+        );
+        let hc = api.healthcheck.as_ref().expect("healthcheck parsed");
+        assert_eq!(hc.0, "curl -fsS localhost:8080/health");
+        assert_eq!(hc.1, 15, "interval 15s ⇒ 15");
+        assert_eq!(hc.2, 5, "retries 5");
+    }
+
+    // F-309: a bare-string healthcheck test + bare-int interval also parse.
+    #[test]
+    fn parse_compose_healthcheck_string_form() {
+        let yaml = "services:\n  svc:\n    image: i\n    healthcheck:\n      cmd: pgrep myproc\n      interval: 30\n      retries: 2\n";
+        let c = parse_compose(yaml).unwrap();
+        let hc = c.services[0].healthcheck.as_ref().expect("hc");
+        assert_eq!(hc.0, "pgrep myproc");
+        assert_eq!(hc.1, 30);
+        assert_eq!(hc.2, 2);
+    }
+
+    // A healthcheck with no command (only interval) is dropped (meaningless).
+    #[test]
+    fn parse_compose_healthcheck_without_cmd_dropped() {
+        let yaml = "services:\n  svc:\n    image: i\n    healthcheck:\n      interval: 10s\n";
+        let c = parse_compose(yaml).unwrap();
+        assert!(
+            c.services[0].healthcheck.is_none(),
+            "healthcheck without a command must be dropped"
+        );
+    }
+
+    #[test]
+    fn parse_duration_secs_forms() {
+        assert_eq!(parse_duration_secs("30"), Some(30));
+        assert_eq!(parse_duration_secs("30s"), Some(30));
+        assert_eq!(parse_duration_secs("1m"), Some(60));
+        assert_eq!(parse_duration_secs("2m30s"), Some(150));
+        assert_eq!(parse_duration_secs("1h"), Some(3600));
+        assert_eq!(parse_duration_secs(""), None);
+        assert_eq!(parse_duration_secs("30x"), None);
+        assert_eq!(parse_duration_secs("abc"), None);
+        assert_eq!(
+            parse_duration_secs("10s5"),
+            None,
+            "trailing unit-less number"
+        );
+    }
+
     // ── compose lazy tests ──────────────────────────────────────────────────
 
     /// Test that compose_up binds a port and no service process runs until
@@ -1783,6 +2064,9 @@ services:
                     ports: vec![(port, port)],
                     env: Vec::new(),
                     eager: false,
+                    secrets: Vec::new(),
+                    configs: Vec::new(),
+                    healthcheck: None,
                 }],
             };
 
@@ -1837,6 +2121,9 @@ services:
             env: Vec::new(),
             eager: false,
             run_dir: None,
+            secrets: Vec::new(),
+            configs: Vec::new(),
+            healthcheck: None,
         };
 
         let cwd = prepare_service_cwd(&svc, &store).unwrap();
@@ -1864,6 +2151,9 @@ services:
             env: Vec::new(),
             eager: false,
             run_dir: None,
+            secrets: Vec::new(),
+            configs: Vec::new(),
+            healthcheck: None,
         };
 
         let cwd = prepare_service_cwd(&svc, &store).unwrap();
