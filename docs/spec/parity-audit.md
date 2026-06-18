@@ -89,7 +89,7 @@ The go-live hardening wave merged gate-green: **411 tests, 0 failures**, clippy
 | F-305 | compose lazy | ✅ | A24 (0 services until connect; down cleans). Services now **hydrate their `image_ref` into the run cwd** (closed the R4 temp-dir shortcut) |
 | F-306 | build step-memoized | ✅ | A22 (counter side-effect proves memo), A23 |
 | F-307 | docker CLI compat | ✅ | A25 (build/images/unsupported→2) |
-| F-308 | restart via OS supervisor | ⏳ | launchd/systemd unit-gen, future |
+| F-308 | restart via OS supervisor | ✅ | A308: `supervise install/uninstall/list` GENERATES a launchd plist (macOS) / systemd user unit (Linux) under `~/.lightr/units/` + prints the opt-in `launchctl bootstrap` / `systemctl --user enable --now` command — **no daemon of ours, never auto-loaded** (A4 invariant holds: install/list leave 0 resident processes, plist passes `plutil -lint`). `RestartPolicy::{No,Always,OnFailure{max},UnlessStopped}` (fail-closed parse). Windows 🟡 (honest `Unsupported`; Task Scheduler = future ring) |
 | F-309 | healthcheck/secrets/configs | ⏳ | run-spec features, future |
 
 ## Beyond (R4)
