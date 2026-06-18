@@ -74,7 +74,11 @@ public func lightr_vz_run(
     // cmdline; argv is ignored here (kept in the C ABI for forward-compat).
     _ = argc
     _ = argv
-    let cmdLine    = "console=hvc0"
+    // `ip=dhcp`: kernel-level DHCP autoconfig (CONFIG_IP_PNP_DHCP) brings the
+    // virtio-net interface up + leases an IP from the NAT attachment's DHCP server
+    // at boot — no userspace DHCP client needed in the guest. Harmless when no NIC
+    // is present. (WAVE-VZ networking.)
+    let cmdLine    = "console=hvc0 ip=dhcp"
 
     let bootLoader = VZLinuxBootLoader(kernelURL: kernelURL)
     bootLoader.initialRamdiskURL = initrdURL
@@ -155,6 +159,18 @@ public func lightr_vz_run(
         fileHandleForWriting:  consoleWrite
     )
 
+    // ── 5b. NAT network device (WAVE-VZ networking) ──────────────────────────
+    // A virtio-net NIC on a NAT attachment gives the guest a host-reachable IP on
+    // the macOS vmnet subnet — the basis for `-p` port publishing (host→guest
+    // forward). The kernel is built with CONFIG_VIRTIO_NET=y + CONFIG_IP_PNP_DHCP,
+    // so the guest can auto-configure. The MAC is pinned (locally-administered)
+    // so the host can discover the guest IP from the DHCP lease table by MAC.
+    let netDevice = VZVirtioNetworkDeviceConfiguration()
+    netDevice.attachment = VZNATNetworkDeviceAttachment()
+    if let mac = VZMACAddress(string: "0a:00:00:24:18:01") {
+        netDevice.macAddress = mac
+    }
+
     // ── 6. Assemble configuration ───────────────────────────────────────────
     let config = VZVirtualMachineConfiguration()
     config.bootLoader   = bootLoader
@@ -162,6 +178,7 @@ public func lightr_vz_run(
     config.memorySize   = memBytes
     config.serialPorts  = [consolePort]
     config.directorySharingDevices = storages
+    config.networkDevices = [netDevice]
 
     do {
         try config.validate()
