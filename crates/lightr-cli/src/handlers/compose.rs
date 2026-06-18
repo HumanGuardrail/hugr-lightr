@@ -164,6 +164,9 @@ mod tests {
     /// `compose up` with an empty services block ⇒ exit 0 (nothing to bind)
     #[test]
     fn compose_up_empty_services_exits_0() {
+        let _env = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().unwrap();
         std::env::set_var("LIGHTR_HOME", tmp.path());
         let f = tmp.path().join("compose.yml");
@@ -176,6 +179,9 @@ mod tests {
     /// `compose down` with no active stack ⇒ exit 1
     #[test]
     fn compose_down_no_stack_exits_1() {
+        let _env = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().unwrap();
         std::env::set_var("LIGHTR_HOME", tmp.path());
         let code = super::down(None);
@@ -186,6 +192,9 @@ mod tests {
     /// resolve_latest_stack: returns None when compose dir is absent
     #[test]
     fn resolve_latest_stack_absent_dir_is_none() {
+        let _env = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().unwrap();
         std::env::set_var("LIGHTR_HOME", tmp.path());
         let result = super::resolve_latest_stack();

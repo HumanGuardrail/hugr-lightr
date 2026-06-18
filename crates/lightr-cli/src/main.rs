@@ -5,6 +5,15 @@
 mod exit;
 mod handlers;
 
+/// Crate-shared serialization lock for in-process tests that mutate the
+/// process-global `LIGHTR_HOME` env var. Take it for the whole
+/// set_var → call → assert → remove_var critical section so parallel test
+/// threads can't race on the shared environment. Poison-tolerant.
+#[cfg(test)]
+pub(crate) mod test_lock {
+    pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 // ──────────────────────────────────────────────────────────────────────────────

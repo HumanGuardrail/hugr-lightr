@@ -158,6 +158,9 @@ mod tests {
 
     #[test]
     fn install_pack_succeeds_with_valid_pack() {
+        let _env = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().unwrap();
         let src_dir = tmp.path().join("src");
         fs::create_dir_all(&src_dir).unwrap();
@@ -186,6 +189,9 @@ mod tests {
     fn install_pack_rejects_invalid_initrd() {
         // Both files present but the initrd is NOT a valid cpio → verify_pack
         // rejects it loudly instead of installing a pack that fails at boot.
+        let _env = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().unwrap();
         let src_dir = tmp.path().join("src");
         fs::create_dir_all(&src_dir).unwrap();
