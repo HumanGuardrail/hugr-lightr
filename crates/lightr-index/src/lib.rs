@@ -964,42 +964,128 @@ mod tests {
         let home = TempDir::new().unwrap();
         let _env_guard = with_lightr_home(&home);
 
-        // We need a real Store. Since lightr-store is todo!() at this point,
-        // we use a mock store. Tests run post-merge so this validates structure.
-        // Per contract: tests authored fully; they will only run post-merge.
-        // Here we verify the function signatures and flow compile correctly.
-        // The actual runtime behavior is validated post-merge by the acceptance suite.
+        let store_root = home.path().join("store");
+        let store = Store::open(&store_root).unwrap();
 
-        // Verify that the public API accepts the right types (compile-time check).
-        let _ = |root: &Path, store: &Store, dest: &Path, name: &str| -> Result<()> {
-            let sr = snapshot(root, store, name)?;
-            let _ = sr.root;
-            let _ = sr.files;
-            let _ = sr.bytes_total;
-            let _ = sr.objects_new;
-            let hr = hydrate(dest, store, name)?;
-            let _ = hr.root;
-            let _ = hr.files;
-            let _ = hr.bytes_total;
-            let _ = hr.rung;
-            Ok(())
-        };
+        // Build source tree.
+        let src = TempDir::new().unwrap();
+        let sp = src.path();
+
+        // A regular file with known bytes.
+        let file_bytes = b"hello-roundtrip";
+        fs::write(sp.join("data.txt"), file_bytes).unwrap();
+
+        // A file with mode 0o755 (unix only).
+        #[cfg(unix)]
+        {
+            fs::write(sp.join("run.sh"), b"#!/bin/sh\necho hi\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            fs::set_permissions(sp.join("run.sh"), perms).unwrap();
+        }
+
+        // A symlink pointing at data.txt (unix only).
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("data.txt", sp.join("link.txt")).unwrap();
+        }
+
+        // An empty subdirectory.
+        fs::create_dir(sp.join("emptydir")).unwrap();
+
+        // Snapshot then hydrate into a fresh destination.
+        let sr = snapshot(sp, &store, "@t/rt").unwrap();
+        assert!(sr.files >= 1, "snapshot must record at least one file");
+
+        let dest = TempDir::new().unwrap();
+        let dp = dest.path();
+        let hr = hydrate(dp, &store, "@t/rt").unwrap();
+        assert_eq!(hr.root, sr.root, "hydrated root digest must match snapshot");
+
+        // File bytes must match.
+        let got = fs::read(dp.join("data.txt")).unwrap();
+        assert_eq!(got.as_slice(), file_bytes, "data.txt bytes must roundtrip");
+
+        // Mode must roundtrip (unix only).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dp.join("run.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o755, "run.sh mode must roundtrip as 0o755");
+        }
+
+        // Symlink target must roundtrip (unix only).
+        #[cfg(unix)]
+        {
+            let target = std::fs::read_link(dp.join("link.txt")).unwrap();
+            assert_eq!(
+                target.to_str().unwrap(),
+                "data.txt",
+                "symlink target must roundtrip"
+            );
+        }
+
+        // Empty subdir must exist and be a directory.
+        let emptydir = dp.join("emptydir");
+        assert!(emptydir.exists(), "emptydir must exist after hydrate");
+        assert!(emptydir.is_dir(), "emptydir must be a directory after hydrate");
     }
 
     // -----------------------------------------------------------------------
     // 5. status: clean / dirty (add/remove/change) / unknown-ref
     // -----------------------------------------------------------------------
     #[test]
-    fn test_status_api_signatures() {
-        // Compile-time verification of status API.
-        let _ = |root: &Path, store: &Store, name: &str| -> Result<()> {
-            let sr = status(root, store, name)?;
-            let _ = sr.clean;
-            let _ = &sr.added;
-            let _ = &sr.removed;
-            let _ = &sr.changed;
-            Ok(())
-        };
+    fn test_status_clean_then_dirty() {
+        let home = TempDir::new().unwrap();
+        let _env_guard = with_lightr_home(&home);
+
+        let store_root = home.path().join("store");
+        let store = Store::open(&store_root).unwrap();
+
+        // Build an initial working tree with two files.
+        let root = TempDir::new().unwrap();
+        let rp = root.path();
+        fs::write(rp.join("keep.txt"), b"keep-content").unwrap();
+        fs::write(rp.join("remove.txt"), b"will-be-removed").unwrap();
+        fs::write(rp.join("change.txt"), b"original-content").unwrap();
+
+        // Snapshot the tree.
+        snapshot(rp, &store, "@t/status").unwrap();
+
+        // Status immediately after snapshot — must be clean.
+        let sr = status(rp, &store, "@t/status").unwrap();
+        assert!(sr.clean, "status must be clean right after snapshot");
+        assert!(sr.added.is_empty(), "added must be empty: {:?}", sr.added);
+        assert!(sr.removed.is_empty(), "removed must be empty: {:?}", sr.removed);
+        assert!(sr.changed.is_empty(), "changed must be empty: {:?}", sr.changed);
+
+        // Mutate the working tree: add, remove, modify.
+        fs::write(rp.join("new.txt"), b"brand-new").unwrap();
+        fs::remove_file(rp.join("remove.txt")).unwrap();
+        fs::write(rp.join("change.txt"), b"mutated-content").unwrap();
+
+        // Status after mutations — must be dirty.
+        let sr2 = status(rp, &store, "@t/status").unwrap();
+        assert!(!sr2.clean, "status must be dirty after mutations");
+        assert!(
+            sr2.added.contains(&"new.txt".to_string()),
+            "new.txt must appear in added: {:?}",
+            sr2.added
+        );
+        assert!(
+            sr2.removed.contains(&"remove.txt".to_string()),
+            "remove.txt must appear in removed: {:?}",
+            sr2.removed
+        );
+        assert!(
+            sr2.changed.contains(&"change.txt".to_string()),
+            "change.txt must appear in changed: {:?}",
+            sr2.changed
+        );
     }
 
     // -----------------------------------------------------------------------
