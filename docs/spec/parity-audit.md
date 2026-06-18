@@ -2,11 +2,43 @@
 
 - **Status:** the tense-law ledger. Every feature-tree F-id maps to its real
   status with the acceptance test that proves it or the honest reason it
-  doesn't. Updated 2026-06-12 after the R1→R4 mandate. No public claim
-  outside what a ✅ row's test/bench backs.
+  doesn't. Updated 2026-06-17 after the go-live hardening wave (see below);
+  prior baseline 2026-06-12 (R1→R4 mandate). No public claim outside what a
+  ✅ row's test/bench backs.
 - Legend: ✅ done + tested · 🟡 mechanism shipped, capability gated on
   hardware/spike (honest probe, not silent) · ⏳ deferred to a named future
   ring · ➖ doc/process item.
+
+## Go-live status (2026-06-17)
+
+The go-live hardening wave merged gate-green: **411 tests, 0 failures**, clippy
+`-D` clean (default + `--features vz`), fmt clean. Three honest tiers:
+
+- **DONE (validated + tested):** the entire Stage-1 local product — store,
+  index, all R0 verbs, run-control, gc, time-axis, OCI import (sha256-verified),
+  build (memoized), lazy compose, docker compat, the full agent surface,
+  schemas. The **vz engine is runtime-validated end-to-end on Intel x86_64**
+  (F-205/F-206). F-103 view **materialization ships as CoW hydrate** (real +
+  tested). This wave added: per-crate crates.io publish metadata (11 crates +
+  workspace), CLI polish (`completions`/`man`/`--version` git-sha+build-date,
+  help examples + tests), compose services that **hydrate** their `image_ref`
+  into the run cwd (closed the R4 temp-dir shortcut), and 2 vacuous compile-only
+  index tests upgraded to real snapshot/hydrate + status roundtrips.
+- **PRESS-GO (owner / hardware-gated — NOT validated):** crates.io publish is
+  owner-gated (`G-PUBLISH`, workspace `publish = false`); naming is CLEARED
+  (`lightr` + `hugr-lightr` free) but brew formula + install.sh carry
+  post-release placeholders; the 5-target CI matrix + macOS signing wait on
+  owner secrets. Runtime validation of **arm64 vz boot**, **Windows wsl**, and
+  **Linux ns** is hardware-gated (owner/borrowed HW or CI) — code-complete with
+  recipes/runbooks, none claimed validated. The publish runbook is
+  `docs/RELEASE.md`.
+- **STAGED (post-GA per whitepaper roadmap — not go-live blockers):** fc engine,
+  cross-tenant dedup, CoreLink Stage-2 sync, LAN mesh, full networking
+  (DNS/VPN), resource limits (needs ns/vz runtime), registry push, Rosetta,
+  agent profiles, deep-memo nitro shim, healthcheck/secrets, restart-via-OS
+  supervisor. The O(1) view backends (composefs/NFS-loopback/projfs) are a
+  STAGED **perf optimization** (ADR-0013 planned spike, honest + unwired) — not
+  a correctness gap.
 
 ## Store & index (R0)
 | F | Feature | Status | Evidence |
@@ -26,7 +58,7 @@
 |---|---|---|---|
 | F-101 | stat-index | ✅ | lightr-index units; A5 |
 | F-102 | snapshot ≤budget warm | ✅ | bench B5b (233 ms@2k, machine-class) |
-| F-103 | hydrate CoW (R0) / O(1) view (R2) | ✅ R0 / 🟡 view | A1; bench B3′. **Views: `lightr-views` crate — ViewPlan + Solidifier pure logic host-tested; composefs(Linux)/NFS-loopback(macOS) backends compile-only (VIEW-PATH), runtime = spike S1/S3 on a target box** |
+| F-103 | hydrate CoW (R0) / O(1) view (R2) | ✅ R0 / ⏳ O(1) backend | A1; bench B3′. **Shipped materialization = CoW hydrate (✅ real + tested)** via `lightr_index`. `lightr-views` crate: ViewPlan + Solidifier pure logic host-tested; O(1) backends (composefs/NFS-loopback/projfs) reframed HONEST — return `ErrorKind::Unsupported` ("planned spike per ADR-0013; shipped runtime materializes via CoW hydrate"). Verified **NOT wired into the run path** (no active stub). O(1) is a perf optimization (ADR-0013 spike), not a correctness gap |
 | F-104 | status | ✅ | A5; bench B6 |
 | F-105 | run memoized | ✅ | A2, A3 |
 | F-106 | memo replay ≤budget | ✅ | bench B4 |
@@ -54,7 +86,7 @@
 | F-302 | registry push/pull | 🟡 | pull ✅ **hardened** (private-registry auth via ~/.docker/config.json, retry/backoff on 429/5xx, streaming blobs, typed HTTP status, multi-arch — prod phase); push ⏳ (Stage 2) |
 | F-303 | volumes/binds (--mount) | ✅ | A9c grammar; mount unit |
 | F-304 | networking (DNS/VPN/-p) | 🟡 | compose port-binding (A24); full DNS/VPN parity = vz networking, future |
-| F-305 | compose lazy | ✅ | A24 (0 services until connect; down cleans) |
+| F-305 | compose lazy | ✅ | A24 (0 services until connect; down cleans). Services now **hydrate their `image_ref` into the run cwd** (closed the R4 temp-dir shortcut) |
 | F-306 | build step-memoized | ✅ | A22 (counter side-effect proves memo), A23 |
 | F-307 | docker CLI compat | ✅ | A25 (build/images/unsupported→2) |
 | F-308 | restart via OS supervisor | ⏳ | launchd/systemd unit-gen, future |
@@ -84,10 +116,10 @@
 ## Product & distribution
 | F | Feature | Status | Evidence |
 |---|---|---|---|
-| F-601 | single binary ≤10 MB | ✅ | release 1.9 MB (bench B7) |
+| F-601 | single binary ≤10 MB | ✅ | release 1.9 MB (bench B7). **CLI polish:** `lightr completions <shell>`, `lightr man`, `--version` with git-sha+build-date, top-level help examples (+ tests) |
 | F-602 | `bench --vs-docker` | ✅ | bench cmd; B1–B11 |
 | F-603 | microwave floor (1 core/512 MB/POSIX) | 🟡 | copy-rung fallback coded; not yet measured on constrained HW |
-| F-604 | brew/curl/gh-releases signed | 🟡 | **release pipeline = 5-target matrix** (`.github/workflows/release.yml`: macOS arm64+x86_64, Linux x86_64+aarch64 [cross-linked, CC+linker], Windows x86_64 [.zip via pwsh] → SHA256SUMS + GitHub Release; macOS signing gated behind owner secrets, applies the vz entitlement, unsigned clearly labeled); name verified FREE (crate `hugr-lightr`, binary `lightr`); license Apache-2.0; publish ⏳ on GTM timing |
+| F-604 | brew/curl/gh-releases signed | 🟡 | **release pipeline = 5-target matrix** (`.github/workflows/release.yml`: macOS arm64+x86_64, Linux x86_64+aarch64 [cross-linked, CC+linker], Windows x86_64 [.zip via pwsh] → SHA256SUMS + GitHub Release; macOS signing gated behind owner secrets APPLE_CERT/APPLE_CERT_PASSWORD/AC_API_KEY/AC_API_KEY_ID, applies the vz entitlement, unsigned clearly labeled); name verified FREE (crate `hugr-lightr`, binary `lightr`); license Apache-2.0. **crates.io publish metadata READY** — per-crate `description`/`keywords`/`categories` on all 11 crates + `workspace.package` `repository`; `lightr-acceptance` + `lightr-init` are `publish=false`. PUBLISH owner-gated (`G-PUBLISH`, workspace `publish=false`); runbook `docs/RELEASE.md`. brew formula + install.sh carry post-release placeholders |
 | F-605 | zero telemetry | ✅ | A6 + no network in core (ADR-0007) |
 
 ## Operational (production hardening phase, 2026-06-12)
@@ -107,14 +139,15 @@ latter is marked per platform, never assumed.
 
 | Platform | core (CAS/run/build) | isolation | build proof | runtime validated? |
 |---|---|---|---|---|
-| macOS Intel x86_64 | ✅ host 408/0 | vz (x86_64 guest) | host build+test green | vz **compiles+links here**; boot pending x86_64 kernel (S5 here) |
+| macOS Intel x86_64 | ✅ host 411/0 | vz (x86_64 guest) | host build+test green | vz **runtime-validated end-to-end** (F-205/F-206, Intel i7-9750H) |
 | macOS Apple Silicon | ✅ same code | vz (arm64 guest) | darwin cross in CI | 🟡 runbook `spikes/s5-vz-boot-arm64/` |
 | Linux x86_64 | ✅ same code | ns (namespaces) | CI gate (native ubuntu) | 🟡 CI / target box |
 | Linux aarch64 | ✅ same code | ns | CI cross-check (CC+linker) | 🟡 CI / target box |
 | Windows x86_64 | 🟡 code-complete | wsl (ns in WSL2) | **cross-check x86_64-pc-windows-gnu: 0 errors (lib+bins+all-targets)** | 🟡 runbook (Windows box) |
 
-- **Verified on this Intel Mac:** host 408/0 + clippy -D + fmt clean; `--features
-  vz` compiles+links; full Windows cross-check (lib+bins + all-targets) 0 errors.
+- **Verified on this Intel Mac:** host 411/0 + clippy -D (default + `--features
+  vz`) + fmt clean; `--features vz` compiles+links **and boots end-to-end**
+  (F-205/F-206); full Windows cross-check (lib+bins + all-targets) 0 errors.
 - **Honest-gated (WIN-PATH / runbook):** Windows runtime (named-pipe supervisor,
   WSL2 exec, ReFS block-clone), arm64 vz boot, Linux ns runtime — each has a
   one-command runbook or a CI job; none is claimed validated.
@@ -122,13 +155,18 @@ latter is marked per platform, never assumed.
   runtime path is `// WIN-PATH` with an honest probe/error + a correct fallback.
 
 ## Summary
-- **✅ done + tested:** the entire local product — store, index, all R0 verbs,
-  run-control, gc, time-axis, OCI import (sha256-verified), build
-  (memoized), lazy compose, docker compat, the full agent surface, schemas.
-- **🟡 honest-gated:** ns/vz engines (probe-truthful; vz boot needs Apple
-  Silicon + spike S5), pull-push (push future), deep-memo shim, microwave
-  floor measurement.
-- **⏳ future rings:** views (S1/S3), fc/cloud, Rosetta, mesh, Stage-2 sync,
+- **✅ done + tested (411 tests):** the entire local product — store, index,
+  all R0 verbs, run-control, gc, time-axis, OCI import (sha256-verified), build
+  (memoized), lazy compose (services hydrate `image_ref`), docker compat, the
+  full agent surface, schemas, CLI polish (completions/man/--version). **F-103
+  view materialization ships as CoW hydrate** (real + tested). **vz engine
+  runtime-validated on Intel x86_64** (F-205/F-206).
+- **🟡 honest-gated:** ns/wsl engines + arm64 vz boot (probe-truthful;
+  HW-gated runbooks/CI — none claimed validated), pull-push (push future),
+  deep-memo shim, microwave floor measurement, distribution (publish
+  owner-gated `G-PUBLISH`, metadata + naming ready — `docs/RELEASE.md`).
+- **⏳ future rings:** O(1) view backends (ADR-0013 spike — perf optimization,
+  honest `Unsupported`, unwired), fc/cloud, Rosetta, mesh, Stage-2 sync,
   restart-via-OS, healthchecks. Each is a named ADR/ring, none claimed.
 - Nothing in the whitepaper's record table is published beyond what a ✅
   bench row measured on the stated hardware.

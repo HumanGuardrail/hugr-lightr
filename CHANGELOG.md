@@ -1,5 +1,45 @@
 # Changelog — hugr-lightr
 
+## [Unreleased] — Go-live hardening wave (2026-06-17)
+
+Go-live readiness wave, all gate-green: **411 tests, 0 failures**, clippy `-D`
+clean (default + `--features vz`), fmt clean. Eight merged changes. Publish stays
+owner-gated (`G-PUBLISH`); see the new `docs/RELEASE.md` for the runbook.
+
+**Distribution:**
+- **crates.io publish metadata** — per-crate `description`, `keywords`,
+  `categories` on all 11 crates + `repository` on `workspace.package`.
+  crates.io-ready; `lightr-acceptance` and `lightr-init` stay `publish=false`.
+  Naming CLEARED (`lightr` + `hugr-lightr` free). PUBLISH still owner-gated
+  (workspace `publish=false`).
+
+**CLI:**
+- **CLI polish** — `lightr completions <shell>`, `lightr man` (roff page),
+  `--version` carrying git-sha + build-date, and top-level help examples (+ tests).
+
+**Docs / ADR:**
+- **ADR-0002 reconciled** — narrowed by ADR-0011; clw direct path-dep deferred
+  to Stage-2. New `docs/owner-ratify.md` lists the 13 ADRs pending owner
+  ratification.
+- **Windows WSL2 runbook** — `spikes/wsl-run/run-wsl.sh` (+README) for the wsl
+  engine (press-go, Windows hardware).
+
+**Build:**
+- **No-docker build path** — `scripts/build-init.sh` (zig / cargo-zigbuild, no
+  docker) + `docs/build.md` + no-docker notes in the kernel scripts.
+
+**Correctness / compose:**
+- **compose hydrate** — services now **hydrate their `image_ref` into the run
+  cwd**, closing the "R4 temp-dir" shortcut.
+
+**Honesty / tests:**
+- **views O(1) backends reframed HONEST** — composefs/NFS-loopback/projfs return
+  `ErrorKind::Unsupported` ("planned spike per ADR-0013; shipped runtime
+  materializes via CoW hydrate"). Verified **NOT wired into the run path** (no
+  active stub) — a perf optimization, not a correctness gap.
+- **vacuous tests fixed** — 2 compile-only `lightr-index` tests upgraded to real
+  snapshot/hydrate + status roundtrips.
+
 ## [Unreleased] — Omni cross-platform wave (2026-06-12)
 
 One product, every desktop — macOS (Intel + Apple Silicon), Linux (x86_64 +
