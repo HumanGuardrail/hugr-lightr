@@ -36,6 +36,12 @@ import Virtualization
 ///               virtiofs at guest tag "rootfs".
 ///   - store:   NUL-terminated path to the read-only store directory to share
 ///               at guest tag "store".  Pass "" to skip the store share.
+///   - memoryMb: F-203 memory cap in MiB.  `0` = use the baseline default.
+///               A non-zero value below the VZ memory floor is a config
+///               failure (return -1), NOT a silent clamp — honest boundary.
+///   - cpuCount: F-203 vcpu count.  `0` = use the baseline default.  Clamped
+///               to the VZ allowed range; a non-zero value above the maximum
+///               is a config failure (return -1).
 ///   - argc:    Number of arguments in argv.
 ///   - argv:    C argv array (argv[0] = program, …).
 ///
@@ -43,12 +49,14 @@ import Virtualization
 ///            `-1` = configuration / boot failure.  NEVER the guest exit code.
 @_cdecl("lightr_vz_run")
 public func lightr_vz_run(
-    kernel:  UnsafePointer<CChar>,
-    initrd:  UnsafePointer<CChar>,
-    rootfs:  UnsafePointer<CChar>,
-    store:   UnsafePointer<CChar>,
-    argc:    Int32,
-    argv:    UnsafePointer<UnsafePointer<CChar>?>
+    kernel:   UnsafePointer<CChar>,
+    initrd:   UnsafePointer<CChar>,
+    rootfs:   UnsafePointer<CChar>,
+    store:    UnsafePointer<CChar>,
+    memoryMb: UInt64,
+    cpuCount: UInt64,
+    argc:     Int32,
+    argv:     UnsafePointer<UnsafePointer<CChar>?>
 ) -> Int32 {
 
     // ── 1. Paths ────────────────────────────────────────────────────────────
@@ -72,9 +80,39 @@ public func lightr_vz_run(
     bootLoader.initialRamdiskURL = initrdURL
     bootLoader.commandLine       = cmdLine
 
-    // ── 3. CPU + memory ─────────────────────────────────────────────────────
-    let cpuCount = max(1, VZVirtualMachineConfiguration.maximumAllowedCPUCount / 4)
-    let memBytes = UInt64(256) * 1024 * 1024  // 256 MB baseline (ADR-0014)
+    // ── 3. CPU + memory (F-203 resource caps) ───────────────────────────────
+    // memoryMb / cpuCount == 0 ⇒ use the baseline default; a non-zero value is
+    // the caller's cap. Out-of-range requests are an honest config failure
+    // (return -1) rather than a silent clamp — the Rust host surfaces that as a
+    // real error (build-spec-parity.md §2.4).
+    let maxCPU = VZVirtualMachineConfiguration.maximumAllowedCPUCount
+    let minCPU = VZVirtualMachineConfiguration.minimumAllowedCPUCount
+    let cpuCountResolved: Int
+    if cpuCount == 0 {
+        cpuCountResolved = max(minCPU, min(maxCPU, maxCPU / 4))
+    } else {
+        let requested = Int(cpuCount)
+        if requested > maxCPU {
+            fputs("lightr-vz-shim: requested cpuCount \(requested) exceeds VZ maximum \(maxCPU)\n", stderr)
+            return -1
+        }
+        cpuCountResolved = max(minCPU, requested)
+    }
+
+    let minMem = VZVirtualMachineConfiguration.minimumAllowedMemorySize
+    let maxMem = VZVirtualMachineConfiguration.maximumAllowedMemorySize
+    let memBytes: UInt64
+    if memoryMb == 0 {
+        memBytes = max(minMem, UInt64(256) * 1024 * 1024)  // 256 MB baseline (ADR-0014)
+    } else {
+        let requested = memoryMb * 1024 * 1024
+        if requested < minMem || requested > maxMem {
+            fputs("lightr-vz-shim: requested memory \(requested) bytes outside VZ floor \(minMem)..\(maxMem)\n", stderr)
+            return -1
+        }
+        memBytes = requested
+    }
+    let cpuCount = cpuCountResolved
 
     // ── 4. Virtiofs shares ──────────────────────────────────────────────────
     var storages: [VZDirectorySharingDeviceConfiguration] = []

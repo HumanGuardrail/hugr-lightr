@@ -626,11 +626,18 @@ mod vz_impl {
         /// boot/config failure. The guest's REAL exit code arrives via the file
         /// channel on the shared rootfs (`EXIT_FILE`), read back by `run` below —
         /// never from this return value. The shim never fabricates a `0`.
+        ///
+        /// F-203: `memory_mb`/`cpu_count` carry the resource caps (build-spec-
+        /// parity.md §2.4). `0` means "use the shim default" (unlimited). When
+        /// `memory_mb` is below the VZ memory floor the shim returns a config
+        /// failure (< 0) rather than silently clamping — an honest boundary.
         fn lightr_vz_run(
             kernel: *const libc::c_char,
             initrd: *const libc::c_char,
             rootfs: *const libc::c_char,
             store: *const libc::c_char,
+            memory_mb: u64,
+            cpu_count: u64,
             argc: libc::c_int,
             argv: *const *const libc::c_char,
         ) -> libc::c_int;
@@ -706,18 +713,23 @@ mod vz_impl {
             argv_ptrs.push(std::ptr::null());
 
             // ── 2. Boot the VM and block until it stops (or fails) ──────────
-            // F-203 SEAM (build-spec-parity.md §A0.4): WP-A1 extends the
-            // `lightr_vz_run` FFI with `memory_mb`/`cpu_count` derived from
-            // `spec.limits` (cpus→ceil(millis/1000) vcpus min 1; memory→bytes
-            // min the VZ floor, else honest error) and sets them on the
-            // VZVirtualMachineConfiguration. A0 only threads the value here.
-            let _vz_limits = spec.limits;
+            // F-203 (build-spec-parity.md §2.4): derive the VM caps from
+            // `spec.limits` and hand them to the shim, which sets
+            // `VZVirtualMachineConfiguration.memorySizeInBytes`/`.cpuCount`.
+            //   cpus → ceil(millis/1000) vcpus, min 1 (a fractional core rounds
+            //          UP to a whole vcpu — VZ has no sub-core granularity).
+            //   memory → MB, rounded UP. Below the VZ floor the shim returns a
+            //          config failure (< 0) → the honest `Err` below.
+            //   `0` for either field means "use the shim default" (unlimited).
+            let (memory_mb, cpu_count) = vz_caps(&spec.limits);
             let vm_status = unsafe {
                 lightr_vz_run(
                     kernel_c.as_ptr(),
                     initrd_c.as_ptr(),
                     rootfs_c.as_ptr(),
                     store_c.as_ptr(),
+                    memory_mb,
+                    cpu_count,
                     argv_ptrs.len() as libc::c_int - 1, // exclude null sentinel
                     argv_ptrs.as_ptr(),
                 )
@@ -751,6 +763,67 @@ mod vz_impl {
     fn path_to_cstr(p: &std::path::Path) -> Result<CString> {
         CString::new(p.as_os_str().as_encoded_bytes())
             .map_err(|_| LightrError::InvalidRef(format!("invalid path: {}", p.display())))
+    }
+
+    /// Derive `(memory_mb, cpu_count)` for the vz shim from the resource caps.
+    /// `0` for a field means "use the shim default" (unlimited / VZ baseline).
+    ///
+    /// * cpu — `ceil(millis / 1000)`, min 1 vcpu (VZ has no sub-core grain).
+    /// * mem — `ceil(bytes / MiB)`. The VZ memory floor is enforced by the shim
+    ///   (config failure rather than a silent clamp).
+    fn vz_caps(limits: &lightr_core::ResourceLimits) -> (u64, u64) {
+        let cpu_count = match limits.cpu_millis {
+            None => 0,
+            Some(millis) => millis.div_ceil(1000).max(1),
+        };
+        let memory_mb = match limits.memory_bytes {
+            None => 0,
+            Some(bytes) => bytes.div_ceil(1024 * 1024).max(1),
+        };
+        (memory_mb, cpu_count)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::vz_caps;
+        use lightr_core::ResourceLimits;
+
+        #[test]
+        fn unlimited_yields_zero_defaults() {
+            assert_eq!(vz_caps(&ResourceLimits::default()), (0, 0));
+        }
+
+        #[test]
+        fn cpu_rounds_up_to_whole_vcpus_min_one() {
+            // 0.5 core → 1 vcpu; 1.5 → 2; 2.0 → 2; 2001m → 3.
+            let c = |m| {
+                vz_caps(&ResourceLimits {
+                    memory_bytes: None,
+                    cpu_millis: Some(m),
+                })
+                .1
+            };
+            assert_eq!(c(500), 1);
+            assert_eq!(c(1500), 2);
+            assert_eq!(c(2000), 2);
+            assert_eq!(c(2001), 3);
+            assert_eq!(c(1), 1);
+        }
+
+        #[test]
+        fn memory_rounds_up_to_whole_mib() {
+            let m = |b| {
+                vz_caps(&ResourceLimits {
+                    memory_bytes: Some(b),
+                    cpu_millis: None,
+                })
+                .0
+            };
+            assert_eq!(m(1024 * 1024), 1);
+            assert_eq!(m(1024 * 1024 + 1), 2);
+            assert_eq!(m(512 * 1024 * 1024), 512);
+            assert_eq!(m(1), 1);
+        }
     }
 }
 
