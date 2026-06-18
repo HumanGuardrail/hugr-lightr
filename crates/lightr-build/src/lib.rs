@@ -1158,14 +1158,38 @@ pub fn compose_supervise(stack_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Prepare a clean per-service run directory and, if the service declares an
+/// `image_ref`, hydrate that ref's filesystem into it (CoW) via
+/// `lightr_index::hydrate` — mirroring the rootfs hydrate done by `lightr run`.
+/// Command-only services (empty `image_ref`) get a clean empty dir.
+/// Fail-closed: a hydrate error propagates and the service is not started.
+fn prepare_service_cwd(svc: &ServiceSpec, store: &Store) -> Result<PathBuf> {
+    let cwd = std::env::temp_dir().join(format!("lightr-svc-{}", svc.name));
+    // Start from a clean dir so a stale hydrate from a prior run can't leak in.
+    if cwd.exists() {
+        std::fs::remove_dir_all(&cwd).map_err(LightrError::Io)?;
+    }
+    std::fs::create_dir_all(&cwd).map_err(LightrError::Io)?;
+
+    if !svc.image_ref.is_empty() {
+        lightr_index::hydrate(&cwd, store, &svc.image_ref)?;
+    }
+
+    Ok(cwd)
+}
+
 /// Spawn a service as a detached lightr run.
 /// Writes the run dir into the stack spec's service entry.
 fn start_service_detached(stack_dir: &Path, svc: &ServiceSpec) -> Result<()> {
     use lightr_run::{Mount, RunSpec};
 
-    // Determine cwd: use a temp dir for now; in R4 we'll hydrate the image ref
-    let cwd = std::env::temp_dir().join(format!("lightr-svc-{}", svc.name));
-    std::fs::create_dir_all(&cwd).map_err(LightrError::Io)?;
+    // We need a store both to hydrate the image ref and to call spawn_detached;
+    // open the default store before choosing cwd.
+    let store_root = lightr_home().join("store");
+    let store = Store::open(&store_root)?;
+
+    // cwd is a clean per-service dir, hydrated from the service's image_ref.
+    let cwd = prepare_service_cwd(svc, &store)?;
 
     let spec = RunSpec {
         cwd: cwd.clone(),
@@ -1174,10 +1198,6 @@ fn start_service_detached(stack_dir: &Path, svc: &ServiceSpec) -> Result<()> {
         env_keys: svc.env.iter().map(|(k, _)| k.clone()).collect(),
         mounts: Vec::new() as Vec<Mount>,
     };
-
-    // We need a store to call spawn_detached; open default store
-    let store_root = lightr_home().join("store");
-    let store = Store::open(&store_root)?;
 
     // Set env vars before spawning
     for (k, v) in &svc.env {
@@ -1792,6 +1812,66 @@ services:
                 "stack dir must be removed by compose_down"
             );
         });
+    }
+
+    /// prepare_service_cwd hydrates the service's image_ref into a clean cwd,
+    /// so a known file from the snapshotted ref is present before the run.
+    #[test]
+    fn prepare_service_cwd_hydrates_image_ref() {
+        // Snapshot a tiny dir as a ref into a test store.
+        let src = TempDir::new().unwrap();
+        std::fs::write(src.path().join("marker.txt"), b"from-image").unwrap();
+
+        let store_tmp = TempDir::new().unwrap();
+        let store = Store::open(store_tmp.path()).unwrap();
+        lightr_index::snapshot(src.path(), &store, "svc-img").unwrap();
+
+        let svc = ServiceSpec {
+            name: "hydrate-me".to_string(),
+            image_ref: "svc-img".to_string(),
+            command: vec!["/bin/true".to_string()],
+            ports: Vec::new(),
+            env: Vec::new(),
+            eager: false,
+            run_dir: None,
+        };
+
+        let cwd = prepare_service_cwd(&svc, &store).unwrap();
+        let marker = cwd.join("marker.txt");
+        assert!(
+            marker.exists(),
+            "image_ref file must be hydrated into service cwd"
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), b"from-image");
+
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// An empty image_ref (command-only service) yields a clean empty cwd.
+    #[test]
+    fn prepare_service_cwd_empty_ref_is_clean() {
+        let store_tmp = TempDir::new().unwrap();
+        let store = Store::open(store_tmp.path()).unwrap();
+
+        let svc = ServiceSpec {
+            name: "cmd-only".to_string(),
+            image_ref: String::new(),
+            command: vec!["/bin/true".to_string()],
+            ports: Vec::new(),
+            env: Vec::new(),
+            eager: false,
+            run_dir: None,
+        };
+
+        let cwd = prepare_service_cwd(&svc, &store).unwrap();
+        assert!(cwd.is_dir(), "command-only service still gets a cwd");
+        assert_eq!(
+            std::fs::read_dir(&cwd).unwrap().count(),
+            0,
+            "command-only service cwd must be empty"
+        );
+
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     /// compose_down on a non-existent dir returns Ok (idempotent)
