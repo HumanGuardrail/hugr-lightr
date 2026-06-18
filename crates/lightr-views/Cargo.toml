@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "O(1) filesystem view materialization from CAS for the Lightr runtime."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["cas", "content-addressed", "workspace", "filesystem", "daemonless"]
+categories = ["filesystem", "development-tools"]
 
 [dependencies]
 lightr-core = { workspace = true }

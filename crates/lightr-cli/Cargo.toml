@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Command-line interface for the Lightr daemonless container runtime."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["container", "runtime", "daemonless", "oci", "workspace"]
+categories = ["command-line-utilities", "virtualization"]
 
 [[bin]]
 name = "lightr"

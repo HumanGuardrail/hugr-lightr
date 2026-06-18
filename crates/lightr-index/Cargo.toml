@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Stat-index, directory walk, and snapshot/hydrate/status ops for Lightr."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["workspace", "cas", "content-addressed", "build-cache", "daemonless"]
+categories = ["development-tools", "filesystem"]
 
 [dependencies]
 lightr-core = { workspace = true }

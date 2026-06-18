@@ -3,7 +3,13 @@ name = "lightr-init"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = false # internal: not published
+description = "Linux guest PID 1 for Lightr microVM workloads (vz boot, host-portable logic)."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["container", "runtime", "microvm", "sandbox", "virtualization"]
+categories = ["virtualization", "development-tools"]
 
 # The guest PID1 binary. The LIBRARY compiles + tests on any host (logic
 # behind seams); the BINARY's real syscalls are cfg(target_os="linux").
