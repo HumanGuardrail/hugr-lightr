@@ -1351,7 +1351,12 @@ fn prepare_service_cwd(svc: &ServiceSpec, store: &Store) -> Result<PathBuf> {
     }
     std::fs::create_dir_all(&cwd).map_err(LightrError::Io)?;
 
-    if !svc.image_ref.is_empty() {
+    // "scratch" = the empty base image (Docker convention) — an empty tree, not a
+    // store ref. Mirror the Dockerfile `FROM scratch` path (Instr::From above):
+    // skip hydration so the service runs in a clean cwd. Hydrating "scratch" as a
+    // ref fails RefNotFound and the service never starts — a latent bug since the
+    // compose-hydrate change, caught by a24_compose_lazy once the bin was rebuilt.
+    if !svc.image_ref.is_empty() && svc.image_ref != "scratch" {
         lightr_index::hydrate(&cwd, store, &svc.image_ref)?;
     }
 
