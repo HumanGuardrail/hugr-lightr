@@ -10,6 +10,11 @@ use std::path::PathBuf;
 // Per-feature seam modules (build-spec-parity.md §1). A0 wires the call sites
 // to honest stubs in these files; A1/A3 fill the bodies.
 pub mod limits;
+// F-308 (build-spec-parity.md §3): PURE OS-supervisor unit-file templates +
+// RestartPolicy. No I/O lives here; the install/uninstall/list flow is in
+// lightr-cli::handlers::supervise. We ship NO daemon — we generate a unit and
+// tell the user the opt-in command.
+pub mod restart;
 pub mod secrets;
 
 pub struct RunSpec {
