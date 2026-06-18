@@ -259,3 +259,24 @@ corrected. Kernel recipe formalized as `scripts/build-kernel-x86.sh` (bzImage;
 virtio-pci/console/fs =y). Gate: clippy `-D` clean (default + vz), host tests
 green, the 2 vz invariant source-tests still pin "no fabricated 0". F-205 + F-206
 → ✅ in parity-audit.
+
+## 2026-06-17 — ADR-0002 reconciliation + ratification checklist
+
+Doc-coherence pass for go-live (docs-only; no code touched).
+
+**ADR-0002 reconciled.** Its original Decision ("v0.1 consumes clw crates via
+Cargo path-dependencies") is not v0.1 reality and is superseded-in-part by
+ADR-0011: the perf rework removed clw from the hot path, so the path-dep is
+narrowed to the Stage-2 bridge crates (`lightr-wire`, `lightr-oci`) and the
+**clw direct path-dependency is deferred to Stage-2**. The v0.1 seam is the
+**wire-bridge** at the CoreLink + OCI border; the v0.1 code intentionally
+carries **no clw path-deps**. Applied as a `## Update 2026-06-17 —
+reconciliation` section in `docs/adr/0002-clw-seam.md` (original decision text
+preserved above it); status line is now
+`Accepted — narrowed by ADR-0011 (clw direct path-dep deferred to Stage-2)`.
+
+**Ratification checklist created** at `docs/owner-ratify.md`: the 13 ADRs
+Accepted under the 2026-06-11 overnight mandate (still "subject to morning
+review") are listed as unchecked boxes for explicit owner ratify/revert;
+owner-signed ADRs (0008 license, 0017 cross-platform) and Superseded ones
+(0003→0009, 0005→0014) are listed separately as already resolved.

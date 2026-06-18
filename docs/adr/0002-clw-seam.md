@@ -1,6 +1,6 @@
 # ADR-0002 — clw seam: path-dependencies on the sibling repo
 
-- **Status:** Accepted (owner overnight mandate 2026-06-11 — subject to morning review); ADR-0002 scope narrowed by ADR-0011 (bridge crates only)
+- **Status:** Accepted — narrowed by ADR-0011 (clw direct path-dep deferred to Stage-2)
 - **Date:** 2026-06-11
 
 One line: v0.1 consumes clw crates via Cargo **path-dependencies** on the
@@ -43,3 +43,26 @@ point choose: publish clw crates, vendor, or git-dep with pinned rev.
 - Build requires the sibling checkout at the expected relative path —
   acceptable for the single-machine dev phase, recorded as a known
   constraint in the build spec.
+
+## Update 2026-06-17 — reconciliation
+
+The Decision text above ("v0.1 consumes clw crates via Cargo
+path-dependencies on the sibling checkout") is **not v0.1 reality** and is
+**superseded-in-part by ADR-0011**. Reconciling the record for go-live:
+
+- **Narrowed by ADR-0011.** The perf rework removed clw from the hot path
+  and pushed everything networked into quarantined bridge crates. The clw
+  path-dependency therefore does **not** apply to the v0.1 core; ADR-0002's
+  scope is narrowed to the bridge crates only (ADR-0011 §2).
+- **clw direct path-dependency is DEFERRED to Stage-2.** The bridge crates
+  that carry it (`lightr-wire`, R4; `lightr-oci`, R2) are Stage-2 surfaces.
+  No v0.1 core crate takes a clw path-dep.
+- **The v0.1 seam is the wire-bridge** at the CoreLink + OCI border —
+  local↔wire conversion (file objects ↔ FastCDC chunk manifests / OCI
+  layers) crossed in background, never on a hot path.
+- **The code intentionally has no clw path-deps.** The absence of
+  `clw-types`/`clw-cache`/… path-dependencies in the v0.1 workspace is
+  correct and deliberate, not an omission — it reflects this reconciliation.
+
+The original Decision text above this section is preserved unchanged as the
+historical record; this Update governs.
