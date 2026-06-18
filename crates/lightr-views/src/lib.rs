@@ -1,9 +1,17 @@
 //! lightr-views — O(1) materialization (ADR-0013), the other half of the
-//! perf headline. The PLAN + SOLIDIFIER logic is pure and host-tested; real
-//! mount backends (composefs/EROFS on Linux, NFS-loopback on macOS — the
-//! EdenFS-proven route) are `cfg`-gated and marked `// VIEW-PATH (S1/S3)`:
-//! they compile here, runtime validation is the S1/S3 spike on a target box.
-//! NO unmeasured runtime claim. Bodies: WP-W5.
+//! perf headline. The PLAN + SOLIDIFIER logic is pure and host-tested.
+//!
+//! # Shipped materialization vs. planned O(1) backends
+//!
+//! The **shipped** materialization path is CoW hydrate via `lightr_index`
+//! (lightr_index::hydrate). It is the runtime today.
+//!
+//! The **planned** O(1) view backends — composefs/EROFS (Linux), NFS-loopback
+//! (macOS, the EdenFS-proven route), and ProjFS (Windows) — are `cfg`-gated
+//! modules in this crate. They are **intentionally not yet wired into the run
+//! path**: wiring them in is the ADR-0013 S1/S3 spike work, gated on
+//! target-box validation. Until then every backend method returns
+//! `ErrorKind::Unsupported` so the honest state is always visible. Bodies: WP-W5.
 //!
 //! # The contract (pre-decided law)
 //!
@@ -15,9 +23,9 @@
 //!   the promote-on-access policy and the "is the mount allowed to evaporate
 //!   yet?" question. See [`Solidifier`] for the documented policy.
 //! * [`ViewBackend`] is the seam to the OS. [`FakeBackend`] is the host-test
-//!   double; the real backends are `cfg`-gated skeletons (see the
-//!   platform `composefs`/`nfsloopback` modules) that compile but are **not**
-//!   runtime-validated on this box.
+//!   double; the real backends are `cfg`-gated planned implementations (see
+//!   the platform `composefs`/`nfsloopback`/`projfs` modules) that compile
+//!   but are **intentionally not yet wired into the run path** (ADR-0013).
 
 // The pure logic carries no `unsafe`. We deliberately do NOT
 // `#![forbid(unsafe_code)]` at the crate root: the cfg-gated real backends
@@ -135,9 +143,11 @@ pub fn plan_view(manifest: &Manifest) -> ViewPlan {
 
 /// OS actions a view backend performs — seamed for host testing.
 ///
-/// Real impls: composefs/EROFS (Linux), NFS-loopback (macOS, EdenFS-proven).
-/// Those are `cfg`-gated skeletons that compile but are not runtime-validated
-/// on this box; the host-tested double is [`FakeBackend`].
+/// Planned O(1) impls per ADR-0013: composefs/EROFS (Linux), NFS-loopback
+/// (macOS, EdenFS-proven), ProjFS (Windows). Those are `cfg`-gated modules
+/// that are **intentionally not yet wired into the run path** — wiring them
+/// in is the ADR-0013 S1/S3 spike work. The host-tested double is
+/// [`FakeBackend`].
 pub trait ViewBackend {
     /// Mount the view described by `plan` at `at` (O(1) appearance).
     fn mount(&mut self, plan: &ViewPlan, at: &Path) -> std::io::Result<()>;
@@ -357,27 +367,29 @@ pub fn solidify_step(
     Ok(Some(path))
 }
 
-// ── Real backends (cfg-gated skeletons — VIEW-PATH (S1/S3)) ──────────────────
+// ── Planned O(1) backends (ADR-0013, not yet wired into the run path) ────────
 
 /// composefs / EROFS view backend for Linux (kernel-native, no FUSE).
 ///
-/// EROFS metadata image is generated over the store's objects, mounted with an
-/// overlay upper layer for writes; pairs with fs-verity (ADR-0013 §1).
-///
-/// **VIEW-PATH (S1/S3):** this is a compile-only skeleton. The real-syscall
-/// functions are marked individually; runtime validation is the S1/S3 spike on
-/// a Linux target box. NO unmeasured runtime claim.
+/// Planned ADR-0013 S1/S3 spike: EROFS metadata image generated over the
+/// store's objects, mounted with an overlay upper layer for writes; pairs with
+/// fs-verity (ADR-0013 §1). **Intentionally not yet wired into the run path**
+/// — the shipped materialization is CoW hydrate via `lightr_index`. This
+/// module is the planned implementation; every method returns
+/// `ErrorKind::Unsupported` until the S1/S3 spike validates it on a Linux
+/// target box.
 #[cfg(target_os = "linux")]
 pub mod composefs {
     use super::{ViewBackend, ViewPlan};
     use std::path::Path;
 
     /// composefs/EROFS-backed view. Holds whatever the kernel mount needs
-    /// (loop device, EROFS image path, overlay dirs) once implemented.
+    /// (loop device, EROFS image path, overlay dirs) once the ADR-0013 S1/S3
+    /// spike is implemented.
     #[derive(Debug, Default)]
     pub struct ComposefsBackend {
-        // Skeleton: real fields (EROFS image path, loop fd, overlay upper/work
-        // dirs) land with the S1/S3 implementation.
+        // ADR-0013: real fields (EROFS image path, loop fd, overlay upper/work
+        // dirs) land with the S1/S3 spike implementation.
         _seam: (),
     }
 
@@ -388,48 +400,53 @@ pub mod composefs {
         }
     }
 
-    /// VIEW-PATH (S1/S3): build the EROFS metadata image describing `plan`
-    /// over the store's objects. Real mkfs.erofs / image-layout work; not yet
-    /// implemented, not runtime-validated.
-    // VIEW-PATH (S1/S3)
+    /// ADR-0013 S1 spike: build the EROFS metadata image describing `plan`
+    /// over the store's objects (mkfs.erofs / image-layout). Intentionally not
+    /// yet implemented; returns `Unsupported` until the spike lands.
+    // ADR-0013
     fn build_erofs_image(_plan: &ViewPlan, _image_out: &Path) -> std::io::Result<()> {
-        // VIEW-PATH (S1/S3): emit EROFS over the store layout (no validation).
+        // ADR-0013 S1: composefs O(1) view backend is a planned spike; the
+        // shipped runtime materializes via CoW hydrate (lightr_index).
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "composefs build_erofs_image: VIEW-PATH (S1/S3) skeleton — not implemented",
+            "composefs O(1) view backend is a planned spike (ADR-0013); \
+             the shipped runtime materializes via CoW hydrate",
         ))
     }
 
     impl ViewBackend for ComposefsBackend {
-        // VIEW-PATH (S1/S3)
+        // ADR-0013: mount is intentionally not yet wired into the run path.
         fn mount(&mut self, plan: &ViewPlan, at: &Path) -> std::io::Result<()> {
-            // VIEW-PATH (S1/S3): build EROFS image, loop-mount it, stack an
-            // overlay upper for writes. Real kernel syscalls (mount(2)) —
-            // localized unsafe lands here. Not runtime-validated.
+            // ADR-0013 S1: build EROFS image, loop-mount it, stack an overlay
+            // upper for writes. Real kernel syscalls (mount(2)) — localized
+            // unsafe lands here when the spike is validated on a Linux box.
             let _ = build_erofs_image(plan, at);
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "composefs mount: VIEW-PATH (S1/S3) skeleton — not implemented",
+                "composefs O(1) view backend is a planned spike (ADR-0013); \
+                 the shipped runtime materializes via CoW hydrate",
             ))
         }
 
-        // VIEW-PATH (S1/S3)
+        // ADR-0013: fault_in is intentionally not yet wired into the run path.
         fn fault_in(&mut self, _path: &str) -> std::io::Result<()> {
-            // VIEW-PATH (S1/S3): EROFS faults pages from the store via the
-            // kernel; this hook is for predictive readahead. Not validated.
+            // ADR-0013 S1: EROFS faults pages from the store via the kernel;
+            // this hook is for predictive readahead. Lands with the S1 spike.
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "composefs fault_in: VIEW-PATH (S1/S3) skeleton — not implemented",
+                "composefs O(1) view backend is a planned spike (ADR-0013); \
+                 the shipped runtime materializes via CoW hydrate",
             ))
         }
 
-        // VIEW-PATH (S1/S3)
+        // ADR-0013: unmount is intentionally not yet wired into the run path.
         fn unmount(&mut self, _at: &Path) -> std::io::Result<()> {
-            // VIEW-PATH (S1/S3): umount(2) the overlay + loop device once the
-            // solidifier reports fully-solid. Not runtime-validated.
+            // ADR-0013 S1: umount(2) the overlay + loop device once the
+            // solidifier reports fully-solid. Lands with the S1 spike.
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "composefs unmount: VIEW-PATH (S1/S3) skeleton — not implemented",
+                "composefs O(1) view backend is a planned spike (ADR-0013); \
+                 the shipped runtime materializes via CoW hydrate",
             ))
         }
     }
@@ -437,24 +454,25 @@ pub mod composefs {
 
 /// NFS-loopback view backend for macOS (the EdenFS-proven route).
 ///
-/// An in-process NFSv3 server bound to loopback answers the kernel NFS client
-/// mounted at the view root; reads fault content from the store (ADR-0013 §2).
-/// FSKit is adopted later when S1-class testing says it's ready.
-///
-/// **VIEW-PATH (S1/S3):** this is a compile-only skeleton. The real
-/// server/syscall functions are marked individually; runtime validation is the
-/// S1/S3 spike on a macOS target box. NO unmeasured runtime claim.
+/// Planned ADR-0013 S3 spike: an in-process NFSv3 server bound to loopback
+/// answers the kernel NFS client mounted at the view root; reads fault content
+/// from the store (ADR-0013 §2). FSKit is adopted later when S1/S3-class
+/// testing says it's ready. **Intentionally not yet wired into the run path**
+/// — the shipped materialization is CoW hydrate via `lightr_index`. This
+/// module is the planned implementation; every method returns
+/// `ErrorKind::Unsupported` until the S3 spike validates it on a macOS box.
 #[cfg(target_os = "macos")]
 pub mod nfsloopback {
     use super::{ViewBackend, ViewPlan};
     use std::path::Path;
 
-    /// In-process NFS-loopback server skeleton. Holds the bound socket, the
-    /// served plan, and the mount point once implemented.
+    /// In-process NFS-loopback server for the planned ADR-0013 S3 spike.
+    /// Holds the bound socket, the served plan, and the mount point once the
+    /// spike implementation lands.
     #[derive(Debug, Default)]
     pub struct NfsLoopbackBackend {
-        // Skeleton: real fields (listening socket, export table, mount point,
-        // server task handle) land with the S1/S3 implementation.
+        // ADR-0013: real fields (listening socket, export table, mount point,
+        // server task handle) land with the S3 spike implementation.
         _seam: (),
     }
 
@@ -465,84 +483,89 @@ pub mod nfsloopback {
         }
     }
 
-    /// VIEW-PATH (S1/S3): bind the in-process NFSv3 server to loopback and
-    /// start serving `plan`. Real socket/server code; not yet implemented,
-    /// not runtime-validated.
-    // VIEW-PATH (S1/S3)
+    /// ADR-0013 S3 spike: bind the in-process NFSv3 server to loopback and
+    /// start serving `plan`. Real socket/server code; intentionally not yet
+    /// implemented. Returns `Unsupported` until the spike lands.
+    // ADR-0013
     fn start_nfs_server(_plan: &ViewPlan) -> std::io::Result<()> {
-        // VIEW-PATH (S1/S3): bind 127.0.0.1, register the export, spawn the
-        // RPC loop that faults content from the store. Not validated.
+        // ADR-0013 S3: bind 127.0.0.1, register the export, spawn the RPC
+        // loop that faults content from the store. Lands with the S3 spike.
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "nfsloopback start_nfs_server: VIEW-PATH (S1/S3) skeleton — not implemented",
+            "nfsloopback O(1) view backend is a planned spike (ADR-0013); \
+             the shipped runtime materializes via CoW hydrate",
         ))
     }
 
     impl ViewBackend for NfsLoopbackBackend {
-        // VIEW-PATH (S1/S3)
+        // ADR-0013: mount is intentionally not yet wired into the run path.
         fn mount(&mut self, plan: &ViewPlan, at: &Path) -> std::io::Result<()> {
-            // VIEW-PATH (S1/S3): start the loopback NFS server, then mount(2)
-            // the kernel NFS client at `at`. Localized unsafe lands here.
-            // Not runtime-validated.
+            // ADR-0013 S3: start the loopback NFS server, then mount(2) the
+            // kernel NFS client at `at`. Localized unsafe lands here when the
+            // spike is validated on a macOS box.
             let _ = at; // future mount point for the kernel NFS client
             let _ = start_nfs_server(plan);
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "nfsloopback mount: VIEW-PATH (S1/S3) skeleton — not implemented",
+                "nfsloopback O(1) view backend is a planned spike (ADR-0013); \
+                 the shipped runtime materializes via CoW hydrate",
             ))
         }
 
-        // VIEW-PATH (S1/S3)
+        // ADR-0013: fault_in is intentionally not yet wired into the run path.
         fn fault_in(&mut self, _path: &str) -> std::io::Result<()> {
-            // VIEW-PATH (S1/S3): server-side readahead — pre-stage one entry's
-            // content from the store so the next NFS READ is warm. Not validated.
+            // ADR-0013 S3: server-side readahead — pre-stage one entry's
+            // content from the store so the next NFS READ is warm. Lands with
+            // the S3 spike.
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "nfsloopback fault_in: VIEW-PATH (S1/S3) skeleton — not implemented",
+                "nfsloopback O(1) view backend is a planned spike (ADR-0013); \
+                 the shipped runtime materializes via CoW hydrate",
             ))
         }
 
-        // VIEW-PATH (S1/S3)
+        // ADR-0013: unmount is intentionally not yet wired into the run path.
         fn unmount(&mut self, _at: &Path) -> std::io::Result<()> {
-            // VIEW-PATH (S1/S3): unmount(2) the NFS client and stop the server
-            // once the solidifier reports fully-solid. Not runtime-validated.
+            // ADR-0013 S3: unmount(2) the NFS client and stop the server once
+            // the solidifier reports fully-solid. Lands with the S3 spike.
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "nfsloopback unmount: VIEW-PATH (S1/S3) skeleton — not implemented",
+                "nfsloopback O(1) view backend is a planned spike (ADR-0013); \
+                 the shipped runtime materializes via CoW hydrate",
             ))
         }
     }
 }
 
-/// ProjFS / ReFS-overlay view backend skeleton for Windows.
+/// ProjFS / ReFS-overlay view backend for Windows.
 ///
-/// On Windows, views are surfaced via the Windows Projected File System (ProjFS)
-/// API, which allows a provider process to present a virtual directory tree whose
-/// content is faulted in on demand from the CAS store.  A ReFS block-clone
-/// (FSCTL_DUPLICATE_EXTENTS_TO_FILE) backs solidification on ReFS volumes; NTFS
-/// falls back to a copy.  Neither ProjFS nor ReFS is available inside WSL2 from
-/// the guest side, so the Windows isolation model runs the engine natively and the
-/// view provider runs as a user-mode Windows process.
+/// Planned ADR-0013 S1/S3 spike: on Windows, views are surfaced via the
+/// Windows Projected File System (ProjFS) API, which allows a provider process
+/// to present a virtual directory tree whose content is faulted in on demand
+/// from the CAS store.  A ReFS block-clone
+/// (FSCTL_DUPLICATE_EXTENTS_TO_FILE) backs solidification on ReFS volumes;
+/// NTFS falls back to a copy.  Neither ProjFS nor ReFS is available inside
+/// WSL2 from the guest side, so the Windows isolation model runs the engine
+/// natively and the view provider runs as a user-mode Windows process.
 ///
-/// **VIEW-PATH (S1/S3):** this is a compile-only skeleton.  Every runtime method
-/// is marked `// VIEW-PATH (S1/S3)`; the real ProjFS/FFI work lands with the
-/// S1/S3 spike on a Windows target box.  NO fake mount, NO fabricated success —
-/// every method returns an explicit "unsupported/unvalidated" error so callers
-/// always see the honest not-yet-validated state.
+/// **Intentionally not yet wired into the run path** — the shipped
+/// materialization is CoW hydrate via `lightr_index`. Every method returns
+/// `ErrorKind::Unsupported`; the real ProjFS/FFI work lands with the ADR-0013
+/// S1/S3 spike on a Windows target box.
 #[cfg(target_os = "windows")]
 pub mod projfs {
     use super::{ViewBackend, ViewPlan};
     use std::path::Path;
 
     /// ProjFS-backed view for Windows.  Holds the virtualization root handle and
-    /// the active plan once the real implementation lands.
+    /// the active plan once the ADR-0013 S1/S3 spike implementation lands.
     ///
-    /// **VIEW-PATH (S1/S3):** skeleton — no ProjFS handle is opened until the
-    /// S1/S3 spike validates this path on a Windows box.
+    /// **ADR-0013:** intentionally not yet wired into the run path — no ProjFS
+    /// handle is opened until the spike validates this path on a Windows box.
     #[derive(Debug, Default)]
     pub struct ProjFsBackend {
-        // Skeleton: real fields (HVIRTUAL_STORAGE_VIRTUAL_DISK handle,
-        // notification callbacks, async task handle) land with S1/S3.
+        // ADR-0013: real fields (HVIRTUAL_STORAGE_VIRTUAL_DISK handle,
+        // notification callbacks, async task handle) land with the S1/S3 spike.
         _seam: (),
     }
 
@@ -553,74 +576,73 @@ pub mod projfs {
         }
     }
 
-    /// VIEW-PATH (S1/S3): initialise the ProjFS virtualization root at `root`
-    /// and register the provider callbacks that fault content from the store on
-    /// demand.  Real PrjStartVirtualizing / callback registration work; not yet
-    /// implemented, not runtime-validated.
-    // VIEW-PATH (S1/S3)
+    /// ADR-0013 S1/S3 spike: initialise the ProjFS virtualization root at
+    /// `root` and register the provider callbacks that fault content from the
+    /// store on demand (PrjStartVirtualizing / callback registration).
+    /// Intentionally not yet implemented; returns `Unsupported` until the
+    /// spike is validated on a Windows box.
+    // ADR-0013
     fn start_projfs_provider(_plan: &ViewPlan, _root: &Path) -> std::io::Result<()> {
-        // VIEW-PATH (S1/S3): call PrjMarkDirectoryAsPlaceholder, then
+        // ADR-0013 S1: call PrjMarkDirectoryAsPlaceholder, then
         // PrjStartVirtualizing with GET_FILE_DATA / NOTIFY callbacks that read
-        // chunk data from the lightr-store CAS.  Not validated.
+        // chunk data from the lightr-store CAS. Lands with the S1/S3 spike.
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "projfs start_projfs_provider: VIEW-PATH (S1/S3) skeleton — not implemented, \
-             not runtime-validated on Windows",
+            "projfs O(1) view backend is a planned spike (ADR-0013); \
+             the shipped runtime materializes via CoW hydrate",
         ))
     }
 
-    /// VIEW-PATH (S1/S3): stop the ProjFS virtualization root and release the
-    /// provider handle.  Real PrjStopVirtualizing work; not yet implemented.
-    // VIEW-PATH (S1/S3)
+    /// ADR-0013 S1/S3 spike: stop the ProjFS virtualization root and release
+    /// the provider handle (PrjStopVirtualizing). Intentionally not yet
+    /// implemented; returns `Unsupported` until the spike lands.
+    // ADR-0013
     fn stop_projfs_provider() -> std::io::Result<()> {
-        // VIEW-PATH (S1/S3): call PrjStopVirtualizing on the stored handle.
-        // Not validated.
+        // ADR-0013 S1: call PrjStopVirtualizing on the stored handle.
+        // Lands with the S1/S3 spike.
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "projfs stop_projfs_provider: VIEW-PATH (S1/S3) skeleton — not implemented, \
-             not runtime-validated on Windows",
+            "projfs O(1) view backend is a planned spike (ADR-0013); \
+             the shipped runtime materializes via CoW hydrate",
         ))
     }
 
     impl ViewBackend for ProjFsBackend {
-        // VIEW-PATH (S1/S3)
+        // ADR-0013: mount is intentionally not yet wired into the run path.
         fn mount(&mut self, plan: &ViewPlan, at: &Path) -> std::io::Result<()> {
-            // VIEW-PATH (S1/S3): mark `at` as a ProjFS placeholder root and
-            // start the provider.  PrjMarkDirectoryAsPlaceholder +
-            // PrjStartVirtualizing.  Not runtime-validated on Windows.
+            // ADR-0013 S1: mark `at` as a ProjFS placeholder root and start
+            // the provider (PrjMarkDirectoryAsPlaceholder +
+            // PrjStartVirtualizing). Lands with the S1/S3 spike on Windows.
             let _ = start_projfs_provider(plan, at);
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "projfs mount: VIEW-PATH (S1/S3) skeleton — not implemented, \
-                 not runtime-validated on Windows",
+                "projfs O(1) view backend is a planned spike (ADR-0013); \
+                 the shipped runtime materializes via CoW hydrate",
             ))
         }
 
-        // VIEW-PATH (S1/S3)
+        // ADR-0013: fault_in is intentionally not yet wired into the run path.
         fn fault_in(&mut self, _path: &str) -> std::io::Result<()> {
-            // VIEW-PATH (S1/S3): convert the placeholder at `path` to a
-            // hydrated file by writing its content via PrjWriteFileData.
-            // This is the provider's GET_FILE_DATA callback path — called
-            // lazily by the kernel when the application first reads the entry.
-            // Not runtime-validated on Windows.
+            // ADR-0013 S1: convert the placeholder at `path` to a hydrated
+            // file via PrjWriteFileData — the GET_FILE_DATA callback path,
+            // called lazily by the kernel. Lands with the S1/S3 spike.
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "projfs fault_in: VIEW-PATH (S1/S3) skeleton — not implemented, \
-                 not runtime-validated on Windows",
+                "projfs O(1) view backend is a planned spike (ADR-0013); \
+                 the shipped runtime materializes via CoW hydrate",
             ))
         }
 
-        // VIEW-PATH (S1/S3)
+        // ADR-0013: unmount is intentionally not yet wired into the run path.
         fn unmount(&mut self, _at: &Path) -> std::io::Result<()> {
-            // VIEW-PATH (S1/S3): stop the ProjFS provider once the solidifier
-            // reports fully-solid (the mount can evaporate because every file
-            // is now a real on-disk CoW clone).  PrjStopVirtualizing.
-            // Not runtime-validated on Windows.
+            // ADR-0013 S1: stop the ProjFS provider once the solidifier reports
+            // fully-solid (every file is a real on-disk CoW clone).
+            // PrjStopVirtualizing. Lands with the S1/S3 spike on Windows.
             let _ = stop_projfs_provider();
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "projfs unmount: VIEW-PATH (S1/S3) skeleton — not implemented, \
-                 not runtime-validated on Windows",
+                "projfs O(1) view backend is a planned spike (ADR-0013); \
+                 the shipped runtime materializes via CoW hydrate",
             ))
         }
     }
