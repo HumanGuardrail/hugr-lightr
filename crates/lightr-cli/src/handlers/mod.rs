@@ -1,6 +1,7 @@
 //! Verb handler modules.
 pub mod bench;
 pub mod bench_compare;
+pub mod bench_compete_docker;
 pub mod bisect;
 pub mod build;
 pub mod compose;
