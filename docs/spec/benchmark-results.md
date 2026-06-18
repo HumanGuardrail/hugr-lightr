@@ -60,27 +60,30 @@ command for the same user-goal**, over the **same bytes**.
 ## Results
 
 Measured by `lightr bench-compare --vs docker --workload all` on the **release**
-binary. Every number below was produced by the harness on the stated box; none is
-an estimate.
+binary. Every number was produced by the harness on the stated box; none is an
+estimate. Figures are the **median of 3 back-to-back runs**, with the factor
+**range** across runs shown so the result is tamper-evident.
 
-**Run:** 2026-06-18, 14:03–14:11 local · **box:** macOS / x86_64 (Intel) ·
-**competitors present:** docker 28.3.2 (linux engine). OrbStack + Apple
-`container` were absent from `$PATH` → not compared (honest, no fabricated cells).
+**Runs:** 2026-06-18, 3 controlled runs (+1 earlier) · **box:** macOS / x86_64
+(Intel), data volume ~94% full (adds noise — disclosed) · **competitors
+present:** docker 28.3.2 (linux engine). OrbStack + Apple `container` absent from
+`$PATH` → not compared (honest, no fabricated cells).
 
-| indicator | lightr | docker | factor (docker / lightr) |
-|---|---|---|---|
-| install footprint | **4.3 MB** | 1962.0 MB | **451.7×** |
-| materialize (CoW, 1 GB) | **248.9 ms** | 39 957.3 ms | **160.6×** |
-| cold-run (import + run) | **477.6 ms** | 3 972.4 ms | **8.3×** |
-| re-run (memo hit) | **106.5 ms** | 5 127.7 ms | **48.1×** |
-| idle processes | **0** | 7 | **∞** (0-baseline — daemonless) |
-| build (memoized 2nd) | **18.6 ms** | 1 294.5 ms | **69.6×** |
+| indicator | lightr (median) | docker (median) | factor (median) | factor range (3 runs) |
+|---|---|---|---|---|
+| install footprint | **4.3 MB** | 1962 MB | **452×** | 452× (deterministic) |
+| materialize (CoW, 1 GB) | **322 ms** | 38 422 ms | **119×** | 109–144× |
+| cold-run (import + run) | **421 ms** | 3 574 ms | **12×** | 7.2–17× |
+| re-run (memo hit) | **105 ms** | 3 948 ms | **54×** | 30–65× |
+| idle processes | **0** | 8 | **∞** | 0 vs 7–9 (always) |
+| build (memoized 2nd) | **17.6 ms** | 1 434 ms | **81×** | 80–203× |
 
-**Verdict: Lightr wins every adversarial axis** — from 8× (cold-run) to 452×
-(install), plus a daemonless 0-vs-7 idle footprint that has no finite multiple.
-A single run carries normal measurement noise in the absolute ms (re-running
-shifts the absolutes by tens of ms); the **factors and their direction are the
-result**, and the direction never flips.
+**Verdict: Lightr wins every adversarial axis in every run.** Docker's absolute
+ms is noisy (it crosses the macOS VM), so the factors vary — but the direction
+never flips and even the **worst of three runs** is decisive: ≥7× cold-run,
+≥30× re-run, ≥80× build, ≥100× materialize, 452× install, and a daemonless
+0-vs-7+ idle footprint with no finite multiple. The factors, not the absolute ms,
+are the result.
 
 ## Honest boundaries (what is NOT claimed here)
 
