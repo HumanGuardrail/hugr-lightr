@@ -348,6 +348,7 @@ fn handle_tools_call(id: Value, params: &Value) -> Value {
                 .collect(),
                 secrets: vec![],
                 configs: vec![],
+                ports: vec![],
             };
             match run_memoized(&spec, &store) {
                 Ok(outcome) => {

@@ -1397,6 +1397,9 @@ fn start_service_detached(stack_dir: &Path, svc: &ServiceSpec) -> Result<()> {
         mounts: Vec::new() as Vec<Mount>,
         secrets: to_store_files(&svc.secrets),
         configs: to_store_files(&svc.configs),
+        // Compose publishes ports through its own lazy-listener proxy (above),
+        // not the run-spec forwarder; leave RunSpec.ports empty here.
+        ports: Vec::new(),
     };
 
     // Set env vars before spawning

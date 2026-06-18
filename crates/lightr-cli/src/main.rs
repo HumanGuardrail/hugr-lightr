@@ -243,6 +243,13 @@ pub enum Shell {
 // Main command enum
 // ──────────────────────────────────────────────────────────────────────────────
 
+// `Cmd` is a clap dispatch enum: constructed exactly once per process (at
+// argv parse) and immediately matched. Adding the Phase-1 `-p/--publish`
+// `Vec<String>` to `Run` tips the largest variant just past clippy's 200-byte
+// default. Boxing a clap field to satisfy a memory-layout lint on a
+// once-per-process value is non-idiomatic and would distort the parse surface,
+// so we allow the lint here rather than indirect a field.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Cmd {
     /// Snapshot a directory into the store under a ref
@@ -278,6 +285,10 @@ enum Cmd {
         env: Vec<String>,
         #[arg(short = 'd', long)]
         detach: bool,
+        /// Publish a container port to the host (Docker-style, repeatable):
+        /// HOST:CONTAINER. Requires -d; native detached path only (Phase 1).
+        #[arg(short = 'p', long = "publish", value_name = "HOST:CONTAINER")]
+        publish: Vec<String>,
         #[arg(long, value_name = "REF:TARGET")]
         mount: Vec<String>,
         /// Engine to use: native (default), ns, vz
@@ -538,6 +549,7 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
             input,
             env,
             detach,
+            publish,
             mount,
             engine,
             rootfs,
@@ -558,6 +570,7 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
             json,
             explain,
             detach,
+            &publish,
             &mount,
             &engine,
             rootfs.as_deref(),
@@ -1384,6 +1397,7 @@ mod tests {
             false,
             false,
             false,
+            &[],
             &[],
             "bogus",
             None,

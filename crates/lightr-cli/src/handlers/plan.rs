@@ -159,6 +159,7 @@ fn plan_run(
         mounts,
         secrets: vec![],
         configs: vec![],
+        ports: vec![],
     };
 
     match predict(&spec, &store) {
