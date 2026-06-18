@@ -289,6 +289,10 @@ pub fn run_memoized_with(
     store: &Store,
     limits: &lightr_core::ResourceLimits,
 ) -> Result<RunOutcome> {
+    // F-203: validate native limit enforceability BEFORE the AC lookup, so a
+    // cache-HIT can't bypass the honest error (limits are excluded from the key).
+    crate::limits::check_native_support(limits)?;
+
     // For specs with no mounts, use fast path (no store needed for key)
     let key = if spec.mounts.is_empty() {
         build_key(spec)?
