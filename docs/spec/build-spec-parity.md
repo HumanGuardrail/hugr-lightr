@@ -190,16 +190,25 @@ new files created with honest stubs · `git commit` on `wave/zero-debt`.
 2.1 **`ResourceLimits::parse`** — memory suffixes k/m/g (1024-based) + bare bytes;
 cpus float→`round(f*1000)` milli. Reject negative/zero/garbage with `InvalidRef`. Unit tests.
 
-2.2 **`apply_native`** (run + engine; Unix `pre_exec` + `libc::setrlimit`):
-- `memory_bytes` → `RLIMIT_AS` (address space) AND `RLIMIT_DATA`. macOS + Linux.
-- `cpu_millis` on native: **honest boundary** — `RLIMIT_CPU` is total CPU-seconds,
-  not a share; a fractional share is NOT faithfully enforceable natively. So: if
-  `cpu_millis` set on the native engine, return
-  `Err(Unsupported("native engine cannot enforce a cpu share; use --engine ns (cgroup) or vz (vcpu count)"))`.
-  Do NOT silently ignore. (memory IS enforced natively.)
-- Use `std::os::unix::process::CommandExt::pre_exec`; `#[cfg(unix)]`. Windows
-  native: honest `Unsupported` (use wsl). Tests: spawn a child that allocates >cap
-  → killed; a child under cap → ok.
+2.2 **`apply_native` + early `check_native_support`** — AMENDED 2026-06-18 (lead).
+The original premise ("memory IS enforced natively on macOS") was FACTUALLY WRONG:
+macOS (Darwin) ignores `RLIMIT_AS`/`RLIMIT_DATA` (verified — `setrlimit` returns
+`EINVAL`; a 256 MB alloc under a 64 MB cap succeeds), and there is no stable PUBLIC
+macOS mechanism (jetsam/Mach footprint are private — no gambiarra). WP-A1 correctly
+STOPPED and surfaced this rather than ship a contradiction (AP-3). Honest matrix:
+- **Linux native:** `memory_bytes` → `RLIMIT_AS`+`RLIMIT_DATA` in a `pre_exec` hook
+  (`#[cfg(target_os="linux")]`). Enforced.
+- **macOS/Windows native + `memory_bytes`:** honest `Err(InvalidRef("memory limits
+  are not enforceable on the native engine on this OS; use --engine vz (macOS) for a
+  hard cap"))`. The macOS hard memory cap IS the vz engine (VM RAM — Docker's own
+  mechanism on Mac; on-thesis per feature-parity.md physics note).
+- **`cpu_millis` on native (any OS):** honest `Err` → `--engine ns` (cgroup) / `vz`
+  (vcpu). (`RLIMIT_CPU` caps total cpu-seconds, not a share.)
+- **Validate EARLY:** `check_native_support(limits)?` at the TOP of `run_memoized_with`
+  (before the AC lookup) so a cache-HIT can't bypass the honest error (memo key
+  excludes limits, §0). Fail closed, hit or miss.
+- Tests: Linux-gated "over-cap child killed"; off-Linux unit asserts the honest
+  `Err`; cpu-share honest `Err` (all platforms).
 
 2.3 **`apply_cgroup`** (ns, Linux): write a transient cgroup v2 dir under the
 caller's delegated subtree — `memory.max` ← bytes, `cpu.max` ← `"<millis*100> 100000"`
