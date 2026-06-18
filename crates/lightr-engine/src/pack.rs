@@ -1,4 +1,4 @@
-//! Linux pack assembly (build-spec-prod §WP-B-vsock).
+//! Linux pack assembly (build-spec-prod §WP-B).
 //!
 //! A "pack" is what the vz engine boots: a Linux `kernel` plus an `initrd`
 //! whose `/init` is the `lightr-init` PID1 binary (see `crates/lightr-init`).
@@ -16,9 +16,12 @@
 //! The cpio assembly is REAL and tested. Sourcing the actual Linux **kernel**
 //! image is out of scope for this WP and stays a documented step:
 //!
-//! PACK: kernel from Apple's Containerization kernel (the vmlinuz shipped with
-//! `apple/containerization`), or any bzImage/vmlinuz with virtiofs + AF_VSOCK
-//! built in. `assemble_pack` copies whatever kernel file the caller hands it;
+//! PACK: kernel from `scripts/build-kernel-x86.sh` (Linux bzImage with
+//! virtio-pci/console/fs built in), or any bzImage/vmlinuz carrying virtiofs.
+//! The guest reports its exit code through a **file channel** — PID1 writes the
+//! code to `EXIT_FILE` on the rootfs virtiofs share and the host reads it back
+//! (macOS has no host AF_VSOCK, so the old vsock receiver was removed as dead
+//! code). `assemble_pack` copies whatever kernel file the caller hands it;
 //! choosing/fetching that file is the install pipeline's job, not this one's.
 
 use lightr_core::{LightrError, Result};
