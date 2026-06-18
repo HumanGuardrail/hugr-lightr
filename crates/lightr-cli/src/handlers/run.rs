@@ -30,7 +30,8 @@ use lightr_core::{validate_ref_name, ResourceLimits};
 use lightr_engine::{engine_for, EngineKind, ExecSpec};
 use lightr_index;
 use lightr_run::{
-    run_memoized_deep, run_memoized_with, spawn_detached, DeepMemoConfig, Mount, RunSpec, StoreFile,
+    run_memoized_deep, run_memoized_with, spawn_detached, DeepMemoConfig, Mount, PortMap, RunSpec,
+    StoreFile,
 };
 use lightr_store::Store;
 use serde::Serialize;
@@ -92,6 +93,51 @@ fn parse_store_file(raw: &str, kind: &str) -> Result<StoreFile, i32> {
     })
 }
 
+/// Parse a raw `-p/--publish` value into a `PortMap` (Networking Phase 1).
+///
+/// Accepts `HOST:CONTAINER` or `HOST:CONTAINER/tcp`. Both ports must parse as
+/// u16 in `1..=65535`. `…/udp` is rejected (UDP publish is Phase 2). On any bad
+/// input prints to stderr and returns `Err(2)` (mirrors `parse_mount`).
+fn parse_publish(raw: &str) -> Result<PortMap, i32> {
+    // Strip an optional `/proto` suffix. Only tcp is supported in v1.
+    let (body, proto) = match raw.rsplit_once('/') {
+        Some((b, p)) => (b, Some(p)),
+        None => (raw, None),
+    };
+    match proto {
+        None | Some("tcp") => {}
+        Some("udp") => {
+            eprintln!("lightr: invalid -p/--publish value ({raw}): udp publish is Phase 2");
+            return Err(2);
+        }
+        Some(other) => {
+            eprintln!("lightr: invalid -p/--publish protocol '{other}' in {raw} (expected tcp)");
+            return Err(2);
+        }
+    }
+
+    let colon = body.find(':').ok_or_else(|| {
+        eprintln!("lightr: invalid -p/--publish value (expected HOST:CONTAINER): {raw}");
+        2i32
+    })?;
+    let host_str = &body[..colon];
+    let container_str = &body[colon + 1..];
+
+    let parse_port = |s: &str, which: &str| -> Result<u16, i32> {
+        match s.parse::<u16>() {
+            Ok(p) if (1..=65535).contains(&p) => Ok(p),
+            _ => {
+                eprintln!("lightr: invalid {which} port '{s}' in {raw} (expected 1..=65535)");
+                Err(2)
+            }
+        }
+    };
+
+    let host = parse_port(host_str, "host")?;
+    let container = parse_port(container_str, "container")?;
+    Ok(PortMap { host, container })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     dir: &str,
@@ -101,6 +147,7 @@ pub fn run(
     json: bool,
     explain: bool,
     detach: bool,
+    publish_raw: &[String],
     mounts_raw: &[String],
     engine_str: &str,
     rootfs_ref: Option<&str>,
@@ -146,6 +193,26 @@ pub fn run(
     // Decide path: native + no rootfs ⇒ memoized path (unchanged R0/R1 behaviour).
     // Any other combination ⇒ engine path (NOT memoized, per §4).
     let use_engine_path = engine_kind != EngineKind::Native || rootfs_ref.is_some();
+
+    // ── Networking Phase 1 policy (frozen, honest — enforce in this order) ────
+    // These guards run BEFORE the engine-path early return below, so an
+    // `--engine vz/ns -p ...` invocation hits the honest Phase-2 error rather
+    // than silently dropping the published port.
+    if !publish_raw.is_empty() {
+        // 1. A published service is a long-running server ⇒ it must be detached.
+        if !detach {
+            eprintln!("lightr: -p/--publish requires -d (a published service runs detached)");
+            return 2;
+        }
+        // 2. Publishing is wired only for the native detached path. vz/ns
+        //    networking is Phase 2.
+        if use_engine_path {
+            eprintln!(
+                "lightr: -p/--publish is wired for the native detached path; --engine vz/ns networking is Phase 2"
+            );
+            return 2;
+        }
+    }
 
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
@@ -218,6 +285,17 @@ pub fn run(
         inputs.iter().map(std::path::PathBuf::from).collect()
     };
 
+    // Parse published ports (Phase 1). Policy above already guaranteed this is
+    // the native detached path when `publish_raw` is non-empty. Empty ⇒ no-op,
+    // so the non-published path is byte-identical to before.
+    let mut ports: Vec<PortMap> = Vec::new();
+    for raw in publish_raw {
+        match parse_publish(raw) {
+            Ok(p) => ports.push(p),
+            Err(code) => return code,
+        }
+    }
+
     let spec = RunSpec {
         cwd,
         inputs: input_paths,
@@ -226,6 +304,7 @@ pub fn run(
         mounts,
         secrets,
         configs,
+        ports,
     };
 
     // Detach path: spawn detached and print the run id
@@ -306,7 +385,107 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_mount;
+    use super::{parse_mount, parse_publish, run};
+
+    // ── parse_publish ───────────────────────────────────────────────────────
+
+    #[test]
+    fn publish_parses_host_container() {
+        let p = parse_publish("8080:80").expect("should parse");
+        assert_eq!(p.host, 8080);
+        assert_eq!(p.container, 80);
+    }
+
+    #[test]
+    fn publish_accepts_explicit_tcp() {
+        let p = parse_publish("39000:39001/tcp").expect("should parse");
+        assert_eq!(p.host, 39000);
+        assert_eq!(p.container, 39001);
+    }
+
+    #[test]
+    fn publish_rejects_udp_as_phase2() {
+        let r = parse_publish("8080:80/udp");
+        assert!(r.is_err());
+        assert_eq!(r.err().unwrap(), 2);
+    }
+
+    #[test]
+    fn publish_rejects_missing_colon() {
+        assert_eq!(parse_publish("8080").err().unwrap(), 2);
+    }
+
+    #[test]
+    fn publish_rejects_zero_port() {
+        assert_eq!(parse_publish("0:80").err().unwrap(), 2);
+        assert_eq!(parse_publish("80:0").err().unwrap(), 2);
+    }
+
+    #[test]
+    fn publish_rejects_out_of_range_and_nonnumeric() {
+        // 70000 > u16::MAX ⇒ parse fails ⇒ Err(2).
+        assert_eq!(parse_publish("70000:80").err().unwrap(), 2);
+        assert_eq!(parse_publish("8080:abc").err().unwrap(), 2);
+    }
+
+    // ── policy guards (return 2 BEFORE any store/engine work) ─────────────────
+
+    #[test]
+    fn publish_without_detach_exits_2() {
+        // -p given, detach=false ⇒ exit 2 (guard 1), before Store::open.
+        let code = run(
+            ".",
+            &[],
+            &[],
+            &["true".to_string()],
+            false, // json
+            false, // explain
+            false, // detach  ← NOT detached
+            &["39000:39001".to_string()],
+            &[],
+            "native",
+            None,
+            false,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            30,
+            3,
+        );
+        assert_eq!(code, 2, "-p without -d must exit 2");
+    }
+
+    #[test]
+    fn publish_on_engine_path_exits_2() {
+        // -p + -d but engine=vz ⇒ exit 2 (guard 2), before the engine early
+        // return / any store work.
+        let code = run(
+            ".",
+            &[],
+            &[],
+            &["true".to_string()],
+            false,
+            false,
+            true, // detach
+            &["39000:39001".to_string()],
+            &[],
+            "vz", // engine path ⇒ Phase 2
+            None,
+            false,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            30,
+            3,
+        );
+        assert_eq!(code, 2, "-p on the engine path must exit 2 (Phase 2)");
+    }
+
+    // ── parse_mount (existing) ────────────────────────────────────────────────
 
     #[test]
     fn mount_parse_splits_on_first_colon() {

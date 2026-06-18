@@ -15,8 +15,22 @@ pub mod limits;
 // RestartPolicy. No I/O lives here; the install/uninstall/list flow is in
 // lightr-cli::handlers::supervise. We ship NO daemon — we generate a unit and
 // tell the user the opt-in command.
+pub mod portforward;
 pub mod restart;
 pub mod secrets;
+
+/// A published-port mapping: `host` (on 127.0.0.1) → `container` (on 127.0.0.1
+/// where the run's server listens). TCP only in v1 (Networking Phase 1).
+///
+/// Ports are a **runtime** parameter, NOT a memo-key input — exactly like
+/// resource limits, and exactly like Docker, which does not key on `-p`. They
+/// never enter `build_key`/`assemble_key` (see the `ports_excluded_from_key`
+/// test).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortMap {
+    pub host: u16,
+    pub container: u16,
+}
 
 pub struct RunSpec {
     pub cwd: PathBuf,
@@ -31,6 +45,11 @@ pub struct RunSpec {
     // <cwd>/.lightr/secrets/<name> (0600) / <cwd>/.lightr/configs/<name> (0644).
     pub secrets: Vec<StoreFile>,
     pub configs: Vec<StoreFile>,
+    // Networking Phase 1: published host→container TCP ports. RUNTIME ONLY —
+    // never part of the memo key (like resource limits; like Docker `-p`). The
+    // detached supervisor publishes each entry by forwarding 127.0.0.1:host →
+    // 127.0.0.1:container for the run's lifetime.
+    pub ports: Vec<PortMap>,
 }
 
 pub struct Mount {
@@ -466,6 +485,12 @@ struct SpecOnDisk {
     mounts: Vec<MountOnDisk>,
     detached: bool,
     created_at_unix: u64,
+    // Networking Phase 1: published (host, container) TCP ports the supervisor
+    // forwards. `#[serde(default)]` keeps JSON back-compat: spec.json files
+    // written before this field existed (no `ports`) still parse to an empty
+    // Vec, so an old detached run never breaks on read.
+    #[serde(default)]
+    ports: Vec<(u16, u16)>,
 }
 
 fn read_spec_on_disk(dir: &std::path::Path) -> Result<SpecOnDisk> {
@@ -747,6 +772,7 @@ pub fn spawn_detached_with_health(
             .collect(),
         detached: true,
         created_at_unix,
+        ports: spec.ports.iter().map(|p| (p.host, p.container)).collect(),
     };
     write_spec_json(&dir, &spec_on_disk)?;
 
@@ -827,6 +853,36 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
 
     // Write status = running
     std::fs::write(dir.join("status"), "running").map_err(LightrError::Io)?;
+
+    // Networking Phase 1: publish each declared port by forwarding
+    // 127.0.0.1:host → 127.0.0.1:container (where the child's server listens).
+    // A bind failure is logged to stderr.log and skipped — it never kills the
+    // run (a port clash on one publish must not take the whole service down).
+    // The handles are held for the supervisor loop's lifetime; when the
+    // supervisor exits (child gone / stop), they drop, the listeners close, and
+    // the accept-loop + per-connection threads end. `_forwarders` is bound (not
+    // `let _ =`) precisely so it is NOT dropped early.
+    let mut _forwarders: Vec<crate::portforward::Forwarder> = Vec::new();
+    if !spec.ports.is_empty() {
+        for &(host_port, container_port) in &spec.ports {
+            match crate::portforward::start(host_port, container_port) {
+                Ok(fwd) => _forwarders.push(fwd),
+                Err(e) => {
+                    use std::io::Write as _;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(dir.join("stderr.log"))
+                    {
+                        let _ = writeln!(
+                            f,
+                            "lightr: publish 127.0.0.1:{host_port} -> 127.0.0.1:{container_port} failed: {e}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     // F-309: load an optional healthcheck persisted by spawn_detached_with_health.
     // The probe runs on the supervisor's poll loop at `interval_s`; its verdict
@@ -1559,6 +1615,7 @@ mod tests {
             mounts: vec![],
             secrets: vec![],
             configs: vec![],
+            ports: vec![],
         }
     }
 
@@ -1577,6 +1634,41 @@ mod tests {
         let k1 = build_key(&spec).expect("key1");
         let k2 = build_key(&spec).expect("key2");
         assert_eq!(k1.0, k2.0, "same spec must produce same key");
+    }
+
+    // -----------------------------------------------------------------------
+    // MEMO-KEY LAW: ports are RUNTIME, not a key input (like resource limits;
+    // like Docker, which does not key on -p). Two specs differing ONLY in
+    // `ports` MUST produce the same memo key.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ports_excluded_from_key() {
+        let (_home, _env_guard) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        fs::write(cwd.join("f.txt"), b"data").unwrap();
+
+        let mut spec_no_ports = make_spec(cwd, vec!["/bin/echo", "x"]);
+        spec_no_ports.ports = vec![];
+
+        let mut spec_with_ports = make_spec(cwd, vec!["/bin/echo", "x"]);
+        spec_with_ports.ports = vec![
+            PortMap {
+                host: 8080,
+                container: 80,
+            },
+            PortMap {
+                host: 9090,
+                container: 90,
+            },
+        ];
+
+        let k1 = build_key(&spec_no_ports).expect("k1");
+        let k2 = build_key(&spec_with_ports).expect("k2");
+        assert_eq!(
+            k1.0, k2.0,
+            "ports must NOT affect the memo key (runtime-only, like -p in Docker)"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1639,6 +1731,7 @@ mod tests {
             mounts: vec![],
             secrets: vec![],
             configs: vec![],
+            ports: vec![],
         };
         let k1 = build_key(&spec1).expect("k1");
 
@@ -1683,6 +1776,7 @@ mod tests {
             mounts: vec![],
             secrets: vec![],
             configs: vec![],
+            ports: vec![],
         };
 
         // First run: miss
@@ -1736,6 +1830,7 @@ mod tests {
             mounts: vec![],
             secrets: vec![],
             configs: vec![],
+            ports: vec![],
         };
 
         let out1 = run_memoized(&spec, &store).expect("run1");
@@ -1795,6 +1890,7 @@ mod tests {
             mounts: vec![],
             secrets: vec![],
             configs: vec![],
+            ports: vec![],
         };
 
         // First run: miss (output too large)
@@ -1851,6 +1947,7 @@ mod tests {
             mounts: vec![],
             secrets: vec![],
             configs: vec![],
+            ports: vec![],
         };
 
         // First run: miss, gets memoized
@@ -1911,6 +2008,7 @@ mod tests {
             mounts: vec![],
             detached: false,
             created_at_unix: nanos / 1_000_000_000,
+            ports: vec![],
         };
         write_spec_json(&run_dir, &spec_on_disk).unwrap();
 
@@ -2035,6 +2133,7 @@ mod tests {
             mounts: vec![],
             secrets: vec![],
             configs: vec![],
+            ports: vec![],
         };
 
         let handle = spawn_detached(&spec, &store).expect("spawn_detached");
@@ -2135,6 +2234,7 @@ mod tests {
             }],
             secrets: vec![],
             configs: vec![],
+            ports: vec![],
         };
 
         let out1 = run_memoized(&spec, &store).expect("run1 with mount");
@@ -2195,6 +2295,7 @@ mod tests {
             mounts: vec![],
             secrets: vec![],
             configs: vec![],
+            ports: vec![],
         };
 
         // predict before run: should be miss
@@ -2242,6 +2343,7 @@ mod tests {
             mounts: vec![],
             secrets: vec![],
             configs: vec![],
+            ports: vec![],
         };
         let cfg = DeepMemoConfig { enabled: false };
 
@@ -2316,6 +2418,7 @@ mod tests {
             mounts: vec![],
             secrets: vec![],
             configs: vec![],
+            ports: vec![],
         };
         let cfg_on = DeepMemoConfig { enabled: true };
 
@@ -2393,6 +2496,7 @@ mod tests {
                 ref_name: ref_name.to_string(),
             }],
             configs: vec![],
+            ports: vec![],
         };
 
         let spec_a = mk("sec-a");
@@ -2434,6 +2538,7 @@ mod tests {
             mounts: vec![],
             secrets: vec![],
             configs: vec![],
+            ports: vec![],
         };
 
         let mut as_secret = base();
@@ -2565,6 +2670,7 @@ mod tests {
                 ref_name: "no-such-ref".to_string(),
             }],
             configs: vec![],
+            ports: vec![],
         };
         let run_err = run_memoized_with(&spec, &store, &lightr_core::ResourceLimits::default());
         assert!(run_err.is_err(), "run with a missing secret must Err");
@@ -2598,6 +2704,7 @@ mod tests {
             mounts: vec![],
             detached: false,
             created_at_unix: nanos / 1_000_000_000,
+            ports: vec![],
         };
         write_spec_json(&run_dir, &spec_on_disk).unwrap();
         healthcheck::save_for(

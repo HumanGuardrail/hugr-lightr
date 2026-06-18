@@ -155,6 +155,7 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             json,
             explain,
             false,
+            &[], // publish (Phase 1): docker-translation path publishes nothing
             &[],
             "ns",
             Some(possible_ref),
@@ -190,6 +191,7 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             json,
             explain,
             false,
+            &[], // publish (Phase 1): docker-translation path publishes nothing
             &[],
             "native",
             None,
