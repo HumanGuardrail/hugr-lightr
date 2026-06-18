@@ -9,7 +9,7 @@ owner-gated (`G-PUBLISH`); see the new `docs/RELEASE.md` for the runbook.
 **Distribution:**
 - **crates.io publish metadata** — per-crate `description`, `keywords`,
   `categories` on all 11 crates + `repository` on `workspace.package`.
-  crates.io-ready; `lightr-acceptance` and `lightr-init` stay `publish=false`.
+  crates.io-ready; `lightr-acceptance` (test harness) stays `publish=false`; `lightr-init` inherits the workspace gate (it is a published dependency of `lightr-engine`).
   Naming CLEARED (`lightr` + `hugr-lightr` free). PUBLISH still owner-gated
   (workspace `publish=false`).
 
