@@ -43,6 +43,14 @@ jobs:
       - name: cargo clippy -D warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: cargo build (fresh bin for acceptance)
+        run: cargo build --workspace
+        # The lightr-acceptance tests exec `target/debug/lightr` via assert_cmd,
+        # but `cargo test` builds *test* binaries — not the runnable bin artifact
+        # (lightr-acceptance has no lightr-cli dep to trigger it). Build it
+        # explicitly first so acceptance never runs against a stale binary (a
+        # stale-bin gate masked the F-309/scratch regression once — never again).
+
       - name: cargo test
         run: cargo test --workspace
         # LIGHTR_NET_TESTS intentionally unset; network tests excluded.
