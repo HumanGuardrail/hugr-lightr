@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "OCI image import bridge: pulls registry layers into the Lightr CAS store."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["oci", "container", "cas", "content-addressed", "runtime"]
+categories = ["development-tools", "virtualization"]
 
 [dependencies]
 lightr-core = { workspace = true }

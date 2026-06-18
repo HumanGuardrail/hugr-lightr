@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Memo key, native exec, replay, supervisor, and process management for Lightr."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["container", "runtime", "daemonless", "sandbox", "build-cache"]
+categories = ["development-tools", "virtualization"]
 
 [dependencies]
 blake3 = { workspace = true }

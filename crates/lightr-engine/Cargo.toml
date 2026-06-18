@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Isolation engine backends (native, microVM) for the Lightr runtime."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["container", "runtime", "sandbox", "microvm", "virtualization"]
+categories = ["virtualization", "development-tools"]
 
 [features]
 # vz: Virtualization.framework microVM engine (macOS; Swift shim built by
