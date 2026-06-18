@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 // Per-feature seam modules (build-spec-parity.md §1). A0 wires the call sites
 // to honest stubs in these files; A1/A3 fill the bodies.
+pub mod healthcheck;
 pub mod limits;
 // F-308 (build-spec-parity.md §3): PURE OS-supervisor unit-file templates +
 // RestartPolicy. No I/O lives here; the install/uninstall/list flow is in
@@ -212,14 +213,19 @@ fn assemble_key(spec: &RunSpec, store: &Store, hydrate_mounts: bool) -> Result<D
     }
 
     // F-309: secrets then configs contribute to the key (build-spec-parity.md §0).
-    // A0 stub is a no-op so existing keys are unchanged; WP-A3 fills it.
-    crate::secrets::contribute_to_key(&mut hasher, &spec.secrets, b"secret\0");
-    crate::secrets::contribute_to_key(&mut hasher, &spec.configs, b"config\0");
+    // A different secret/config ref ⇒ a different key (in-key inputs). Resolution
+    // uses `store` (the ref's current root digest), exactly like mounts above.
+    // Empty vecs leave the hasher untouched ⇒ existing keys unchanged.
+    crate::secrets::contribute_to_key(&mut hasher, &spec.secrets, b"secret\0", store);
+    crate::secrets::contribute_to_key(&mut hasher, &spec.configs, b"config\0", store);
 
     Ok(Digest(*hasher.finalize().as_bytes()))
 }
 
-// Keep the old build_key for backward-compat within existing tests
+// Keep the old build_key for backward-compat within existing tests. Used only
+// on the fast path (no mounts AND no secrets/configs), so it needs no store;
+// `run_memoized_with`/`predict` route any spec with secrets/configs through
+// `assemble_key` (which resolves refs against the store).
 fn build_key(spec: &RunSpec) -> Result<Digest> {
     // No store needed for no-mounts case; but we must handle it.
     // For the unmounted path (used by existing tests), we short-circuit.
@@ -271,12 +277,12 @@ fn build_key(spec: &RunSpec) -> Result<Digest> {
     let triple = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     hasher.update(triple.as_bytes());
 
-    // No mount contribution (mounts empty in all existing callers)
-
-    // F-309: secrets then configs contribute to the key (build-spec-parity.md §0).
-    // A0 stub is a no-op so existing keys are unchanged; WP-A3 fills it.
-    crate::secrets::contribute_to_key(&mut hasher, &spec.secrets, b"secret\0");
-    crate::secrets::contribute_to_key(&mut hasher, &spec.configs, b"config\0");
+    // No mount contribution (this fast path is only taken when mounts are empty).
+    // No secrets/configs contribution either: this storeless fast path is only
+    // reached when secrets AND configs are empty (a non-empty spec routes through
+    // `assemble_key`, which has the store to resolve refs — F-309 §0). An empty
+    // contribution is a no-op, so the key is identical to today's for the 16
+    // existing (empty-vec) callers.
 
     Ok(Digest(*hasher.finalize().as_bytes()))
 }
@@ -298,8 +304,13 @@ pub fn run_memoized_with(
     // cache-HIT can't bypass the honest error (limits are excluded from the key).
     crate::limits::check_native_support(limits)?;
 
-    // For specs with no mounts, use fast path (no store needed for key)
-    let key = if spec.mounts.is_empty() {
+    // Fast path (storeless build_key) only when there are no store-backed
+    // inputs at all — no mounts AND no secrets/configs. Any store-backed input
+    // routes through assemble_key, which resolves refs against the store
+    // (F-309 §0: secrets/configs are in-key, resolved like mounts).
+    let needs_store_key =
+        !spec.mounts.is_empty() || !spec.secrets.is_empty() || !spec.configs.is_empty();
+    let key = if !needs_store_key {
         build_key(spec)?
     } else {
         // Validate mount targets before anything else (before hydration)
@@ -394,7 +405,11 @@ pub fn predict(spec: &RunSpec, store: &Store) -> Result<(lightr_core::Digest, bo
     for mount in &spec.mounts {
         validate_mount_target(&mount.target)?;
     }
-    let key = if spec.mounts.is_empty() {
+    // Same fast-path rule as run_memoized_with: storeless build_key only when
+    // there are no store-backed inputs (no mounts, secrets, or configs).
+    let needs_store_key =
+        !spec.mounts.is_empty() || !spec.secrets.is_empty() || !spec.configs.is_empty();
+    let key = if !needs_store_key {
         build_key(spec)?
     } else {
         assemble_key(spec, store, false)?
@@ -421,6 +436,10 @@ pub struct RunInfo {
     pub exit_code: Option<i32>,
     pub command: Vec<String>,
     pub created_at_unix: u64,
+    /// F-309: last healthcheck verdict from `<run_dir>/health`, if a
+    /// healthcheck was configured for this run. `None` ⇒ no healthcheck (the
+    /// common case). NOT part of the memo key.
+    pub health: Option<crate::healthcheck::Health>,
 }
 
 pub enum LogStream {
@@ -678,12 +697,36 @@ fn send_ctl_op(dir: &std::path::Path, op: &str) -> Option<serde_json::Value> {
 // spawn_detached
 // ---------------------------------------------------------------------------
 
-pub fn spawn_detached(spec: &RunSpec, _store: &Store) -> Result<RunHandle> {
+pub fn spawn_detached(spec: &RunSpec, store: &Store) -> Result<RunHandle> {
+    spawn_detached_with_health(spec, store, None)
+}
+
+/// `spawn_detached` plus an optional healthcheck (F-309). When `hc` is
+/// `Some`, it is persisted into the run dir (`healthcheck.json`) and the
+/// detached supervisor probes it on its interval, writing `Healthy`/`Unhealthy`
+/// to `<run_dir>/health` so `ps` can surface liveness. The healthcheck is a
+/// post-result probe and is **not** part of the memo key (build-spec-parity.md
+/// §0); it never affects caching or the run's output.
+///
+/// `spawn_detached` delegates here with `None`, so its 2 existing callers (the
+/// CLI run handler and compose's `start_service_detached`) keep their behaviour
+/// unchanged.
+pub fn spawn_detached_with_health(
+    spec: &RunSpec,
+    _store: &Store,
+    hc: Option<&crate::healthcheck::Healthcheck>,
+) -> Result<RunHandle> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let id = new_run_id();
     let dir = run_dir_for_id(&id);
     std::fs::create_dir_all(&dir).map_err(LightrError::Io)?;
+
+    // Persist the healthcheck (if any) BEFORE forking the supervisor, so the
+    // supervisor finds it on startup. Not in the memo key (§0).
+    if let Some(hc) = hc {
+        crate::healthcheck::save_for(&dir, hc)?;
+    }
 
     let created_at_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -785,6 +828,11 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
     // Write status = running
     std::fs::write(dir.join("status"), "running").map_err(LightrError::Io)?;
 
+    // F-309: load an optional healthcheck persisted by spawn_detached_with_health.
+    // The probe runs on the supervisor's poll loop at `interval_s`; its verdict
+    // is written to `<run_dir>/health` for `ps`. Never part of the memo key (§0).
+    let health_cfg = crate::healthcheck::load_for(dir)?;
+
     // The control transport is cfg-split below; the JSON wire protocol
     // (newline-delimited `{"op":...}` request → `{...}` reply) is identical.
 
@@ -792,15 +840,30 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
     {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
         // Bind ctl.sock
         let sock_path = ctl_sock_path(dir);
         let listener = UnixListener::bind(&sock_path).map_err(LightrError::Io)?;
         listener.set_nonblocking(true).map_err(LightrError::Io)?;
 
-        // Main loop: serve ctl.sock + poll child
+        // Healthcheck cwd is the run's cwd; first probe runs immediately so `ps`
+        // surfaces a verdict without waiting a full interval.
+        let health_cwd = cwd.clone();
+        let mut next_probe = Instant::now();
+
+        // Main loop: serve ctl.sock + poll child + (if configured) probe health
         let exit_code = loop {
+            // Healthcheck probe round (interval-gated). A failing probe flips
+            // <run_dir>/health to "unhealthy"; never aborts the loop.
+            if let Some(ref hc) = health_cfg {
+                if Instant::now() >= next_probe {
+                    let verdict = crate::healthcheck::probe(hc, &health_cwd);
+                    crate::healthcheck::write_state(dir, verdict);
+                    next_probe = Instant::now() + Duration::from_secs(hc.interval_s.max(1));
+                }
+            }
+
             // Poll child
             if let Some(status) = child.try_wait().map_err(LightrError::Io)? {
                 use std::os::unix::process::ExitStatusExt;
@@ -901,8 +964,21 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
         // instance, publish the sentinel so clients/`ps` see the endpoint.
         std::fs::write(&sentinel, b"live").map_err(LightrError::Io)?;
 
+        // F-309: same interval-gated health probe as the unix path. WIN-PATH:
+        // run_once uses `cmd /C`; runtime-validatable only on a real Windows box.
+        let health_cwd = cwd.clone();
+        let mut next_probe = std::time::Instant::now();
+
         // Main loop: poll child (identical cadence to the unix path).
         let exit_code = loop {
+            if let Some(ref hc) = health_cfg {
+                if std::time::Instant::now() >= next_probe {
+                    let verdict = crate::healthcheck::probe(hc, &health_cwd);
+                    crate::healthcheck::write_state(dir, verdict);
+                    next_probe =
+                        std::time::Instant::now() + Duration::from_secs(hc.interval_s.max(1));
+                }
+            }
             if let Some(status) = child.try_wait().map_err(LightrError::Io)? {
                 // No signal() on Windows; ExitStatus::code is authoritative.
                 break status.code().unwrap_or(1);
@@ -1122,12 +1198,15 @@ pub fn ps(store_home: &std::path::Path) -> Result<Vec<RunInfo>> {
             .as_deref()
             .and_then(parse_exit_code_from_status);
 
+        let health = crate::healthcheck::read_state(&path);
+
         infos.push(RunInfo {
             id,
             running,
             exit_code,
             command: spec.command,
             created_at_unix: spec.created_at_unix,
+            health,
         });
     }
 
@@ -2267,5 +2346,296 @@ mod tests {
             .lines()
             .count();
         assert_eq!(line_count, 1, "side effect must be written exactly once");
+    }
+
+    // -----------------------------------------------------------------------
+    // F-309 — secrets / configs (build-spec-parity.md §0/§4)
+    // -----------------------------------------------------------------------
+
+    /// Snapshot a dir holding one file `<file_name>` with `bytes` as ref `name`.
+    /// Returns the ref's root digest.
+    fn snapshot_file_ref(
+        store: &Store,
+        name: &str,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> lightr_core::Digest {
+        let src = tempfile::tempdir().unwrap();
+        fs::write(src.path().join(file_name), bytes).unwrap();
+        let rep = lightr_index::snapshot(src.path(), store, name).expect("snapshot ref");
+        rep.root
+    }
+
+    // Changing a secret REF must change the memo key (cache miss). Two specs
+    // differing only in a secret ref must produce different keys (§0).
+    #[test]
+    fn secret_ref_changes_memo_key() {
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+        let store = make_store(&home_path);
+
+        // Two distinct refs (different content ⇒ different root digest).
+        snapshot_file_ref(&store, "sec-a", "token", b"AAAA");
+        snapshot_file_ref(&store, "sec-b", "token", b"BBBB");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        fs::create_dir(&work).unwrap();
+
+        let mk = |ref_name: &str| RunSpec {
+            cwd: work.clone(),
+            inputs: vec![],
+            command: vec!["/bin/echo".to_string(), "x".to_string()],
+            env_keys: vec![],
+            mounts: vec![],
+            secrets: vec![StoreFile {
+                name: "token".to_string(),
+                ref_name: ref_name.to_string(),
+            }],
+            configs: vec![],
+        };
+
+        let spec_a = mk("sec-a");
+        let spec_b = mk("sec-b");
+
+        // predict computes the key without executing (routes through assemble_key
+        // because secrets is non-empty).
+        let (key_a, _) = predict(&spec_a, &store).expect("predict a");
+        let (key_b, _) = predict(&spec_b, &store).expect("predict b");
+        assert_ne!(
+            key_a, key_b,
+            "a different secret ref must produce a different memo key"
+        );
+
+        // And the same secret ref is stable.
+        let (key_a2, _) = predict(&spec_a, &store).expect("predict a2");
+        assert_eq!(key_a, key_a2, "same secret ref ⇒ stable key");
+    }
+
+    // A config ref likewise contributes to the key, in its own domain (so a
+    // secret and a config with the SAME name+ref do not collide).
+    #[test]
+    fn config_ref_changes_memo_key_and_domain_separated() {
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+        let store = make_store(&home_path);
+
+        snapshot_file_ref(&store, "cfg-ref", "data", b"hello");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        fs::create_dir(&work).unwrap();
+
+        let base = || RunSpec {
+            cwd: work.clone(),
+            inputs: vec![],
+            command: vec!["/bin/echo".to_string(), "x".to_string()],
+            env_keys: vec![],
+            mounts: vec![],
+            secrets: vec![],
+            configs: vec![],
+        };
+
+        let mut as_secret = base();
+        as_secret.secrets = vec![StoreFile {
+            name: "f".to_string(),
+            ref_name: "cfg-ref".to_string(),
+        }];
+        let mut as_config = base();
+        as_config.configs = vec![StoreFile {
+            name: "f".to_string(),
+            ref_name: "cfg-ref".to_string(),
+        }];
+
+        let (key_secret, _) = predict(&as_secret, &store).expect("predict secret");
+        let (key_config, _) = predict(&as_config, &store).expect("predict config");
+        let (key_none, _) = predict(&base(), &store).expect("predict none");
+
+        assert_ne!(key_secret, key_none, "a secret must change the key");
+        assert_ne!(key_config, key_none, "a config must change the key");
+        assert_ne!(
+            key_secret, key_config,
+            "secret vs config domains must be separated (same name+ref must not collide)"
+        );
+    }
+
+    // Empty secrets/configs ⇒ key is byte-identical to a spec with no F-309
+    // fields, i.e. the storeless fast path. Guards the 16 existing callers.
+    #[test]
+    fn empty_secrets_configs_leave_key_unchanged() {
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+        let store = make_store(&home_path);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        fs::create_dir(&work).unwrap();
+        fs::write(work.join("f.txt"), b"data").unwrap();
+
+        let spec = make_spec(&work, vec!["/bin/echo", "x"]);
+        // build_key is the storeless fast path (no mounts/secrets/configs).
+        let fast = build_key(&spec).expect("fast key");
+        // predict routes through the same fast path when there are no
+        // store-backed inputs; it must agree byte-for-byte.
+        let (predicted, _) = predict(&spec, &store).expect("predict");
+        assert_eq!(
+            fast, predicted,
+            "empty secrets/configs ⇒ fast path key == predict key"
+        );
+    }
+
+    // Secret hydrated to <cwd>/.lightr/secrets/<name> at 0600; config at
+    // <cwd>/.lightr/configs/<name> at 0644 (unix). The ref is a snapshot tree,
+    // so <name> is a dir holding the snapshot's file at the requested mode.
+    #[test]
+    fn secret_config_hydrate_path_and_mode() {
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+        let store = make_store(&home_path);
+
+        snapshot_file_ref(&store, "my-secret", "token.txt", b"s3cr3t");
+        snapshot_file_ref(&store, "my-config", "app.conf", b"k=v");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        fs::create_dir(&work).unwrap();
+
+        secrets::hydrate(
+            &work,
+            &store,
+            &[StoreFile {
+                name: "sec".to_string(),
+                ref_name: "my-secret".to_string(),
+            }],
+            &[StoreFile {
+                name: "cfg".to_string(),
+                ref_name: "my-config".to_string(),
+            }],
+        )
+        .expect("hydrate ok");
+
+        let secret_file = work.join(".lightr/secrets/sec/token.txt");
+        let config_file = work.join(".lightr/configs/cfg/app.conf");
+        assert!(secret_file.exists(), "secret file must be materialized");
+        assert!(config_file.exists(), "config file must be materialized");
+        assert_eq!(fs::read(&secret_file).unwrap(), b"s3cr3t");
+        assert_eq!(fs::read(&config_file).unwrap(), b"k=v");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let smode = fs::metadata(&secret_file).unwrap().permissions().mode() & 0o777;
+            let cmode = fs::metadata(&config_file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(smode, 0o600, "secret file must be 0600, got {smode:o}");
+            assert_eq!(cmode, 0o644, "config file must be 0644, got {cmode:o}");
+        }
+    }
+
+    // A missing secret ref must fail CLOSED (Err), no run proceeds.
+    #[test]
+    fn missing_secret_ref_fails_closed() {
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+        let store = make_store(&home_path);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        fs::create_dir(&work).unwrap();
+
+        let err = secrets::hydrate(
+            &work,
+            &store,
+            &[StoreFile {
+                name: "sec".to_string(),
+                ref_name: "no-such-ref".to_string(),
+            }],
+            &[],
+        );
+        assert!(err.is_err(), "missing secret ref must fail closed");
+
+        // And via run_memoized_with: a missing secret aborts the whole run.
+        let spec = RunSpec {
+            cwd: work.clone(),
+            inputs: vec![],
+            command: vec!["/bin/echo".to_string(), "x".to_string()],
+            env_keys: vec![],
+            mounts: vec![],
+            secrets: vec![StoreFile {
+                name: "sec".to_string(),
+                ref_name: "no-such-ref".to_string(),
+            }],
+            configs: vec![],
+        };
+        let run_err = run_memoized_with(&spec, &store, &lightr_core::ResourceLimits::default());
+        assert!(run_err.is_err(), "run with a missing secret must Err");
+    }
+
+    // End-to-end: a detached supervisor with a FAILING healthcheck writes
+    // "unhealthy" to <run_dir>/health and ps surfaces it. Uses supervise()
+    // directly (spawn_detached needs the real binary).
+    #[test]
+    fn supervisor_health_flips_unhealthy() {
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+
+        // Build a run dir with a long-lived child + a persisted FAILING probe.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let id = format!("{nanos}-health");
+        let run_dir = home_path.join("run").join(&id);
+        fs::create_dir_all(&run_dir).unwrap();
+
+        let spec_on_disk = SpecOnDisk {
+            cwd: cwd.to_string_lossy().into_owned(),
+            command: vec!["sleep".to_string(), "10".to_string()],
+            env_keys: vec![],
+            mounts: vec![],
+            detached: false,
+            created_at_unix: nanos / 1_000_000_000,
+        };
+        write_spec_json(&run_dir, &spec_on_disk).unwrap();
+        healthcheck::save_for(
+            &run_dir,
+            &healthcheck::Healthcheck {
+                cmd: "exit 1".to_string(), // always fails ⇒ Unhealthy
+                interval_s: 1,
+                retries: 0,
+            },
+        )
+        .unwrap();
+
+        let run_dir_clone = run_dir.clone();
+        let t = std::thread::spawn(move || supervise(&run_dir_clone).unwrap_or(-1));
+
+        // Wait for the supervisor to write the first health verdict.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut health = None;
+        while Instant::now() < deadline {
+            if let Some(h) = healthcheck::read_state(&run_dir) {
+                health = Some(h);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            health,
+            Some(healthcheck::Health::Unhealthy),
+            "a failing healthcheck must flip the run to Unhealthy"
+        );
+
+        // ps surfaces the same verdict while the run is alive.
+        let infos = ps(&home_path).expect("ps");
+        let info = infos.iter().find(|i| i.id == id).expect("run in ps");
+        assert_eq!(info.health, Some(healthcheck::Health::Unhealthy));
+
+        // Clean up the sleeper + supervisor.
+        let _ = stop(&run_dir, 2);
+        let _ = t.join();
     }
 }
