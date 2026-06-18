@@ -33,6 +33,8 @@ use lightr_index::{hydrate, snapshot};
 use lightr_store::Store;
 use serde::Serialize;
 
+use super::bench_compete_docker::{self as dp};
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Fixture sizing
 // ──────────────────────────────────────────────────────────────────────────────
@@ -41,7 +43,7 @@ use serde::Serialize;
 /// the ~10 MB bench fixture is too small for indicator #3). Tests MUST override
 /// this with a tiny size via `MaterializeSize::small()`.
 #[derive(Clone, Copy)]
-struct MaterializeSize {
+pub(crate) struct MaterializeSize {
     /// number of 1 MiB files to write
     files_1mib: usize,
 }
@@ -65,6 +67,7 @@ impl MaterializeSize {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Workload {
+    Install,
     Materialize,
     ColdRun,
     ReRun,
@@ -73,7 +76,8 @@ enum Workload {
 }
 
 impl Workload {
-    const ALL: [Workload; 5] = [
+    const ALL: [Workload; 6] = [
+        Workload::Install,
         Workload::Materialize,
         Workload::ColdRun,
         Workload::ReRun,
@@ -85,6 +89,7 @@ impl Workload {
     fn select(flag: &str) -> Option<Vec<Workload>> {
         match flag {
             "all" => Some(Workload::ALL.to_vec()),
+            "install" => Some(vec![Workload::Install]),
             "materialize" => Some(vec![Workload::Materialize]),
             "cold-run" => Some(vec![Workload::ColdRun]),
             "re-run" => Some(vec![Workload::ReRun]),
@@ -217,6 +222,8 @@ fn detect_all(runtimes: &[Runtime]) -> Vec<Detected> {
 enum Unit {
     Millis,
     Count,
+    /// Megabytes on disk — install footprint (indicator #1).
+    Mb,
 }
 
 impl Unit {
@@ -224,6 +231,7 @@ impl Unit {
         match self {
             Unit::Millis => "ms",
             Unit::Count => "",
+            Unit::Mb => "MB",
         }
     }
 }
@@ -289,15 +297,16 @@ impl CmpRow {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Run `f` once as warmup, then `n` times; return the median duration.
-/// Mirrors `bench.rs::median_of`.
-fn median_of<F: FnMut() -> Duration>(mut f: F, n: usize) -> Duration {
+/// Mirrors `bench.rs::median_of`. `pub(crate)` so the Docker probe times its
+/// spawned ops with the IDENTICAL methodology (warmup + median-of-N).
+pub(crate) fn median_of<F: FnMut() -> Duration>(mut f: F, n: usize) -> Duration {
     let _ = f();
     let mut samples: Vec<Duration> = (0..n).map(|_| f()).collect();
     samples.sort();
     samples[n / 2]
 }
 
-fn dur_ms(d: Duration) -> f64 {
+pub(crate) fn dur_ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
@@ -321,8 +330,9 @@ fn time_lightr(home: &Path, args: &[&str]) -> Duration {
 }
 
 /// Number of timed samples per measurement (after 1 warmup). Small to keep the
-/// proof harness snappy; medians still suppress single-sample noise.
-const SAMPLES: usize = 5;
+/// proof harness snappy; medians still suppress single-sample noise. `pub(crate)`
+/// so the Docker probe samples its spawned ops identically.
+pub(crate) const SAMPLES: usize = 5;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Fixture builders (self-contained; adapted from bench.rs)
@@ -331,7 +341,7 @@ const SAMPLES: usize = 5;
 /// Build a materialize fixture: `size.files_1mib` × 1 MiB files under a few
 /// subdirs. Returns the root. The bytes are identical regardless of runtime —
 /// that is the point of a head-to-head.
-fn build_materialize_fixture(root: &Path, size: MaterializeSize) -> std::io::Result<()> {
+pub(crate) fn build_materialize_fixture(root: &Path, size: MaterializeSize) -> std::io::Result<()> {
     let dirs = ["a", "b", "c", "d"];
     for d in dirs {
         std::fs::create_dir_all(root.join(d))?;
@@ -345,8 +355,9 @@ fn build_materialize_fixture(root: &Path, size: MaterializeSize) -> std::io::Res
     Ok(())
 }
 
-/// Write a 3-step Dockerfile + context into `dir` (mirrors bench.rs).
-fn make_bench_dockerfile(dir: &Path) -> std::io::Result<()> {
+/// Write a 3-step Dockerfile + context into `dir` (mirrors bench.rs). `pub(crate)`
+/// so the Docker `build` probe builds over the IDENTICAL context bytes.
+pub(crate) fn make_bench_dockerfile(dir: &Path) -> std::io::Result<()> {
     std::fs::write(dir.join("fileA.txt"), b"alpha content")?;
     std::fs::write(dir.join("fileB.txt"), b"beta content")?;
     let dockerfile = concat!(
@@ -462,6 +473,18 @@ fn lightr_build_cached_ms(home: &Path) -> Option<f64> {
     // Cold build (not timed) warms the AC.
     let _ = time_lightr(&build_home, &args);
     Some(dur_ms(median_of(|| time_lightr(&build_home, &args), 3)))
+}
+
+/// Measure Lightr `install` footprint (indicator #1): the size on disk of THIS
+/// running binary — the entire install (single static binary, no VM, no daemon).
+/// Returns MB. At marketing time the harness is the RELEASE binary, so this is
+/// the shipped footprint; a debug/test binary measures honestly as itself (still
+/// an order of magnitude under Docker). `None` (→ NA) if `current_exe`/metadata
+/// is unavailable — never a guess.
+fn lightr_install_mb() -> Option<f64> {
+    let exe = std::env::current_exe().ok()?;
+    let bytes = std::fs::metadata(&exe).ok()?.len();
+    Some(bytes as f64 / (1024.0 * 1024.0))
 }
 
 /// Is this `ps` `comm` field OUR `lightr` binary (exactly), as opposed to some
@@ -601,26 +624,95 @@ fn make_tiny_oci_tar(dir: &Path) -> std::io::Result<PathBuf> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Competitor spawn-guard + dispatch
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Whether the head-to-head is allowed to SPAWN competitor containers.
+///
+/// `Spawn` is set ONLY by the real CLI entry (`run`). Tests and CI construct
+/// `NeverSpawn`, so a present competitor is an honest SKIP and `cargo test` can
+/// never launch a container — even on a docker-equipped GitHub runner. This is a
+/// structural tense-law guard, not a convention.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ProbePolicy {
+    Spawn,
+    NeverSpawn,
+}
+
+/// Map one competitor for a spawn-workload to a `Cell`, enforcing the spawn-guard
+/// and the docker-only probe scope. `probe` is the per-workload Docker measurement
+/// (resolved binary path + a scratch dir for its docker-side fixtures).
+///
+/// - absent on PATH ⇒ `Skip("absent on PATH")`
+/// - present but `NeverSpawn` ⇒ `Skip` (test/CI guard — never spawns a container)
+/// - present + `Spawn` + Docker ⇒ run the probe, map `Outcome` → `Cell`
+/// - present + `Spawn` + non-Docker ⇒ `Skip` (only Docker has a probe today)
+fn measure_competitor(
+    d: &Detected,
+    policy: ProbePolicy,
+    scratch: &Path,
+    probe: impl FnOnce(&Path, &Path) -> dp::Outcome,
+) -> Cell {
+    let Some(bin) = d.path.as_deref() else {
+        return Cell::Skip("absent on PATH");
+    };
+    if policy == ProbePolicy::NeverSpawn {
+        return Cell::Skip("competitor spawn disabled (test/CI tense-law guard)");
+    }
+    match d.runtime {
+        Runtime::Docker => match probe(bin, scratch) {
+            dp::Outcome::Measured(v) => Cell::Measured(v),
+            dp::Outcome::Skip(r) => Cell::Skip(r),
+        },
+        _ => Cell::Skip("head-to-head probe implemented for docker only"),
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Workload runner: builds the rows for one workload
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Run ONE workload and produce its row(s). `home` is a per-invocation tempdir
 /// used as `LIGHTR_HOME`; `detected` is the aligned competitor list; `size`
-/// scopes the materialize fixture (small in tests, 1 GB for real runs).
+/// scopes the materialize fixture (small in tests, 1 GB for real runs); `policy`
+/// is the spawn-guard (`Spawn` only from the real CLI; `NeverSpawn` in tests/CI).
 ///
-/// TENSE LAW is enforced here: a competitor cell is `Skip` unless the runtime is
-/// present AND we actually measured it. We do NOT spawn competitor container
-/// workloads (that path is forbidden in tests and never reached in CI); the
-/// competitor cells we DO fill are the ones measurable without fabricating —
-/// today: idle process footprint of a present, responsive runtime. Every other
-/// competitor cell is an honest SKIP with the reason.
+/// TENSE LAW is enforced here. Lightr is always measured (it is the subject). A
+/// competitor cell is `Skip` unless the runtime is present AND `policy == Spawn`
+/// AND the probe returns a real measurement. Under `NeverSpawn` a present
+/// competitor still SKIPs — so `cargo test`/CI never launch a container. A probe
+/// that times out or whose setup fails is itself an honest SKIP, never a guess.
 fn run_workload(
     wl: Workload,
     home: &Path,
     detected: &[Detected],
     size: MaterializeSize,
+    policy: ProbePolicy,
 ) -> Vec<CmpRow> {
+    // A path (not yet created) for any docker-side fixtures this workload needs;
+    // the probe creates what it uses. Unused by Install/Idle (no spawn fixtures).
+    let scratch = home.join(format!("docker-scratch-{wl:?}"));
     match wl {
+        Workload::Install => {
+            let lightr = match lightr_install_mb() {
+                Some(mb) => Cell::Measured(mb),
+                None => Cell::Na,
+            };
+            let competitors = detected
+                .iter()
+                .map(|d| {
+                    measure_competitor(d, policy, &scratch, |bin, _scr| {
+                        dp::install_footprint_mb(bin)
+                    })
+                })
+                .collect();
+            vec![CmpRow {
+                indicator: "install footprint",
+                unit: Unit::Mb,
+                lightr,
+                competitors,
+            }]
+        }
         Workload::Materialize => {
             let lightr = match lightr_materialize_ms(home, size) {
                 Some(ms) => Cell::Measured(ms),
@@ -629,14 +721,9 @@ fn run_workload(
             let competitors = detected
                 .iter()
                 .map(|d| {
-                    if d.present() {
-                        // Measuring a real `docker pull`+unpack would spawn a
-                        // container runtime — forbidden in tests/CI. At marketing
-                        // time the operator measures it; here we never fabricate.
-                        Cell::Skip("pull-unpack not measured (no container spawn)")
-                    } else {
-                        Cell::Skip("absent on PATH")
-                    }
+                    measure_competitor(d, policy, &scratch, |bin, scr| {
+                        dp::materialize_ms(bin, scr, size)
+                    })
                 })
                 .collect();
             vec![CmpRow {
@@ -650,13 +737,7 @@ fn run_workload(
             let lightr = Cell::Measured(lightr_coldrun_ms(home));
             let competitors = detected
                 .iter()
-                .map(|d| {
-                    if d.present() {
-                        Cell::Skip("cold pull+run not measured (no container spawn)")
-                    } else {
-                        Cell::Skip("absent on PATH")
-                    }
-                })
+                .map(|d| measure_competitor(d, policy, &scratch, dp::cold_run_ms))
                 .collect();
             vec![CmpRow {
                 indicator: "cold-run (import+run)",
@@ -669,15 +750,7 @@ fn run_workload(
             let lightr = Cell::Measured(lightr_rerun_ms(home));
             let competitors = detected
                 .iter()
-                .map(|d| {
-                    if d.present() {
-                        // A competitor has no memo fast-path: it re-runs. We do
-                        // not spawn it here; honest SKIP rather than a guess.
-                        Cell::Skip("re-run (no memo) not measured (no container spawn)")
-                    } else {
-                        Cell::Skip("absent on PATH")
-                    }
-                })
+                .map(|d| measure_competitor(d, policy, &scratch, dp::re_run_ms))
                 .collect();
             vec![CmpRow {
                 indicator: "re-run (memo hit)",
@@ -720,13 +793,7 @@ fn run_workload(
             };
             let competitors = detected
                 .iter()
-                .map(|d| {
-                    if d.present() {
-                        Cell::Skip("docker build not measured (no container spawn)")
-                    } else {
-                        Cell::Skip("absent on PATH")
-                    }
-                })
+                .map(|d| measure_competitor(d, policy, &scratch, dp::build_ms))
                 .collect();
             vec![CmpRow {
                 indicator: "build (memoized 2nd)",
@@ -922,6 +989,7 @@ fn build_report_json(rows: &[CmpRow], detected: &[Detected]) -> ReportJson {
                 unit: match row.unit {
                     Unit::Millis => "ms",
                     Unit::Count => "count",
+                    Unit::Mb => "mb",
                 },
                 lightr: CellJson::from_cell(&row.lightr),
                 competitors,
@@ -990,10 +1058,11 @@ pub fn run(vs: &[String], workload: &str, json: bool) -> i32 {
     // internal runner directly with MaterializeSize::small().
     let size = MaterializeSize::real();
 
-    // Run each workload, collecting rows.
+    // Run each workload, collecting rows. The real CLI entry is the ONLY caller
+    // that authorizes spawning competitor containers (tense-law spawn-guard).
     let mut rows: Vec<CmpRow> = Vec::new();
     for wl in &workloads {
-        rows.extend(run_workload(*wl, home, &detected, size));
+        rows.extend(run_workload(*wl, home, &detected, size, ProbePolicy::Spawn));
     }
 
     // Emit.
@@ -1053,9 +1122,9 @@ mod tests {
     }
 
     #[test]
-    fn workload_select_all_is_five() {
+    fn workload_select_all_is_six() {
         let got = Workload::select("all").expect("all parses");
-        assert_eq!(got.len(), 5);
+        assert_eq!(got.len(), 6);
     }
 
     #[test]
@@ -1065,6 +1134,7 @@ mod tests {
 
     #[test]
     fn workload_select_each_name() {
+        assert_eq!(Workload::select("install"), Some(vec![Workload::Install]));
         assert_eq!(
             Workload::select("materialize"),
             Some(vec![Workload::Materialize])
@@ -1146,7 +1216,13 @@ mod tests {
         }];
         let tmp = tempfile::tempdir().expect("tempdir");
         for wl in Workload::ALL {
-            let rows = run_workload(wl, tmp.path(), &detected, MaterializeSize::small());
+            let rows = run_workload(
+                wl,
+                tmp.path(),
+                &detected,
+                MaterializeSize::small(),
+                ProbePolicy::NeverSpawn,
+            );
             for row in &rows {
                 let c = &row.competitors[0];
                 match c {
@@ -1329,6 +1405,7 @@ mod tests {
             tmp.path(),
             &detected,
             MaterializeSize::small(),
+            ProbePolicy::NeverSpawn,
         );
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
@@ -1340,6 +1417,78 @@ mod tests {
         );
         // Competitor absent → SKIP, no number.
         assert!(matches!(row.competitors[0], Cell::Skip(_)));
+    }
+
+    #[test]
+    fn present_competitor_under_neverspawn_always_skips() {
+        // THE tense-law spawn-guard. A runtime detected as PRESENT (note the
+        // fake path is never executed — the guard returns before touching it)
+        // must still SKIP under NeverSpawn across EVERY spawn-workload. This is
+        // what makes `cargo test`/CI structurally unable to launch a container,
+        // even on a docker-equipped runner. (Idle is exempt: it counts processes
+        // via `ps`, which is not a container spawn.)
+        let detected = vec![Detected {
+            runtime: Runtime::Docker,
+            path: Some(PathBuf::from("/usr/local/bin/docker")),
+        }];
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for wl in [
+            Workload::Install,
+            Workload::Materialize,
+            Workload::ColdRun,
+            Workload::ReRun,
+            Workload::Build,
+        ] {
+            let rows = run_workload(
+                wl,
+                tmp.path(),
+                &detected,
+                MaterializeSize::small(),
+                ProbePolicy::NeverSpawn,
+            );
+            for row in &rows {
+                match &row.competitors[0] {
+                    Cell::Skip(r) => assert!(
+                        r.contains("spawn disabled"),
+                        "present+NeverSpawn must skip with the guard reason, got {r:?} in {}",
+                        row.indicator
+                    ),
+                    other => panic!(
+                        "present competitor under NeverSpawn must SKIP, got {other:?} in {}",
+                        row.indicator
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn install_row_measures_lightr_footprint_mb() {
+        // Lightr install footprint = the running binary's real size in MB,
+        // measured (never fabricated). Competitor is absent here → SKIP.
+        let detected = vec![Detected {
+            runtime: Runtime::Docker,
+            path: None,
+        }];
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let rows = run_workload(
+            Workload::Install,
+            tmp.path(),
+            &detected,
+            MaterializeSize::small(),
+            ProbePolicy::NeverSpawn,
+        );
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.indicator, "install footprint");
+        assert_eq!(row.unit, Unit::Mb);
+        match row.lightr {
+            Cell::Measured(mb) => assert!(mb > 0.0, "install footprint must be a positive MB"),
+            ref other => panic!("lightr install must be measured, got {other:?}"),
+        }
+        assert!(matches!(row.competitors[0], Cell::Skip(_)));
+        // MB renders with the unit suffix.
+        assert_eq!(render_cell(&Cell::Measured(4.16), Unit::Mb), "4.2MB");
     }
 
     #[test]
