@@ -54,11 +54,13 @@ pub(crate) enum Outcome {
 
 /// Hard wall-clock ceiling on any single spawned docker op (run / build-warm /
 /// cp / inspect / pull / create / rm). On the deadline the child is killed and the
-/// op is treated as a failure (→ honest SKIP), never a fabricated number.
-pub(crate) const OP_TIMEOUT: Duration = Duration::from_secs(60);
+/// op is treated as a failure (→ honest SKIP), never a fabricated number. 120 s so
+/// the slow timed op — a 1 GB `docker cp` across the Mac VM (~50 s measured) — has
+/// safe headroom and never false-times-out; cheap ops (run/build) finish in seconds.
+pub(crate) const OP_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Hard wall-clock ceiling on the heavy materialize SETUP (build the 1 GB tree,
-/// build the layer-carrying image, `docker create`). Exceeding it → honest SKIP.
+/// Hard wall-clock ceiling on the materialize SETUP (build the 1 GB host tree +
+/// `docker create` + copy the tree INTO the container). Exceeding it → honest SKIP.
 pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Per-process counter for unique resource names (NOT timestamps — a clock can
@@ -219,17 +221,27 @@ pub(crate) fn re_run_ms(docker_bin: &Path, _scratch: &Path) -> Outcome {
     ))
 }
 
-/// Indicator #4/#8 — build the same 3-step Dockerfile a SECOND time (warm layer
-/// cache). Docker's idiomatic path is `docker build` over an identical context
-/// (built via the shared `make_bench_dockerfile`). Returns the cached-build
-/// median in ms.
+/// Indicator #4/#8 — build a 3-step Dockerfile a SECOND time (warm layer cache),
+/// the fair cache-vs-memo race. The Lightr side uses `FROM scratch` + `RUN` (valid
+/// for Lightr's builder), which docker CANNOT build (scratch has no shell for
+/// `RUN`); so the docker side builds an equivalent `FROM alpine` 3-step context.
+/// Both measure the cached 2nd-build overhead — the indicator. Returns median ms.
 pub(crate) fn build_ms(docker_bin: &Path, scratch: &Path) -> Outcome {
-    // SETUP (untimed): create the SAME 3-step build context the Lightr side uses.
-    let ctx = scratch.join(unique_name("build-ctx"));
-    if std::fs::create_dir_all(&ctx).is_err() {
-        return Outcome::Skip("docker build context setup failed");
+    // SETUP (untimed): ensure the base image, then write a docker-buildable 3-step
+    // context (FROM alpine, mirroring the Lightr side's COPY/RUN/COPY shape).
+    if let Err(reason) = ensure_tiny_image(docker_bin) {
+        return Outcome::Skip(reason);
     }
-    if super::bench_compare::make_bench_dockerfile(&ctx).is_err() {
+    let ctx = scratch.join(unique_name("build-ctx"));
+    if std::fs::create_dir_all(&ctx).is_err()
+        || std::fs::write(ctx.join("fileA.txt"), b"alpha content").is_err()
+        || std::fs::write(ctx.join("fileB.txt"), b"beta content").is_err()
+        || std::fs::write(
+            ctx.join("Dockerfile"),
+            b"FROM alpine\nCOPY fileA.txt /a.txt\nRUN echo built\nCOPY fileB.txt /b.txt\n",
+        )
+        .is_err()
+    {
         return Outcome::Skip("docker build context setup failed");
     }
     let tag = unique_name("build");
@@ -257,58 +269,54 @@ pub(crate) fn build_ms(docker_bin: &Path, scratch: &Path) -> Outcome {
 }
 
 /// Indicator #3 — materialize a 1 GB tree into a usable host directory. Lightr
-/// uses `clonefile` CoW from CAS; Docker's idiomatic host-side path is
-/// `docker cp <container>:/data <dest>` from a container carrying the SAME bytes
-/// (built via the shared `build_materialize_fixture`). Returns the timed median
-/// in ms. SETUP (untimed): build/load the 1 GB-layer image + `docker create`.
+/// uses `clonefile` CoW from CAS; the fair Docker mirror is `docker cp
+/// <container>:/data <dest>` — a full byte copy of the SAME 1 GB across the Mac
+/// VM. SETUP (untimed): build the 1 GB host tree, `docker create` a container, and
+/// copy the tree INTO it (so the bytes live in docker's container fs, mirroring
+/// "bytes already in CAS"). We deliberately do NOT `docker build` a 1 GB image —
+/// sending a 1 GB build context to the VM costs minutes (measured: ~7 min, blows
+/// the budget); the cp-in is the faster, fairer ingest and fits the budget.
+/// Returns the timed median (the cp-OUT) in ms.
 pub(crate) fn materialize_ms(docker_bin: &Path, scratch: &Path, size: MaterializeSize) -> Outcome {
-    // SETUP (untimed, bounded by SETUP_TIMEOUT overall): build the SAME 1 GB tree.
+    // SETUP (untimed, bounded by SETUP_TIMEOUT): base image + the SAME 1 GB tree.
+    if let Err(reason) = ensure_tiny_image(docker_bin) {
+        return Outcome::Skip(reason);
+    }
     let setup_start = Instant::now();
-    let ctx = scratch.join(unique_name("mat-ctx"));
-    let tree = ctx.join("tree");
+    let tree = scratch.join(unique_name("mat-tree"));
     if std::fs::create_dir_all(&tree).is_err() {
         return Outcome::Skip("docker materialize setup failed");
     }
     if super::bench_compare::build_materialize_fixture(&tree, size).is_err() {
         return Outcome::Skip("docker materialize fixture build failed");
     }
-    if setup_start.elapsed() >= SETUP_TIMEOUT {
-        return Outcome::Skip("docker materialize setup exceeded timeout");
-    }
 
-    // Dockerfile carrying the tree as an image layer: FROM alpine; COPY tree /data.
-    if std::fs::write(ctx.join("Dockerfile"), b"FROM alpine\nCOPY tree /data\n").is_err() {
-        return Outcome::Skip("docker materialize setup failed");
-    }
-    let tag = unique_name("mat");
-    let ctx_str = ctx.to_string_lossy().to_string();
-
-    // Build the layer-carrying image (untimed). Each setup op is bounded by
-    // OP_TIMEOUT; the cumulative SETUP_TIMEOUT is re-checked between heavy steps.
-    if !setup_ok(docker_bin, &["build", "-t", &tag, &ctx_str]) {
-        let _ = setup_ok(docker_bin, &["rmi", "-f", &tag]);
-        return Outcome::Skip("docker materialize image build failed");
-    }
-    if setup_start.elapsed() >= SETUP_TIMEOUT {
-        let _ = setup_ok(docker_bin, &["rmi", "-f", &tag]);
-        return Outcome::Skip("docker materialize setup exceeded timeout");
-    }
-
-    // `docker create` a container from the image → capture its id (untimed). We
-    // need stdout here (the cid), so this one op does not go through run_op's
-    // null-stdout path; it is still bounded by OP_TIMEOUT via output_bounded.
-    let cid = match create_container(docker_bin, &tag) {
+    // A stopped container we can cp into/out of (`docker cp` works on a stopped
+    // container's fs; no need to start it).
+    let cid = match create_container(docker_bin, TINY_IMAGE) {
         Some(cid) => cid,
-        None => {
-            let _ = setup_ok(docker_bin, &["rmi", "-f", &tag]);
-            return Outcome::Skip("docker create (materialize) failed");
-        }
+        None => return Outcome::Skip("docker create (materialize) failed"),
     };
 
+    // Copy the 1 GB tree INTO the container (untimed ingest, bounded by the
+    // remaining setup budget) — docker's "get the bytes into the store".
+    let tree_str = tree.to_string_lossy().to_string();
+    let into = format!("{cid}:/data");
+    let ingest_budget = SETUP_TIMEOUT.saturating_sub(setup_start.elapsed());
+    if run_op(
+        &mut docker(docker_bin, &["cp", &tree_str, &into]),
+        ingest_budget,
+    )
+    .is_err()
+    {
+        let _ = setup_ok(docker_bin, &["rm", "-f", &cid]);
+        return Outcome::Skip("docker materialize ingest exceeded budget");
+    }
+
     // TIMED: extract the 1 GB tree to a FRESH host dir each sample —
-    // `docker cp <cid>:/data <dest>`, a full byte copy across the VM (mirrors
+    // `docker cp <cid>:/data <dest>`, the full byte copy across the VM (mirrors
     // Lightr's clonefile hydrate). Fresh dest per sample so no copy is a no-op.
-    let dest_base = ctx.join("dest");
+    let dest_base = scratch.join(unique_name("mat-dest"));
     let _ = std::fs::create_dir_all(&dest_base);
     let mut counter = 0usize;
     let src = format!("{cid}:/data");
@@ -317,7 +325,6 @@ pub(crate) fn materialize_ms(docker_bin: &Path, scratch: &Path, size: Materializ
         || {
             counter += 1;
             let dest = dest_base.join(format!("d{counter}"));
-            // Fresh dest each sample; cp creates the final component itself.
             let dest_str = dest.to_string_lossy().to_string();
             run_op(
                 &mut docker(docker_bin, &["cp", &src, &dest_str]),
@@ -326,9 +333,8 @@ pub(crate) fn materialize_ms(docker_bin: &Path, scratch: &Path, size: Materializ
         },
     ));
 
-    // Clean up container + image (best-effort).
+    // Clean up the container (best-effort).
     let _ = setup_ok(docker_bin, &["rm", "-f", &cid]);
-    let _ = setup_ok(docker_bin, &["rmi", "-f", &tag]);
     out
 }
 
