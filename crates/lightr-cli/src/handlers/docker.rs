@@ -159,6 +159,13 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             "ns",
             Some(possible_ref),
             false,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            30,
+            3,
         )
     } else if is_known_ref {
         // is_known_ref && cmd_args.is_empty()
@@ -187,6 +194,13 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             "native",
             None,
             false,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            30,
+            3,
         )
     }
 }

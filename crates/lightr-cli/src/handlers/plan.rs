@@ -157,6 +157,8 @@ fn plan_run(
         command: command.to_vec(),
         env_keys: env_keys.to_vec(),
         mounts,
+        secrets: vec![],
+        configs: vec![],
     };
 
     match predict(&spec, &store) {

@@ -55,7 +55,11 @@ fn parse_memory(s: &str) -> Result<u64> {
         'm' | 'M' => (&s[..s.len() - 1], 1024 * 1024),
         'g' | 'G' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
         '0'..='9' => (s, 1),
-        _ => return Err(LightrError::InvalidRef(format!("invalid memory limit: {s}"))),
+        _ => {
+            return Err(LightrError::InvalidRef(format!(
+                "invalid memory limit: {s}"
+            )))
+        }
     };
     let val: u64 = num
         .trim()
@@ -87,17 +91,46 @@ mod resource_limits_tests {
 
     #[test]
     fn parse_memory_suffixes() {
-        assert_eq!(ResourceLimits::parse(Some("512m"), None).unwrap().memory_bytes, Some(512 * 1024 * 1024));
-        assert_eq!(ResourceLimits::parse(Some("1g"), None).unwrap().memory_bytes, Some(1024 * 1024 * 1024));
-        assert_eq!(ResourceLimits::parse(Some("2048k"), None).unwrap().memory_bytes, Some(2048 * 1024));
-        assert_eq!(ResourceLimits::parse(Some("1073741824"), None).unwrap().memory_bytes, Some(1073741824));
+        assert_eq!(
+            ResourceLimits::parse(Some("512m"), None)
+                .unwrap()
+                .memory_bytes,
+            Some(512 * 1024 * 1024)
+        );
+        assert_eq!(
+            ResourceLimits::parse(Some("1g"), None)
+                .unwrap()
+                .memory_bytes,
+            Some(1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            ResourceLimits::parse(Some("2048k"), None)
+                .unwrap()
+                .memory_bytes,
+            Some(2048 * 1024)
+        );
+        assert_eq!(
+            ResourceLimits::parse(Some("1073741824"), None)
+                .unwrap()
+                .memory_bytes,
+            Some(1073741824)
+        );
     }
 
     #[test]
     fn parse_cpus_to_millis() {
-        assert_eq!(ResourceLimits::parse(None, Some("0.5")).unwrap().cpu_millis, Some(500));
-        assert_eq!(ResourceLimits::parse(None, Some("2")).unwrap().cpu_millis, Some(2000));
-        assert_eq!(ResourceLimits::parse(None, Some("1.5")).unwrap().cpu_millis, Some(1500));
+        assert_eq!(
+            ResourceLimits::parse(None, Some("0.5")).unwrap().cpu_millis,
+            Some(500)
+        );
+        assert_eq!(
+            ResourceLimits::parse(None, Some("2")).unwrap().cpu_millis,
+            Some(2000)
+        );
+        assert_eq!(
+            ResourceLimits::parse(None, Some("1.5")).unwrap().cpu_millis,
+            Some(1500)
+        );
     }
 
     #[test]
@@ -113,7 +146,9 @@ mod resource_limits_tests {
     #[test]
     fn default_is_unlimited() {
         assert!(ResourceLimits::default().is_unlimited());
-        assert!(!ResourceLimits::parse(Some("1m"), None).unwrap().is_unlimited());
+        assert!(!ResourceLimits::parse(Some("1m"), None)
+            .unwrap()
+            .is_unlimited());
     }
 }
 
