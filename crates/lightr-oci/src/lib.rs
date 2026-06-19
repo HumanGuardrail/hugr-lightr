@@ -336,8 +336,23 @@ enum PendingEntry {
 ///   Between passes — apply directory creates + all whiteouts.
 ///   Pass 2 — write regular files and symlinks.
 ///   After pass 2 — resolve hardlinks (FIX 5).
+/// Parse the per-call wall-clock deadline for `apply_layers`.
+///
+/// Default: 600 s.  Override via `LIGHTR_LAYER_TIMEOUT_SECS` (any non-integer
+/// or value ≤ 0 silently falls back to the default).
+fn layer_timeout_secs() -> u64 {
+    const DEFAULT_TIMEOUT_SECS: u64 = 600;
+    std::env::var("LIGHTR_LAYER_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_TIMEOUT_SECS)
+}
+
 fn apply_layers(tempdir: &Path, blobs: &[LayerBlob]) -> Result<u64> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(layer_timeout_secs());
     let mut skipped: u64 = 0;
+    let mut entry_count: u64 = 0;
 
     for blob in blobs {
         // Open a streaming reader over the blob.
@@ -376,6 +391,16 @@ fn apply_layers(tempdir: &Path, blobs: &[LayerBlob]) -> Result<u64> {
             std::collections::HashSet::new();
 
         for entry_result in archive.entries().map_err(LightrError::Io)? {
+            // Deadline check: sample every 256 entries to keep hot-path
+            // overhead ~zero.  Fail closed with InvalidManifest on exceed.
+            entry_count += 1;
+            if entry_count & 0xFF == 0 && std::time::Instant::now() >= deadline {
+                return Err(LightrError::InvalidManifest(format!(
+                    "layer extraction timed out after {} s (LIGHTR_LAYER_TIMEOUT_SECS)",
+                    layer_timeout_secs()
+                )));
+            }
+
             let mut entry = entry_result.map_err(LightrError::Io)?;
             let entry_path = entry.path().map_err(LightrError::Io)?.into_owned();
 
@@ -3281,5 +3306,79 @@ mod tests {
             matches!(err, LightrError::RefNotFound(_)),
             "unknown ref must be RefNotFound; got: {err:?}"
         );
+    }
+
+    // ── Fix 2: wall-clock guard on apply_layers ───────────────────────────────
+
+    /// A small synthetic layer applies successfully well within the default
+    /// 600 s deadline.  This is the sanity check that the guard does not trip
+    /// on normal workloads.
+    #[test]
+    fn test_apply_layers_normal_layer_within_deadline() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let (_home, store) = tmp_store_and_home();
+
+        let layer = make_layer(&[
+            ("hello.txt", b"hello world", 0o644),
+            ("etc/conf", b"key=value\n", 0o644),
+        ]);
+        let layout_dir = make_layout(tmp.path(), &[layer]);
+        let result = import_layout(&layout_dir, &store, "timeout-sanity");
+        assert!(
+            result.is_ok(),
+            "small layer must apply within default deadline; got: {:?}",
+            result.err()
+        );
+    }
+
+    /// `LIGHTR_LAYER_TIMEOUT_SECS` env override is parsed correctly.
+    /// We verify `layer_timeout_secs()` returns the overridden value when the
+    /// var is set to a valid positive integer, and returns the default (600)
+    /// when it is absent or invalid.
+    ///
+    /// NOTE: A true slow-tar stress test (force a timeout mid-extraction) is
+    /// out of scope for this wave — it would require injecting latency into the
+    /// tar reader, which would add test infrastructure complexity without adding
+    /// determinism.  The guard's correctness is verified by code review of the
+    /// entry-count sampling logic and the deadline comparison.
+    #[test]
+    fn test_layer_timeout_env_override_parsed() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Default: no env var set → 600.
+        std::env::remove_var("LIGHTR_LAYER_TIMEOUT_SECS");
+        assert_eq!(
+            layer_timeout_secs(),
+            600,
+            "default timeout must be 600 s when LIGHTR_LAYER_TIMEOUT_SECS is unset"
+        );
+
+        // Valid override: 120 s.
+        std::env::set_var("LIGHTR_LAYER_TIMEOUT_SECS", "120");
+        assert_eq!(
+            layer_timeout_secs(),
+            120,
+            "env override of 120 must be respected"
+        );
+
+        // Invalid value (non-integer) → falls back to default 600.
+        std::env::set_var("LIGHTR_LAYER_TIMEOUT_SECS", "not-a-number");
+        assert_eq!(
+            layer_timeout_secs(),
+            600,
+            "non-integer env value must fall back to 600"
+        );
+
+        // Zero is invalid (must be > 0) → falls back to default 600.
+        std::env::set_var("LIGHTR_LAYER_TIMEOUT_SECS", "0");
+        assert_eq!(
+            layer_timeout_secs(),
+            600,
+            "zero env value must fall back to 600"
+        );
+
+        // Restore env so other tests are unaffected.
+        std::env::remove_var("LIGHTR_LAYER_TIMEOUT_SECS");
     }
 }
