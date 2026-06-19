@@ -21,8 +21,11 @@
 //! --rootfs <ref>: hydrate the named ref CoW into a temp dir and hand it
 //!   to the engine as the rootfs. Incompatible with native (exit 2).
 //!
-//! NOTE: Engine runs (engine != native OR rootfs given) are NOT memoized.
-//! Only the default path (native + no rootfs) uses run_memoized.
+//! Memoized paths: (a) native + no rootfs → run_memoized (R0/R1); (b) vz +
+//! rootfs + NOT detached → run_vz_memoized (the vz-memo moat) — the 1st run
+//! boots the VM + captures {exit, stdout, stderr}, an identical 2nd run is an
+//! Action-Cache HIT replayed with NO VM boot. All other engine runs (ns/wsl, vz
+//! detached, vz without rootfs) are NOT memoized and take the plain engine path.
 
 use std::io::Write;
 
@@ -30,8 +33,8 @@ use lightr_core::{validate_ref_name, ResourceLimits};
 use lightr_engine::{engine_for, EngineKind, ExecSpec};
 use lightr_index;
 use lightr_run::{
-    run_memoized_deep, run_memoized_with, spawn_detached, DeepMemoConfig, Mount, PortMap, RunSpec,
-    StoreFile,
+    run_memoized_deep, run_memoized_with, run_vz_memoized, spawn_detached, DeepMemoConfig, Mount,
+    PortMap, RunSpec, StoreFile, VzMemoKey,
 };
 use lightr_store::Store;
 use serde::Serialize;
@@ -229,6 +232,132 @@ pub fn run(
     }
 
     let cwd = std::path::PathBuf::from(dir);
+
+    // ── vz-memo path (the product's core moat) ────────────────────────────────
+    // A `vz` container job with a rootfs that is NOT detached is MEMOIZABLE
+    // exactly like the native path: the 1st run boots the VM + captures
+    // {exit, stdout, stderr}; an identical 2nd run is a HIT that replays them
+    // from the Action Cache with NO VM boot. `-d`, non-rootfs, and non-vz cases
+    // fall through to the existing (non-memoized) engine path unchanged.
+    if let (EngineKind::Vz, Some(ref_name), false) = (engine_kind, rootfs_ref, detach) {
+        // 1. Resolve the rootfs ref → its content digest (the image identity for
+        //    the key), exactly like a mount's key contribution in assemble_key:
+        //    the ref's CURRENT root digest. A missing ref fails closed.
+        let rootfs_digest = match store.ref_get(ref_name) {
+            Ok(Some(rec)) => rec.root,
+            Ok(None) => {
+                eprintln!("lightr: run: rootfs ref not found: {ref_name}");
+                return 1;
+            }
+            Err(e) => return die_lightr(&e),
+        };
+
+        // 2. The vz engine injects exactly this env into the guest (a fixed
+        //    PATH; it does not inherit the host env). The memo key must use the
+        //    SAME env so the key and the executed environment agree. Keep this
+        //    in lock-step with VzEngine::run in crates/lightr-engine/src/lib.rs.
+        let vz_env: Vec<(String, String)> = vec![(
+            "PATH".to_string(),
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+        )];
+
+        let key = VzMemoKey {
+            command: command.to_vec(),
+            rootfs_digest,
+            env: vz_env,
+        };
+
+        // 3. Memoize. On a HIT the closure is never invoked (no VM boot). On a
+        //    MISS the closure hydrates the rootfs, boots the VM via the engine,
+        //    and reads the guest's stdout/stderr capture files back off the
+        //    rootfs share (with a brief retry for virtiofs flush lag — the same
+        //    pattern the engine uses for EXIT_FILE).
+        let outcome = run_vz_memoized(&key, &store, || {
+            // Hydrate the rootfs ref CoW into a temp dir for this boot.
+            let tmp = tempfile::TempDir::new().map_err(lightr_core::LightrError::Io)?;
+            lightr_index::hydrate(tmp.path(), &store, ref_name)?;
+            let rootfs_path = tmp.path().to_path_buf();
+
+            let engine = engine_for(engine_kind)?;
+            let spec = ExecSpec {
+                cwd: &cwd,
+                command,
+                rootfs: Some(rootfs_path.as_path()),
+                limits,
+            };
+            let exit = engine.run(&spec)?;
+
+            // Read the guest's stdout/stderr capture files off the rootfs share.
+            // PID1 fsyncs them BEFORE the console marker the engine waits on, so
+            // they should be present; the retry loop covers virtiofs flush lag
+            // (~30×100ms), mirroring the engine's EXIT_FILE read.
+            //
+            // Constants pinned to lightr_init::{STDOUT_FILE, STDERR_FILE}; kept
+            // inline to avoid a new crate dependency (handler is a pure client
+            // of the file channel, like the engine for CMD_FILE/EXIT_FILE).
+            const STDOUT_FILE: &str = "/.lightr-stdout";
+            const STDERR_FILE: &str = "/.lightr-stderr";
+            let stdout_path = rootfs_path.join(STDOUT_FILE.trim_start_matches('/'));
+            let stderr_path = rootfs_path.join(STDERR_FILE.trim_start_matches('/'));
+
+            let read_capture = |path: &std::path::Path| -> Vec<u8> {
+                for _ in 0..30 {
+                    if let Ok(bytes) = std::fs::read(path) {
+                        return bytes;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                // A missing capture file is an empty stream (never an error): the
+                // exit code is authoritative, and a non-zero exit isn't cached
+                // anyway. Empty + exit==0 is a legitimately empty-output run.
+                Vec::new()
+            };
+            let stdout = read_capture(&stdout_path);
+            let stderr = read_capture(&stderr_path);
+
+            // Keep the temp dir alive until after the files are read.
+            drop(tmp);
+
+            Ok((exit, stdout, stderr))
+        });
+
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(e) => return die_lightr(&e),
+        };
+
+        // 4. Replay: write stdout then stderr raw (lossless), print the memo
+        //    marker to stderr, exit = the (possibly replayed) exit code. Mirrors
+        //    the native handler's streaming + marker.
+        let hex = outcome.key.to_hex();
+        let short = &hex[..16];
+        let hit_str = if outcome.hit { "HIT" } else { "MISS" };
+        eprintln!("lightr: memo {hit_str} key={short}");
+        {
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            out.write_all(&outcome.stdout).ok();
+        }
+        {
+            let stderr = std::io::stderr();
+            let mut err = stderr.lock();
+            err.write_all(&outcome.stderr).ok();
+        }
+
+        if json {
+            let obj = RunJson {
+                key: hex.clone(),
+                hit: outcome.hit,
+                exit_code: outcome.exit_code,
+            };
+            eprintln!(
+                "lightr-json: {}",
+                serde_json::to_string(&obj).expect("serialize run")
+            );
+        }
+
+        return outcome.exit_code;
+    }
 
     if use_engine_path {
         // ── Engine path (non-memoized) ────────────────────────────────────────

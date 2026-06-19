@@ -37,6 +37,19 @@ pub const CMD_FILE: &str = "/.lightr-cmd";
 /// `EXIT_FILE_NAME` in crates/lightr-engine/src/lib.rs (vz_impl).
 pub const EXIT_FILE: &str = "/.lightr-exit-code";
 
+/// Stdout capture file: the guest redirects the command's stdout here (on the
+/// rootfs share, after chroot → rootfs root). The host reads it back after the
+/// VM stops so the run can be MEMOIZED exactly like the native path — the vz
+/// memo replays {exit, stdout, stderr} from the Action Cache on a HIT. The
+/// macOS `vz` output channel (no host AF_VSOCK), the sibling of [`EXIT_FILE`].
+pub const STDOUT_FILE: &str = "/.lightr-stdout";
+
+/// Stderr capture file: the guest redirects the command's stderr here (on the
+/// rootfs share, after chroot → rootfs root). The host reads it back after the
+/// VM stops for the vz memo (replayed on a HIT). The sibling of [`STDOUT_FILE`]
+/// / [`EXIT_FILE`].
+pub const STDERR_FILE: &str = "/.lightr-stderr";
+
 /// Exit code reported when the command cannot be spawned (ENOENT etc.). Matches
 /// the shell "command not found" convention so the host sees a real, non-zero
 /// outcome rather than a fabricated success.
