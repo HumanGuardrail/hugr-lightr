@@ -14,9 +14,13 @@
 //! an honest `Unsupported` error (Task Scheduler = a future ring), never a
 //! silent no-op.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::path::PathBuf;
 
-use lightr_run::restart::{self, RestartPolicy};
+use lightr_run::restart::RestartPolicy;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use lightr_run::restart;
 
 use crate::{exit::die_lightr, lightr_home};
 
@@ -26,6 +30,7 @@ fn io_err(kind: std::io::ErrorKind, msg: impl Into<String>) -> lightr_core::Ligh
 
 /// The `~/.lightr/units/` directory (uses the same home resolution as the rest
 /// of the CLI — `$LIGHTR_HOME`, else `~/.lightr`).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn units_dir() -> PathBuf {
     lightr_home().join("units")
 }

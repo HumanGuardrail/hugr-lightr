@@ -141,10 +141,16 @@ fn a19_engine_probes_honest() {
     let ns = caps
         .get("ns")
         .unwrap_or_else(|| panic!("engine ls must include 'ns'; got: {:?}", arr));
+    // ns is available IFF the host is Linux (honest probe): true on the Linux CI
+    // gate, false on macOS/Windows.
+    #[cfg(target_os = "linux")]
+    let ns_expected = Some(true);
+    #[cfg(not(target_os = "linux"))]
+    let ns_expected = Some(false);
     assert_eq!(
         ns.get("available").and_then(|v| v.as_bool()),
-        Some(false),
-        "ns.available must be false on macOS; got: {ns}"
+        ns_expected,
+        "ns.available must match host (Linux=true, else false); got: {ns}"
     );
     let ns_detail = ns
         .get("detail")
