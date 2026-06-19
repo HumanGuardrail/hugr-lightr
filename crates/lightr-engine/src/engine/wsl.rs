@@ -13,6 +13,8 @@
 
 use super::spec::ExecSpec;
 use super::Engine;
+// Used only by the non-Windows stub below; the Windows `wsl_impl` has its own.
+#[cfg(not(target_os = "windows"))]
 use lightr_core::{LightrError, Result};
 
 // ── WslEngine (Windows) ───────────────────────────────────────────────────────
