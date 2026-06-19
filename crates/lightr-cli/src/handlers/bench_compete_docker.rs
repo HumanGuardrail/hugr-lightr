@@ -165,6 +165,12 @@ fn median_outcome(r: Result<Duration, &'static str>) -> Outcome {
 /// The tiny image every run/re-run probe uses.
 const TINY_IMAGE: &str = "alpine:latest";
 
+/// The real image the `cold-image` probe pulls FROM COLD. MUST be DISTINCT from
+/// `TINY_IMAGE`: the cold-image probe deletes it per-sample to force a genuine
+/// re-fetch+extract, so sharing `TINY_IMAGE` would sabotage the run/re-run probes
+/// that depend on `ensure_tiny_image` keeping that image present.
+pub(crate) const COLD_IMAGE_REF: &str = "busybox:latest";
+
 /// Ensure `TINY_IMAGE` is present (UNTIMED setup): inspect it; if absent, pull it;
 /// if the pull fails AND it is still absent → `Err` (→ honest SKIP). Both the
 /// inspect and the pull are bounded by `OP_TIMEOUT`.
@@ -265,6 +271,33 @@ pub(crate) fn build_ms(docker_bin: &Path, scratch: &Path) -> Outcome {
 
     // Clean up the image (best-effort — cleanup failures never affect the result).
     let _ = setup_ok(docker_bin, &["rmi", "-f", &tag]);
+    out
+}
+
+/// cold-image: time `docker pull` of a real image FROM COLD. Each sample first
+/// removes the image (untimed intent: guarantee a real re-fetch+extract), then
+/// times the pull. Uses a DISTINCT image (COLD_IMAGE_REF) so it never disturbs
+/// the shared TINY_IMAGE the other probes depend on. Tense law: any failure → Skip.
+pub(crate) fn cold_image_ms(docker_bin: &Path, _scratch: &Path) -> Outcome {
+    let out = median_outcome(sample_median(
+        "docker pull (cold-image) failed or timed out during sampling",
+        || {
+            // Force cold: drop the image so the next pull genuinely re-fetches.
+            let _ = run_op(
+                &mut docker(docker_bin, &["rmi", "-f", COLD_IMAGE_REF]),
+                OP_TIMEOUT,
+            );
+            run_op(
+                &mut docker(docker_bin, &["pull", COLD_IMAGE_REF]),
+                OP_TIMEOUT,
+            )
+        },
+    ));
+    // Best-effort cleanup so we don't leave the image on the operator's box.
+    let _ = run_op(
+        &mut docker(docker_bin, &["rmi", "-f", COLD_IMAGE_REF]),
+        OP_TIMEOUT,
+    );
     out
 }
 

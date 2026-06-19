@@ -73,16 +73,18 @@ enum Workload {
     ReRun,
     Idle,
     Build,
+    ColdImage,
 }
 
 impl Workload {
-    const ALL: [Workload; 6] = [
+    const ALL: [Workload; 7] = [
         Workload::Install,
         Workload::Materialize,
         Workload::ColdRun,
         Workload::ReRun,
         Workload::Idle,
         Workload::Build,
+        Workload::ColdImage,
     ];
 
     /// Parse the `--workload` flag. `all` ⇒ every workload. Unknown ⇒ `None`.
@@ -95,6 +97,7 @@ impl Workload {
             "re-run" => Some(vec![Workload::ReRun]),
             "idle" => Some(vec![Workload::Idle]),
             "build" => Some(vec![Workload::Build]),
+            "cold-image" => Some(vec![Workload::ColdImage]),
             _ => None,
         }
     }
@@ -402,6 +405,42 @@ fn lightr_materialize_ms(home: &Path, size: MaterializeSize) -> Option<f64> {
             };
             let t = Instant::now();
             let _ = hydrate(&dest, &store, "bc-materialize");
+            t.elapsed()
+        },
+        SAMPLES,
+    );
+    Some(dur_ms(d))
+}
+
+/// cold-image (Lightr side): pull the SAME real image into the CAS ONCE (untimed
+/// setup), then time the CoW hydrate (median-of-N, fresh dest per sample). Returns
+/// None (→ honest Na) if the store/pull setup fails — never a fabricated number.
+fn lightr_cold_image_ms(home: &Path) -> Option<f64> {
+    let store_root = home.join("store");
+    let store = lightr_store::Store::open(&store_root).ok()?;
+    // SETUP (untimed): ingest the real image into CAS under a bench ref.
+    lightr_oci::pull(
+        super::bench_compete_docker::COLD_IMAGE_REF,
+        &store,
+        "bc-cold-image",
+    )
+    .ok()?;
+    let dest_base = home.join("cold-image-hydrate");
+    std::fs::create_dir_all(&dest_base).ok()?;
+    let mut counter = 0u64;
+    // TIMED: CoW hydrate into a FRESH dest each sample (mirrors lightr_materialize_ms,
+    // which absorbs a per-sample store reopen failure as Duration::ZERO so the
+    // median is honest about a degenerate sample without fabricating a fast number).
+    let d = median_of(
+        || {
+            counter += 1;
+            let dest = dest_base.join(format!("h{counter}"));
+            let store = match lightr_store::Store::open(&store_root) {
+                Ok(s) => s,
+                Err(_) => return Duration::ZERO,
+            };
+            let t = Instant::now();
+            let _ = lightr_index::hydrate(&dest, &store, "bc-cold-image");
             t.elapsed()
         },
         SAMPLES,
@@ -802,6 +841,22 @@ fn run_workload(
                 competitors,
             }]
         }
+        Workload::ColdImage => {
+            let lightr = match lightr_cold_image_ms(home) {
+                Some(ms) => Cell::Measured(ms),
+                None => Cell::Na,
+            };
+            let competitors = detected
+                .iter()
+                .map(|d| measure_competitor(d, policy, &scratch, dp::cold_image_ms))
+                .collect();
+            vec![CmpRow {
+                indicator: "cold-image (CAS→CoW)",
+                unit: Unit::Millis,
+                lightr,
+                competitors,
+            }]
+        }
     }
 }
 
@@ -1032,7 +1087,7 @@ pub fn run(vs: &[String], workload: &str, json: bool) -> i32 {
         Some(w) => w,
         None => {
             eprintln!(
-                "lightr: bench-compare: unknown workload '{workload}' (expected all, materialize, cold-run, re-run, idle, build)"
+                "lightr: bench-compare: unknown workload '{workload}' (expected all, materialize, cold-run, re-run, idle, build, cold-image)"
             );
             return 2;
         }
@@ -1122,9 +1177,9 @@ mod tests {
     }
 
     #[test]
-    fn workload_select_all_is_six() {
+    fn workload_select_all_is_seven() {
         let got = Workload::select("all").expect("all parses");
-        assert_eq!(got.len(), 6);
+        assert_eq!(got.len(), 7);
     }
 
     #[test]
@@ -1143,6 +1198,10 @@ mod tests {
         assert_eq!(Workload::select("re-run"), Some(vec![Workload::ReRun]));
         assert_eq!(Workload::select("idle"), Some(vec![Workload::Idle]));
         assert_eq!(Workload::select("build"), Some(vec![Workload::Build]));
+        assert_eq!(
+            Workload::select("cold-image"),
+            Some(vec![Workload::ColdImage])
+        );
     }
 
     // ── Cell + factor logic ───────────────────────────────────────────────────
@@ -1216,6 +1275,14 @@ mod tests {
         }];
         let tmp = tempfile::tempdir().expect("tempdir");
         for wl in Workload::ALL {
+            // cold-image is exempt from this whole-ALL sweep: run_workload measures
+            // the LIGHTR side first, and `lightr_cold_image_ms` does a real CAS pull
+            // that hits the NETWORK — forbidden in unit tests. Its absent-competitor
+            // SKIP is covered network-free by the guard-direct assertion in
+            // `present_competitor_under_neverspawn_always_skips`.
+            if wl == Workload::ColdImage {
+                continue;
+            }
             let rows = run_workload(
                 wl,
                 tmp.path(),
@@ -1458,6 +1525,31 @@ mod tests {
                         row.indicator
                     ),
                 }
+            }
+        }
+
+        // cold-image is also a spawn-workload, so its DOCKER probe must SKIP under
+        // NeverSpawn exactly like the others. We assert it via `measure_competitor`
+        // (the guard itself) rather than `run_workload`, because run_workload would
+        // FIRST measure the LIGHTR side, and `lightr_cold_image_ms` does a real
+        // `docker`-free CAS pull that hits the NETWORK — forbidden in unit tests.
+        // The guard returns Skip BEFORE the probe closure runs, so neither the
+        // network nor `dp::cold_image_ms` is touched here. This proves the same
+        // CI-safety lock for cold-image without making a network call.
+        let scratch = tmp.path().join("cold-image-scratch");
+        let cell = measure_competitor(
+            &detected[0],
+            ProbePolicy::NeverSpawn,
+            &scratch,
+            dp::cold_image_ms,
+        );
+        match cell {
+            Cell::Skip(r) => assert!(
+                r.contains("spawn disabled"),
+                "present+NeverSpawn (cold-image) must skip with the guard reason, got {r:?}"
+            ),
+            other => {
+                panic!("present competitor under NeverSpawn (cold-image) must SKIP, got {other:?}")
             }
         }
     }
