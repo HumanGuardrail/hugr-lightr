@@ -256,6 +256,21 @@ fn translate_ps(json: bool) -> i32 {
     crate::handlers::ps::run(json)
 }
 
+// ── docker inspect translation ────────────────────────────────────────────────
+
+fn translate_inspect(args: &[String], json: bool) -> i32 {
+    if args.is_empty() {
+        eprintln!("lightr docker: inspect: missing id argument");
+        return 2;
+    }
+    let id = &args[0];
+    note_translation("inspect", &[id]);
+    // docker inspect always outputs JSON; force json=true regardless of the
+    // global --json flag so the single-element array shape is emitted.
+    let _ = json; // json is superseded by the always-JSON contract of docker inspect
+    crate::handlers::inspect::run(id, true)
+}
+
 // ── docker compose translation ────────────────────────────────────────────────
 
 fn translate_compose(args: &[String], json: bool) -> i32 {
@@ -325,7 +340,9 @@ fn translate_compose(args: &[String], json: bool) -> i32 {
 
 pub fn run(args: &[String], json: bool, explain: bool) -> i32 {
     if args.is_empty() {
-        eprintln!("lightr docker: unsupported '' — supported: build|run|pull|images|ps|compose");
+        eprintln!(
+            "lightr docker: unsupported '' — supported: build|run|pull|images|ps|inspect|compose"
+        );
         return 2;
     }
 
@@ -338,10 +355,11 @@ pub fn run(args: &[String], json: bool, explain: bool) -> i32 {
         "pull" => translate_pull(rest, json),
         "images" => translate_images(json),
         "ps" => translate_ps(json),
+        "inspect" => translate_inspect(rest, json),
         "compose" => translate_compose(rest, json),
         other => {
             eprintln!(
-                "lightr docker: unsupported '{other}' — supported: build|run|pull|images|ps|compose"
+                "lightr docker: unsupported '{other}' — supported: build|run|pull|images|ps|inspect|compose"
             );
             2
         }
