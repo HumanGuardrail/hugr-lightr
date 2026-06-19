@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use switch::{forward, ForwardDecision, MacTable, PortId};
+use switch::{arp_gateway_reply, forward, ForwardDecision, MacTable, PortId};
 
 /// Read timeout on each member socket: short enough that a member thread
 /// re-checks the stop flag promptly, long enough to avoid a busy spin.
@@ -306,6 +306,14 @@ fn route(frame: &[u8], my_port: PortId, shared: &Shared) -> Vec<(PortId, Vec<u8>
         if let Some(reply) = dns::handle(frame, &names, shared.upstream) {
             return vec![(my_port, reply)];
         }
+    }
+
+    // 2.5 ARP for the embedded gateway → synthesize a reply on the ingress port.
+    //     The gateway (DHCP router + DNS server) has no member port, so nothing
+    //     else answers its ARP; without this a guest can never resolve the
+    //     nameserver's MAC and DNS-by-name silently fails.
+    if let Some(reply) = arp_gateway_reply(frame, shared.gateway, dhcp::GATEWAY_MAC) {
+        return vec![(my_port, reply)];
     }
 
     // 3. L2 learning switch.
