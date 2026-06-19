@@ -61,6 +61,11 @@ jobs:
         # stale-bin gate masked the F-309/scratch regression once — never again).
 
       - name: cargo test
+        # Windows runtime is WSL (a future ring): runtime-behavior tests (build
+        # RUN-exec, run, gc, compose) exercise unix commands and cannot pass
+        # windows-native. Windows validates build + clippy (cross-platform compile
+        # + lint); runtime tests run on Linux + macOS where the runtime exists.
+        if: ${{ matrix.runner != 'windows-latest' }}
         run: cargo test ${{ matrix.scope }}
         # LIGHTR_NET_TESTS intentionally unset; network tests excluded.
 
