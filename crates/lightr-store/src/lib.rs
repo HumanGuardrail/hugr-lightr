@@ -1,489 +1,21 @@
 //! lightr-store — frozen contract: build-spec v2 §4 (ADR-0009).
 //! Object plane + refs + AC + CoW ladder. Bodies are WP-2.
 
-use lightr_core::{Digest, LightrError, RefRecord, Result};
-#[cfg(target_os = "linux")]
-use std::fs::OpenOptions;
-#[cfg(unix)]
-use std::fs::Permissions;
-use std::fs::{self, File};
-use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
+use lightr_core::{Digest, RefRecord, Result};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-// ─────────────────────────────── gc lock guards ──────────────────────────────
+pub mod store;
 
-/// Held by a writer (put_bytes, ingest_file, ref_put, ac_put) for the duration
-/// of its write.  Acquires a SHARED advisory flock on `<root>/.gc.lock`.
-///
-/// Ordering: writers take LOCK_SH; gc takes LOCK_EX on the same file.
-/// This means gc cannot sweep an object that a concurrent writer is
-/// mid-publishing — the exclusive lock blocks until all shared locks drop.
-pub struct WriteGuard {
-    _file: File,
-}
+// Re-export the public surface that was previously flat in lib.rs.
+pub use store::cow::CowRung;
+pub use store::lock::{GcGuard, WriteGuard};
 
-impl Drop for WriteGuard {
-    fn drop(&mut self) {
-        // LOCK_UN is released automatically when the File fd closes, but
-        // we call it explicitly for clarity and portability.
-        #[cfg(unix)]
-        {
-            let fd = self._file.as_raw_fd();
-            unsafe {
-                libc::flock(fd, libc::LOCK_UN);
-            }
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-            use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
-            use windows_sys::Win32::System::IO::OVERLAPPED;
-            let handle = self._file.as_raw_handle();
-            if handle != INVALID_HANDLE_VALUE as _ {
-                let mut ol: OVERLAPPED = unsafe { std::mem::zeroed() };
-                unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut ol) };
-            }
-        }
-    }
-}
-
-/// Held by gc for the entire mark+sweep pass.  Acquires an EXCLUSIVE advisory
-/// flock on `<root>/.gc.lock`, blocking until all in-flight writers have
-/// released their shared locks.
-pub struct GcGuard {
-    _file: File,
-}
-
-impl Drop for GcGuard {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            let fd = self._file.as_raw_fd();
-            unsafe {
-                libc::flock(fd, libc::LOCK_UN);
-            }
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-            use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
-            use windows_sys::Win32::System::IO::OVERLAPPED;
-            let handle = self._file.as_raw_handle();
-            if handle != INVALID_HANDLE_VALUE as _ {
-                let mut ol: OVERLAPPED = unsafe { std::mem::zeroed() };
-                unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut ol) };
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CowRung {
-    Clone,
-    Reflink,
-    CopyRange,
-    /// Windows: best-effort ReFS block-clone via FSCTL_DUPLICATE_EXTENTS_TO_FILE.
-    /// Falls through to Copy on NTFS or any failure. // WIN-PATH
-    RefsBlockClone,
-    Copy,
-}
-
+/// The lightr content-addressed store.
 pub struct Store {
-    root: PathBuf,
+    pub(crate) root: PathBuf,
     rung: CowRung,
 }
-
-// ─────────────────────────────── helpers ────────────────────────────────────
-
-/// Returns the two-char shard prefix and 62-char remainder from a Digest hex.
-fn shard_parts(hex: &str) -> (&str, &str) {
-    (&hex[..2], &hex[2..])
-}
-
-/// Object path: <root>/objects/<2hex>/<62hex>
-fn object_path(root: &Path, d: &Digest) -> PathBuf {
-    let hex = d.to_hex();
-    let (pre, rest) = shard_parts(&hex);
-    root.join("objects").join(pre).join(rest)
-}
-
-/// Ref path: <root>/refs/<2hex>/<62hex of ref_key digest>
-fn ref_path(root: &Path, key: &Digest) -> PathBuf {
-    let hex = key.to_hex();
-    let (pre, rest) = shard_parts(&hex);
-    root.join("refs").join(pre).join(rest)
-}
-
-/// Refs-names path: <root>/refs-names/<2hex>/<62hex of ref_key digest>
-/// Content = UTF-8 ref name bytes, written once.
-fn refs_names_path(root: &Path, key: &Digest) -> PathBuf {
-    let hex = key.to_hex();
-    let (pre, rest) = shard_parts(&hex);
-    root.join("refs-names").join(pre).join(rest)
-}
-
-/// Refs-log directory: <root>/refs-log/<2hex>/<62hex of ref_key digest>/
-/// Each file is named `<n>` (decimal) and contains an encoded RefRecord.
-fn refs_log_dir(root: &Path, key: &Digest) -> PathBuf {
-    let hex = key.to_hex();
-    let (pre, rest) = shard_parts(&hex);
-    root.join("refs-log").join(pre).join(rest)
-}
-
-/// Image-config sidecar path: <root>/imgmeta/<2hex>/<62hex of ref_key digest>.
-/// Content = the 32-byte CAS digest of the original OCI image config JSON
-/// captured at `oci pull`/`import`, so `oci push` can re-emit a runnable image
-/// (entrypoint/cmd/env preserved) instead of a config-less single layer.
-fn imgmeta_path(root: &Path, key: &Digest) -> PathBuf {
-    let hex = key.to_hex();
-    let (pre, rest) = shard_parts(&hex);
-    root.join("imgmeta").join(pre).join(rest)
-}
-
-/// AC path: <root>/ac/<2hex>/<62hex>
-fn ac_path(root: &Path, key: &Digest) -> PathBuf {
-    let hex = key.to_hex();
-    let (pre, rest) = shard_parts(&hex);
-    root.join("ac").join(pre).join(rest)
-}
-
-/// A cheap nonce for temp file names: PID + digest-hex-prefix + nanos.
-fn temp_suffix(hint: &str) -> String {
-    let pid = std::process::id();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    format!("{pid}-{hint}-{nanos}")
-}
-
-/// fsync the parent directory so the rename (directory entry change) is
-/// crash-durable on macOS/Linux.
-///
-/// On Windows: NTFS has no portable directory fsync API (FlushFileBuffers on a
-/// directory handle is not guaranteed to flush directory metadata to disk across
-/// all NTFS configurations). This function is a documented no-op on Windows.
-/// The weaker guarantee: file data and the rename are durable once
-/// FlushFileBuffers is called on the FILE itself (done in atomic_write before
-/// rename), but the directory entry update may not be crash-synced.
-/// This is acceptable for the CAS store (objects are content-addressed;
-/// a missing directory entry after a crash means re-ingest, not corruption).
-fn fsync_dir(dir: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        let f = File::open(dir)?;
-        f.sync_all()?;
-    }
-    // Windows: documented no-op — see function doc above.
-    #[cfg(windows)]
-    let _ = dir;
-    Ok(())
-}
-
-/// Atomic write: write `data` to a temp file in `parent`, fsync the file,
-/// rename to `dest`, then fsync the parent directory so the rename is
-/// crash-durable.
-fn atomic_write(parent: &Path, dest: &Path, data: &[u8]) -> Result<()> {
-    fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(".tmp-{}", temp_suffix("w")));
-    {
-        let mut f = File::create(&tmp)?;
-        f.write_all(data)?;
-        // fsync before rename: flush file data to stable storage.
-        #[cfg(unix)]
-        f.sync_all()?;
-        #[cfg(windows)]
-        {
-            // WIN-PATH: FlushFileBuffers ensures data is on disk before rename.
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
-            let handle = f.as_raw_handle();
-            unsafe { FlushFileBuffers(handle as _) };
-        }
-    }
-    fs::rename(&tmp, dest)?;
-    fsync_dir(parent)?; // fsync parent dir after rename
-    Ok(())
-}
-
-/// chmod a path to the given mode bits (unix only).
-fn set_mode(path: &Path, mode: u32) -> Result<()> {
-    #[cfg(unix)]
-    {
-        fs::set_permissions(path, Permissions::from_mode(mode))?;
-    }
-    // Windows: mode bits are a Unix concept. Skip silently.
-    // Windows uses ACLs/read-only attribute semantics — not set here.
-    #[cfg(windows)]
-    {
-        let _ = (path, mode);
-    }
-    Ok(())
-}
-
-// ─────────────────────── CoW ladder (platform-gated) ────────────────────────
-
-/// Probe: find the best CoW rung available under `root`.
-/// Creates <root>/.probe-src, tries the ladder toward <root>/.probe-dst, cleans up both.
-fn probe_rung(root: &Path) -> CowRung {
-    let src = root.join(".probe-src");
-    let dst = root.join(".probe-dst");
-
-    // Write a tiny probe source file.
-    if File::create(&src)
-        .and_then(|mut f| f.write_all(b"probe"))
-        .is_err()
-    {
-        return CowRung::Copy;
-    }
-
-    let rung = try_ladder_probe(&src, &dst);
-
-    let _ = fs::remove_file(&src);
-    let _ = fs::remove_file(&dst);
-
-    rung
-}
-
-fn try_ladder_probe(src: &Path, dst: &Path) -> CowRung {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = fs::remove_file(dst);
-        if cow_clone(src, dst).is_ok() {
-            return CowRung::Clone;
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let _ = fs::remove_file(dst);
-        if cow_reflink(src, dst).is_ok() {
-            return CowRung::Reflink;
-        }
-        let _ = fs::remove_file(dst);
-        if cow_copy_range(src, dst).is_ok() {
-            return CowRung::CopyRange;
-        }
-    }
-
-    // WIN-PATH: probe for ReFS block-clone capability on Windows.
-    #[cfg(windows)]
-    {
-        let _ = fs::remove_file(dst);
-        if cow_refs_block_clone(src, dst).is_ok() {
-            return CowRung::RefsBlockClone;
-        }
-    }
-
-    CowRung::Copy
-}
-
-/// macOS: libc::clonefile(src, dst, 0)
-#[cfg(target_os = "macos")]
-fn cow_clone(src: &Path, dst: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-
-    let src_c = CString::new(src.as_os_str().as_encoded_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let dst_c = CString::new(dst.as_os_str().as_encoded_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-
-    let ret = unsafe { libc::clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-/// Linux: ioctl FICLONE (0x40049409)
-#[cfg(target_os = "linux")]
-fn cow_reflink(src: &Path, dst: &Path) -> std::io::Result<()> {
-    use std::os::unix::io::AsRawFd;
-
-    let src_file = File::open(src)?;
-    let dst_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(dst)?;
-    const FICLONE: libc::c_ulong = 0x40049409;
-    let ret = unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd()) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-/// Linux: copy_file_range loop
-#[cfg(target_os = "linux")]
-fn cow_copy_range(src: &Path, dst: &Path) -> std::io::Result<()> {
-    use std::os::unix::io::AsRawFd;
-
-    let src_file = File::open(src)?;
-    let dst_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(dst)?;
-    let src_len = src_file.metadata()?.len();
-    let mut off_in: libc::loff_t = 0;
-    let mut off_out: libc::loff_t = 0;
-    let mut remaining = src_len as usize;
-
-    while remaining > 0 {
-        let n = unsafe {
-            libc::copy_file_range(
-                src_file.as_raw_fd(),
-                &mut off_in as *mut libc::loff_t,
-                dst_file.as_raw_fd(),
-                &mut off_out as *mut libc::loff_t,
-                remaining,
-                0,
-            )
-        };
-        if n < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if n == 0 {
-            break;
-        }
-        remaining -= n as usize;
-    }
-    Ok(())
-}
-
-/// Windows: best-effort ReFS block-clone via FSCTL_DUPLICATE_EXTENTS_TO_FILE.
-///
-/// Only succeeds on ReFS volumes that support block-clone (DUPLICATE_EXTENTS_DATA).
-/// Falls through (returns Err) on NTFS or any failure — the caller then uses
-/// std::fs::copy as the required-correct fallback path.
-///
-/// // WIN-PATH — this path is only exercisable on a ReFS volume on a real Windows box.
-#[cfg(windows)]
-fn cow_refs_block_clone(src: &Path, dst: &Path) -> std::io::Result<()> {
-    use std::fs::OpenOptions;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::FALSE;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileStandardInfo, GetFileInformationByHandleEx, FILE_STANDARD_INFO,
-    };
-    use windows_sys::Win32::System::Ioctl::{
-        DUPLICATE_EXTENTS_DATA, FSCTL_DUPLICATE_EXTENTS_TO_FILE,
-    };
-    use windows_sys::Win32::System::IO::DeviceIoControl;
-
-    // Open src for reading.
-    let src_file = File::open(src)?;
-    let src_handle = src_file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
-
-    // Get file size.
-    let mut std_info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
-    let ok = unsafe {
-        GetFileInformationByHandleEx(
-            src_handle,
-            FileStandardInfo,
-            &mut std_info as *mut _ as *mut _,
-            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
-        )
-    };
-    if ok == FALSE {
-        return Err(std::io::Error::last_os_error());
-    }
-    let file_size = std_info.EndOfFile;
-
-    // Create / truncate dst, then PRE-SIZE it: FSCTL_DUPLICATE_EXTENTS_TO_FILE
-    // requires the destination region to already exist — a length-0 dst is
-    // rejected, which is why this fast path never engaged before.
-    let dst_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(dst)?;
-    dst_file.set_len(file_size as u64)?;
-    let dst_handle = dst_file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
-
-    // Build DUPLICATE_EXTENTS_DATA — clone the whole file from offset 0.
-    // NOTE: the FSCTL also wants ByteCount cluster-aligned; modern ReFS accepts a
-    // non-aligned final (EOF) extent, older volumes do not. This path is
-    // best-effort + WIN-PATH (unvalidated here): any rejection returns Err and
-    // the caller falls back to std::fs::copy (the required-correct path).
-    let dup_data = DUPLICATE_EXTENTS_DATA {
-        FileHandle: src_handle,
-        SourceFileOffset: 0,
-        TargetFileOffset: 0,
-        ByteCount: file_size,
-    };
-
-    let mut bytes_returned: u32 = 0;
-    let result = unsafe {
-        DeviceIoControl(
-            dst_handle,
-            FSCTL_DUPLICATE_EXTENTS_TO_FILE,
-            &dup_data as *const _ as *const _,
-            std::mem::size_of::<DUPLICATE_EXTENTS_DATA>() as u32,
-            std::ptr::null_mut(),
-            0,
-            &mut bytes_returned,
-            std::ptr::null_mut(),
-        )
-    };
-
-    if result == FALSE {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-/// Apply the CoW ladder to copy src→dst at the given rung; falls back to
-/// std::fs::copy on failure (silent-correct, not silent-hidden — counted
-/// at the call sites but not exposed in the API per R0 law).
-fn cow_copy_file(src: &Path, dst: &Path, rung: CowRung) -> Result<()> {
-    // Ensure parent exists.
-    if let Some(p) = dst.parent() {
-        fs::create_dir_all(p)?;
-    }
-
-    match try_cow_at_rung(src, dst, rung) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            // Fall through to std::fs::copy (silently-correct per spec).
-            let _ = fs::remove_file(dst); // remove partial if any
-            fs::copy(src, dst)?;
-            Ok(())
-        }
-    }
-}
-
-fn try_cow_at_rung(src: &Path, dst: &Path, rung: CowRung) -> std::io::Result<()> {
-    match rung {
-        #[cfg(target_os = "macos")]
-        CowRung::Clone => cow_clone(src, dst),
-        #[cfg(target_os = "linux")]
-        CowRung::Reflink => cow_reflink(src, dst),
-        #[cfg(target_os = "linux")]
-        CowRung::CopyRange => cow_copy_range(src, dst),
-        // WIN-PATH: attempt ReFS block-clone; falls through to Copy on failure.
-        #[cfg(windows)]
-        CowRung::RefsBlockClone => cow_refs_block_clone(src, dst),
-        // CowRung::Copy (always available) or any rung on the wrong platform:
-        _ => {
-            fs::copy(src, dst)?;
-            Ok(())
-        }
-    }
-}
-
-// ─────────────────────────────── Store impl ─────────────────────────────────
 
 impl Store {
     /// Open (or create) a store at `root`.
@@ -495,7 +27,7 @@ impl Store {
         fs::create_dir_all(root.join("refs"))?;
         fs::create_dir_all(root.join("ac"))?;
 
-        let rung = probe_rung(&root);
+        let rung = store::cow::probe_rung(&root);
 
         Ok(Store { root, rung })
     }
@@ -517,26 +49,12 @@ impl Store {
         self.rung
     }
 
-    // ── gc lock helpers ──────────────────────────────────────────────────────
-
-    /// Returns the path to the gc advisory lock file.
-    fn gc_lock_path(&self) -> PathBuf {
-        self.root.join(".gc.lock")
+    /// Store root path (gc walks objects from here). R1.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
-    /// Open (create if absent) the gc lock file.
-    fn gc_lock_file(&self) -> Result<File> {
-        let path = self.gc_lock_path();
-        // create + read + write + truncate(false): open for locking only;
-        // we never write content, so we explicitly preserve any existing bytes.
-        let f = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)?;
-        Ok(f)
-    }
+    // ── gc lock ──────────────────────────────────────────────────────────────
 
     /// Acquire a SHARED advisory lock on `<root>/.gc.lock`.
     ///
@@ -545,31 +63,7 @@ impl Store {
     /// gc's exclusive lock cannot be granted while any shared lock is held,
     /// so gc cannot sweep an object that a concurrent writer is mid-publishing.
     pub fn write_guard(&self) -> Result<WriteGuard> {
-        let f = self.gc_lock_file()?;
-        #[cfg(unix)]
-        {
-            let fd = f.as_raw_fd();
-            let ret = unsafe { libc::flock(fd, libc::LOCK_SH) };
-            if ret != 0 {
-                return Err(LightrError::Io(std::io::Error::last_os_error()));
-            }
-        }
-        #[cfg(windows)]
-        {
-            // WIN-PATH: shared (non-exclusive) lock via LockFileEx.
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::Foundation::FALSE;
-            use windows_sys::Win32::Storage::FileSystem::LockFileEx;
-            use windows_sys::Win32::System::IO::OVERLAPPED;
-            // Flags = 0: shared, blocking.
-            let mut ol: OVERLAPPED = unsafe { std::mem::zeroed() };
-            let ret =
-                unsafe { LockFileEx(f.as_raw_handle() as _, 0, 0, u32::MAX, u32::MAX, &mut ol) };
-            if ret == FALSE {
-                return Err(LightrError::Io(std::io::Error::last_os_error()));
-            }
-        }
-        Ok(WriteGuard { _file: f })
+        store::lock::write_guard(&self.root)
     }
 
     /// Acquire an EXCLUSIVE advisory lock on `<root>/.gc.lock`.
@@ -577,239 +71,71 @@ impl Store {
     /// Held by gc for the full mark+sweep pass.  Blocks until all in-flight
     /// writer shared locks have been released.
     pub fn gc_guard(&self) -> Result<GcGuard> {
-        let f = self.gc_lock_file()?;
-        #[cfg(unix)]
-        {
-            let fd = f.as_raw_fd();
-            let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-            if ret != 0 {
-                return Err(LightrError::Io(std::io::Error::last_os_error()));
-            }
-        }
-        #[cfg(windows)]
-        {
-            // WIN-PATH: exclusive lock via LockFileEx with LOCKFILE_EXCLUSIVE_LOCK.
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::Foundation::FALSE;
-            use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
-            use windows_sys::Win32::System::IO::OVERLAPPED;
-            let mut ol: OVERLAPPED = unsafe { std::mem::zeroed() };
-            let ret = unsafe {
-                LockFileEx(
-                    f.as_raw_handle() as _,
-                    LOCKFILE_EXCLUSIVE_LOCK,
-                    0,
-                    u32::MAX,
-                    u32::MAX,
-                    &mut ol,
-                )
-            };
-            if ret == FALSE {
-                return Err(LightrError::Io(std::io::Error::last_os_error()));
-            }
-        }
-        Ok(GcGuard { _file: f })
+        store::lock::gc_guard(&self.root)
     }
+
+    // ── CAS ──────────────────────────────────────────────────────────────────
 
     /// Content-address `bytes` and store them.  Idempotent: if the object
     /// already exists the digest is returned immediately without any write.
     pub fn put_bytes(&self, bytes: &[u8]) -> Result<Digest> {
-        let _wg = self.write_guard()?;
-        let d = Digest::of_bytes(bytes);
-        let path = object_path(&self.root, &d);
-
-        if path.exists() {
-            return Ok(d);
-        }
-
-        let hex = d.to_hex();
-        let (pre, _) = shard_parts(&hex);
-        let shard = self.root.join("objects").join(pre);
-        fs::create_dir_all(&shard)?;
-
-        let tmp_name = format!(".tmp-{}", temp_suffix(&hex[..8]));
-        let tmp = shard.join(tmp_name);
-        {
-            let mut f = File::create(&tmp)?;
-            f.write_all(bytes)?;
-            // fsync before rename: flush file data.
-            #[cfg(unix)]
-            f.sync_all()?;
-            #[cfg(windows)]
-            {
-                // WIN-PATH: FlushFileBuffers on the file before rename.
-                use std::os::windows::io::AsRawHandle;
-                use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
-                let handle = f.as_raw_handle();
-                unsafe { FlushFileBuffers(handle as _) };
-            }
-        }
-        fs::rename(&tmp, &path)?;
-        fsync_dir(&shard)?; // fsync parent dir after rename
-        set_mode(&path, 0o444)?;
-
-        Ok(d)
+        store::cas::put_bytes(&self.root, bytes)
     }
 
     /// Hash `path` and CoW-clone it into the store.  Idempotent.
     pub fn ingest_file(&self, path: &Path) -> Result<Digest> {
-        let _wg = self.write_guard()?;
-        let d = Digest::of_file(path)?;
-        let dest = object_path(&self.root, &d);
-
-        if dest.exists() {
-            return Ok(d);
-        }
-
-        let hex = d.to_hex();
-        let (pre, _) = shard_parts(&hex);
-        let shard = self.root.join("objects").join(pre);
-        fs::create_dir_all(&shard)?;
-
-        let tmp_name = format!(".tmp-{}", temp_suffix(&hex[..8]));
-        let tmp = shard.join(tmp_name);
-
-        // Try CoW into a temp, then rename+chmod.
-        // On failure fall through to fs::copy.
-        let used_cow = match try_cow_at_rung(path, &tmp, self.rung) {
-            Ok(()) => true,
-            Err(_) => {
-                let _ = fs::remove_file(&tmp);
-                fs::copy(path, &tmp)?;
-                false
-            }
-        };
-        let _ = used_cow; // counted but not surfaced in API
-
-        // fsync the temp file before rename so the data is crash-durable.
-        {
-            let f = File::open(&tmp)?;
-            #[cfg(unix)]
-            f.sync_all()?;
-            #[cfg(windows)]
-            {
-                // WIN-PATH: FlushFileBuffers on the temp file before rename.
-                use std::os::windows::io::AsRawHandle;
-                use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
-                let handle = f.as_raw_handle();
-                unsafe { FlushFileBuffers(handle as _) };
-            }
-        }
-        fs::rename(&tmp, &dest)?;
-        fsync_dir(&shard)?; // fsync parent dir after rename
-        set_mode(&dest, 0o444)?;
-
-        Ok(d)
+        store::cas::ingest_file(&self.root, path, self.rung)
     }
 
     /// Read and verify `d`.  Missing → NotFound.  Hash mismatch → Integrity
     /// (evidence file kept, never deleted).
     pub fn get_bytes(&self, d: &Digest) -> Result<Vec<u8>> {
-        let path = object_path(&self.root, d);
-        if !path.exists() {
-            return Err(LightrError::NotFound(*d));
-        }
-        let bytes = fs::read(&path)?;
-        let actual = Digest::of_bytes(&bytes);
-        if actual != *d {
-            return Err(LightrError::Integrity {
-                expected: *d,
-                actual,
-            });
-        }
-        Ok(bytes)
+        store::cas::get_bytes(&self.root, d)
     }
 
     /// Returns true iff the object file exists (no rehash).
     pub fn exists(&self, d: &Digest) -> bool {
-        object_path(&self.root, d).exists()
+        store::cas::exists(&self.root, d)
     }
 
     /// CoW the object identified by `d` to `dest`, then set its mode to
     /// `mode`.  Missing object → NotFound.  Parent dirs created if absent.
     pub fn materialize_file(&self, d: &Digest, dest: &Path, mode: u32) -> Result<()> {
-        let src = object_path(&self.root, d);
-        if !src.exists() {
-            return Err(LightrError::NotFound(*d));
-        }
-
-        if let Some(p) = dest.parent() {
-            fs::create_dir_all(p)?;
-        }
-
-        // Remove any stale dest so clonefile can succeed (it fails if dst exists).
-        let _ = fs::remove_file(dest);
-
-        cow_copy_file(&src, dest, self.rung)?;
-
-        // Always apply the manifest mode (clonefile carries 0o444 from the store).
-        set_mode(dest, mode)?;
-
-        Ok(())
+        store::cas::materialize_file(&self.root, d, dest, mode, self.rung)
     }
+
+    /// gc sweep only: chmod 0o644 then remove one object.
+    /// Object absent ⇒ Ok(()) (idempotent).
+    pub fn remove_object(&self, d: &Digest) -> Result<()> {
+        store::cas::remove_object(&self.root, d)
+    }
+
+    // ── refs ─────────────────────────────────────────────────────────────────
 
     /// Read a ref.  `name` is validated; absent → Ok(None).
     pub fn ref_get(&self, name: &str) -> Result<Option<RefRecord>> {
-        lightr_core::validate_ref_name(name)?;
-        let key = lightr_core::ref_key(name);
-        let path = ref_path(&self.root, &key);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let bytes = fs::read(&path)?;
-        let rec = RefRecord::decode(&bytes)?;
-        Ok(Some(rec))
+        store::refs::ref_get(&self.root, name)
     }
 
     /// Write a ref atomically (last-write-wins).
     /// R1 extension: also writes a name record (once) and appends a log entry.
     pub fn ref_put(&self, rec: &RefRecord) -> Result<()> {
-        let _wg = self.write_guard()?;
-        lightr_core::validate_ref_name(&rec.name)?;
-        let key = lightr_core::ref_key(&rec.name);
-
-        // 1. Write name record if absent (written once; idempotent).
-        let names_path = refs_names_path(&self.root, &key);
-        if !names_path.exists() {
-            let names_hex = key.to_hex();
-            let (names_pre, _) = shard_parts(&names_hex);
-            let names_shard = self.root.join("refs-names").join(names_pre);
-            atomic_write(&names_shard, &names_path, rec.name.as_bytes())?;
-        }
-
-        // 2. Determine next log index by counting existing entries in log dir.
-        let log_dir = refs_log_dir(&self.root, &key);
-        let next_n: u64 = if log_dir.exists() {
-            match fs::read_dir(&log_dir) {
-                Ok(entries) => entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.file_name()
-                            .to_str()
-                            .map(|s| s.parse::<u64>().is_ok())
-                            .unwrap_or(false)
-                    })
-                    .count() as u64,
-                Err(_) => 0,
-            }
-        } else {
-            0
-        };
-
-        // 3. Atomic-write log entry <n>.
-        let log_entry_path = log_dir.join(next_n.to_string());
-        let data = rec.encode();
-        atomic_write(&log_dir, &log_entry_path, &data)?;
-
-        // 4. Atomic-write the current ref file (LWW).
-        let path = ref_path(&self.root, &key);
-        let hex = key.to_hex();
-        let (pre, _) = shard_parts(&hex);
-        let shard = self.root.join("refs").join(pre);
-        atomic_write(&shard, &path, &data)?;
-
-        Ok(())
+        store::refs::ref_put(&self.root, rec)
     }
+
+    /// Ref history, newest-first (index 0 = current).
+    /// Absent or empty log ⇒ Ok(vec![]). Corrupt entries are skipped silently.
+    pub fn ref_log(&self, name: &str) -> Result<Vec<RefRecord>> {
+        store::refs::ref_log(&self.root, name)
+    }
+
+    /// Enumerate all ref names ever written (from refs-names shards).
+    /// Non-UTF-8 name files are skipped. Returns sorted ascending.
+    pub fn list_refs(&self) -> Result<Vec<String>> {
+        store::refs::list_refs(&self.root)
+    }
+
+    // ── imgmeta ──────────────────────────────────────────────────────────────
 
     /// Store the original OCI image config JSON for `name` (push-fidelity).
     /// The config bytes are content-addressed in the CAS (dedup'd like any
@@ -818,15 +144,7 @@ impl Store {
     /// does not nest one. A later `oci push` reads it back via
     /// [`Store::image_config_get`] to re-emit a runnable image.
     pub fn image_config_put(&self, name: &str, config_bytes: &[u8]) -> Result<()> {
-        lightr_core::validate_ref_name(name)?;
-        let digest = self.put_bytes(config_bytes)?;
-        let key = lightr_core::ref_key(name);
-        let path = imgmeta_path(&self.root, &key);
-        let hex = key.to_hex();
-        let (pre, _) = shard_parts(&hex);
-        let shard = self.root.join("imgmeta").join(pre);
-        atomic_write(&shard, &path, &digest.0)?;
-        Ok(())
+        store::imgmeta::image_config_put(&self.root, name, config_bytes)
     }
 
     /// Read the original OCI image config JSON stored for `name`, if any.
@@ -835,201 +153,24 @@ impl Store {
     /// config. A corrupt sidecar (not a 32-byte digest) is treated as absent
     /// (fail-soft to the minimal config, never an error).
     pub fn image_config_get(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        lightr_core::validate_ref_name(name)?;
-        let key = lightr_core::ref_key(name);
-        let path = imgmeta_path(&self.root, &key);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let dbytes = fs::read(&path)?;
-        if dbytes.len() != 32 {
-            return Ok(None);
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&dbytes);
-        let config = self.get_bytes(&Digest(arr))?;
-        Ok(Some(config))
+        store::imgmeta::image_config_get(&self.root, name)
     }
+
+    // ── AC ───────────────────────────────────────────────────────────────────
 
     /// Read an AC entry.  Absent → Ok(None).
     pub fn ac_get(&self, key: &Digest) -> Result<Option<Vec<u8>>> {
-        let path = ac_path(&self.root, key);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let bytes = fs::read(&path)?;
-        Ok(Some(bytes))
+        store::ac::ac_get(&self.root, key)
     }
 
     /// Write an AC entry atomically (overwrite via temp+rename).
     pub fn ac_put(&self, key: &Digest, value: &[u8]) -> Result<()> {
-        let _wg = self.write_guard()?;
-        let path = ac_path(&self.root, key);
-        let hex = key.to_hex();
-        let (pre, _) = shard_parts(&hex);
-        let shard = self.root.join("ac").join(pre);
-        atomic_write(&shard, &path, value)?;
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// R1 additions — frozen contract: build-spec-r1.md §1 (bodies: WP-R1-W1)
-// ---------------------------------------------------------------------------
-impl Store {
-    /// Ref history, newest-first (index 0 = current).
-    /// Absent or empty log ⇒ Ok(vec![]). Corrupt entries are skipped silently.
-    pub fn ref_log(&self, name: &str) -> Result<Vec<RefRecord>> {
-        lightr_core::validate_ref_name(name)?;
-        let key = lightr_core::ref_key(name);
-        let log_dir = refs_log_dir(&self.root, &key);
-
-        if !log_dir.exists() {
-            return Ok(vec![]);
-        }
-
-        // Collect all numeric file names in the log dir.
-        let mut indices: Vec<u64> = match fs::read_dir(&log_dir) {
-            Ok(entries) => entries
-                .filter_map(|e| e.ok())
-                .filter_map(|e| e.file_name().to_str().and_then(|s| s.parse::<u64>().ok()))
-                .collect(),
-            Err(_) => return Ok(vec![]),
-        };
-
-        if indices.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Sort descending: newest-first (highest index = most recent write).
-        indices.sort_unstable_by(|a, b| b.cmp(a));
-
-        let mut records = Vec::with_capacity(indices.len());
-        for n in indices {
-            let entry_path = log_dir.join(n.to_string());
-            match fs::read(&entry_path) {
-                Ok(bytes) => match RefRecord::decode(&bytes) {
-                    Ok(rec) => records.push(rec),
-                    Err(_) => {
-                        // Corrupt entry — skip silently (log is history, not truth).
-                    }
-                },
-                Err(_) => {
-                    // Missing or unreadable — skip silently.
-                }
-            }
-        }
-
-        Ok(records)
-    }
-
-    /// Enumerate all ref names ever written (from refs-names shards).
-    /// Non-UTF-8 name files are skipped. Returns sorted ascending.
-    pub fn list_refs(&self) -> Result<Vec<String>> {
-        let names_root = self.root.join("refs-names");
-        if !names_root.exists() {
-            return Ok(vec![]);
-        }
-
-        let mut names: Vec<String> = Vec::new();
-
-        let shards = match fs::read_dir(&names_root) {
-            Ok(d) => d,
-            Err(_) => return Ok(vec![]),
-        };
-
-        for shard_entry in shards.filter_map(|e| e.ok()) {
-            let shard_path = shard_entry.path();
-            if !shard_path.is_dir() {
-                continue;
-            }
-            let files = match fs::read_dir(&shard_path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            for file_entry in files.filter_map(|e| e.ok()) {
-                let file_path = file_entry.path();
-                if !file_path.is_file() {
-                    continue;
-                }
-                match fs::read(&file_path) {
-                    Ok(bytes) => match String::from_utf8(bytes) {
-                        Ok(name) => names.push(name),
-                        Err(_) => {
-                            // Non-UTF-8 name — skip per spec.
-                        }
-                    },
-                    Err(_) => continue,
-                }
-            }
-        }
-
-        names.sort_unstable();
-        Ok(names)
+        store::ac::ac_put(&self.root, key, value)
     }
 
     /// Enumerate all raw AC values (decoded by caller). Order unspecified.
     pub fn list_ac(&self) -> Result<Vec<Vec<u8>>> {
-        let ac_root = self.root.join("ac");
-        if !ac_root.exists() {
-            return Ok(vec![]);
-        }
-
-        let mut values: Vec<Vec<u8>> = Vec::new();
-
-        let shards = match fs::read_dir(&ac_root) {
-            Ok(d) => d,
-            Err(_) => return Ok(vec![]),
-        };
-
-        for shard_entry in shards.filter_map(|e| e.ok()) {
-            let shard_path = shard_entry.path();
-            if !shard_path.is_dir() {
-                continue;
-            }
-            let files = match fs::read_dir(&shard_path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            for file_entry in files.filter_map(|e| e.ok()) {
-                let file_path = file_entry.path();
-                // Skip temp files from in-flight atomic writes.
-                if file_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.starts_with(".tmp-"))
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                if !file_path.is_file() {
-                    continue;
-                }
-                match fs::read(&file_path) {
-                    Ok(bytes) => values.push(bytes),
-                    Err(_) => continue,
-                }
-            }
-        }
-
-        Ok(values)
-    }
-
-    /// Store root path (gc walks objects from here). R1.
-    pub fn root(&self) -> &std::path::Path {
-        &self.root
-    }
-
-    /// gc sweep only: chmod 0o644 then remove one object.
-    /// Object absent ⇒ Ok(()) (idempotent).
-    pub fn remove_object(&self, d: &Digest) -> Result<()> {
-        let path = object_path(&self.root, d);
-        if !path.exists() {
-            return Ok(());
-        }
-        set_mode(&path, 0o644)?;
-        fs::remove_file(&path)?;
-        Ok(())
+        store::ac::list_ac(&self.root)
     }
 }
 
@@ -1040,260 +181,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Open a fresh store in a temp dir.
     fn tmp_store() -> (TempDir, Store) {
         let dir = TempDir::new().unwrap();
         let store = Store::open(dir.path().join("store")).unwrap();
         (dir, store)
-    }
-
-    // ── object plane ────────────────────────────────────────────────────────
-
-    #[test]
-    fn roundtrip_put_get() {
-        let (_dir, store) = tmp_store();
-        let data = b"hello, lightr!";
-        let d = store.put_bytes(data).unwrap();
-        let got = store.get_bytes(&d).unwrap();
-        assert_eq!(&got[..], data);
-    }
-
-    #[test]
-    fn idempotent_double_put() {
-        let (_dir, store) = tmp_store();
-        let data = b"idempotent data";
-        let d1 = store.put_bytes(data).unwrap();
-        let d2 = store.put_bytes(data).unwrap();
-        assert_eq!(d1, d2);
-        // Verify get still works.
-        assert_eq!(store.get_bytes(&d1).unwrap(), data);
-    }
-
-    #[test]
-    fn integrity_corruption() {
-        let (_dir, store) = tmp_store();
-        let data = b"tamper me";
-        let d = store.put_bytes(data).unwrap();
-
-        // Locate the object file, relax permissions, flip a byte, restore.
-        let obj_path = object_path(&store.root, &d);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&obj_path, Permissions::from_mode(0o644)).unwrap();
-        }
-        #[cfg(windows)]
-        {
-            let mut perms = fs::metadata(&obj_path).unwrap().permissions();
-            perms.set_readonly(false);
-            fs::set_permissions(&obj_path, perms).unwrap();
-        }
-        let mut bytes = fs::read(&obj_path).unwrap();
-        bytes[0] ^= 0xFF;
-        fs::write(&obj_path, &bytes).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&obj_path, Permissions::from_mode(0o444)).unwrap();
-        }
-        #[cfg(windows)]
-        {
-            let mut perms = fs::metadata(&obj_path).unwrap().permissions();
-            perms.set_readonly(true);
-            fs::set_permissions(&obj_path, perms).unwrap();
-        }
-
-        let err = store.get_bytes(&d).unwrap_err();
-        match err {
-            LightrError::Integrity { expected, actual } => {
-                assert_eq!(expected, d);
-                assert_ne!(actual, d);
-            }
-            other => panic!("expected Integrity, got {:?}", other),
-        }
-
-        // Evidence file must still be present (never deleted).
-        assert!(
-            obj_path.exists(),
-            "evidence file was deleted — violates spec"
-        );
-    }
-
-    #[test]
-    fn notfound() {
-        let (_dir, store) = tmp_store();
-        // Construct a digest that was never stored.
-        let d = Digest::of_bytes(b"never stored");
-        let err = store.get_bytes(&d).unwrap_err();
-        assert!(matches!(err, LightrError::NotFound(_)));
-    }
-
-    // ── image_config sidecar (push-fidelity) ──────────────────────────────────
-
-    #[test]
-    fn image_config_roundtrip_and_absent_is_none() {
-        let (_dir, store) = tmp_store();
-        // A ref with no captured config ⇒ None (push then synthesizes minimal).
-        assert!(store.image_config_get("noconfig").unwrap().is_none());
-        // Put + get roundtrips the exact bytes (content-addressed in the CAS).
-        let cfg = br#"{"architecture":"amd64","os":"linux","config":{"Cmd":["sh"]}}"#;
-        store.image_config_put("img", cfg).unwrap();
-        assert_eq!(
-            store.image_config_get("img").unwrap().as_deref(),
-            Some(&cfg[..])
-        );
-        // Last-write-wins: a second put replaces the sidecar.
-        let cfg2 = br#"{"os":"linux"}"#;
-        store.image_config_put("img", cfg2).unwrap();
-        assert_eq!(
-            store.image_config_get("img").unwrap().as_deref(),
-            Some(&cfg2[..])
-        );
-    }
-
-    // ── materialize ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn materialize_preserves_bytes_and_mode() {
-        let (dir, store) = tmp_store();
-        let data = b"file content for materialize";
-        let d = store.put_bytes(data).unwrap();
-
-        let dest = dir.path().join("out").join("materialized.txt");
-        store.materialize_file(&d, &dest, 0o755).unwrap();
-
-        let got = fs::read(&dest).unwrap();
-        assert_eq!(&got[..], data);
-
-        // Mode check is unix-only (Windows uses ACLs, not mode bits).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let meta = fs::metadata(&dest).unwrap();
-            let mode = meta.permissions().mode() & 0o777;
-            assert_eq!(mode, 0o755, "mode mismatch: got {mode:o}");
-        }
-    }
-
-    #[test]
-    fn materialize_notfound() {
-        let (dir, store) = tmp_store();
-        let d = Digest::of_bytes(b"not in store");
-        let dest = dir.path().join("x");
-        let err = store.materialize_file(&d, &dest, 0o644).unwrap_err();
-        assert!(matches!(err, LightrError::NotFound(_)));
-    }
-
-    // ── rung ─────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn rung_returns_probed_value() {
-        let (_dir, store) = tmp_store();
-        // Just assert it's a valid CowRung variant — the value is machine-dependent.
-        let r = store.rung();
-        let valid = matches!(
-            r,
-            CowRung::Clone
-                | CowRung::Reflink
-                | CowRung::CopyRange
-                | CowRung::RefsBlockClone
-                | CowRung::Copy
-        );
-        assert!(valid);
-    }
-
-    // ── refs ─────────────────────────────────────────────────────────────────
-
-    fn make_ref_record(name: &str) -> RefRecord {
-        RefRecord {
-            name: name.to_string(),
-            root: Digest::of_bytes(name.as_bytes()),
-            parent: None,
-            created_at_unix: 1_700_000_000,
-            tool_version: "0.1.0".to_string(),
-        }
-    }
-
-    #[test]
-    fn ref_roundtrip() {
-        let (_dir, store) = tmp_store();
-        let rec = make_ref_record("main");
-
-        store.ref_put(&rec).unwrap();
-        let got = store.ref_get("main").unwrap();
-        assert!(got.is_some());
-        let got = got.unwrap();
-        assert_eq!(got.name, rec.name);
-        assert_eq!(got.root, rec.root);
-        assert_eq!(got.created_at_unix, rec.created_at_unix);
-    }
-
-    #[test]
-    fn ref_last_write_wins() {
-        let (_dir, store) = tmp_store();
-        let rec1 = make_ref_record("dev");
-        let mut rec2 = make_ref_record("dev");
-        rec2.root = Digest::of_bytes(b"second root");
-
-        store.ref_put(&rec1).unwrap();
-        store.ref_put(&rec2).unwrap();
-
-        let got = store.ref_get("dev").unwrap().unwrap();
-        assert_eq!(got.root, rec2.root, "last-write-wins violated");
-    }
-
-    #[test]
-    fn ref_absent_returns_none() {
-        let (_dir, store) = tmp_store();
-        let got = store.ref_get("nonexistent").unwrap();
-        assert!(got.is_none());
-    }
-
-    #[test]
-    fn ref_invalid_name_rejected() {
-        let (_dir, store) = tmp_store();
-        let rec = RefRecord {
-            name: "INVALID NAME WITH SPACES".to_string(),
-            root: Digest::of_bytes(b"x"),
-            parent: None,
-            created_at_unix: 0,
-            tool_version: "0.1.0".to_string(),
-        };
-        let put_err = store.ref_put(&rec).unwrap_err();
-        assert!(matches!(put_err, LightrError::InvalidRef(_)));
-        let get_err = store.ref_get("INVALID NAME WITH SPACES").unwrap_err();
-        assert!(matches!(get_err, LightrError::InvalidRef(_)));
-    }
-
-    // ── ac ───────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn ac_roundtrip() {
-        let (_dir, store) = tmp_store();
-        let key = Digest::of_bytes(b"ac-key");
-        let val = b"ac-value-bytes";
-
-        store.ac_put(&key, val).unwrap();
-        let got = store.ac_get(&key).unwrap();
-        assert_eq!(got.as_deref(), Some(val.as_slice()));
-    }
-
-    #[test]
-    fn ac_overwrite() {
-        let (_dir, store) = tmp_store();
-        let key = Digest::of_bytes(b"ac-key-2");
-
-        store.ac_put(&key, b"first").unwrap();
-        store.ac_put(&key, b"second").unwrap();
-        let got = store.ac_get(&key).unwrap();
-        assert_eq!(got.as_deref(), Some(b"second".as_slice()));
-    }
-
-    #[test]
-    fn ac_absent_returns_none() {
-        let (_dir, store) = tmp_store();
-        let key = Digest::of_bytes(b"never-put");
-        assert!(store.ac_get(&key).unwrap().is_none());
     }
 
     // ── default_root ─────────────────────────────────────────────────────────
@@ -1332,322 +223,5 @@ mod tests {
             "expected path ending in .lightr/store, got {:?}",
             root
         );
-    }
-
-    // ── ingest_file ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn ingest_file_roundtrip() {
-        let (dir, store) = tmp_store();
-        let src = dir.path().join("input.txt");
-        let data = b"ingest this file";
-        fs::write(&src, data).unwrap();
-
-        let d = store.ingest_file(&src).unwrap();
-
-        // Object must be readable and correct.
-        let got = store.get_bytes(&d).unwrap();
-        assert_eq!(&got[..], data);
-    }
-
-    #[test]
-    fn ingest_file_idempotent() {
-        let (dir, store) = tmp_store();
-        let src = dir.path().join("idem.txt");
-        fs::write(&src, b"idempotent ingest").unwrap();
-
-        let d1 = store.ingest_file(&src).unwrap();
-        let d2 = store.ingest_file(&src).unwrap();
-        assert_eq!(d1, d2);
-    }
-
-    // ── R1: ref_log ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn ref_log_three_versions_newest_first() {
-        let (_dir, store) = tmp_store();
-
-        let root1 = Digest::of_bytes(b"v1");
-        let root2 = Digest::of_bytes(b"v2");
-        let root3 = Digest::of_bytes(b"v3");
-
-        let rec1 = RefRecord {
-            name: "main".to_string(),
-            root: root1,
-            parent: None,
-            created_at_unix: 1_000,
-            tool_version: "0.1.0".to_string(),
-        };
-        let rec2 = RefRecord {
-            name: "main".to_string(),
-            root: root2,
-            parent: Some(root1),
-            created_at_unix: 2_000,
-            tool_version: "0.1.0".to_string(),
-        };
-        let rec3 = RefRecord {
-            name: "main".to_string(),
-            root: root3,
-            parent: Some(root2),
-            created_at_unix: 3_000,
-            tool_version: "0.1.0".to_string(),
-        };
-
-        store.ref_put(&rec1).unwrap();
-        store.ref_put(&rec2).unwrap();
-        store.ref_put(&rec3).unwrap();
-
-        let log = store.ref_log("main").unwrap();
-        assert_eq!(log.len(), 3, "expected 3 log entries");
-        // Index 0 = newest (rec3), 1 = rec2, 2 = oldest (rec1).
-        assert_eq!(log[0].root, root3, "log[0] must be newest (v3)");
-        assert_eq!(log[1].root, root2, "log[1] must be v2");
-        assert_eq!(log[2].root, root1, "log[2] must be oldest (v1)");
-    }
-
-    #[test]
-    fn ref_log_unknown_name_is_empty() {
-        let (_dir, store) = tmp_store();
-        let log = store.ref_log("does-not-exist").unwrap();
-        assert!(log.is_empty(), "unknown ref must return empty log");
-    }
-
-    // R0 LWW still works after R1 extension.
-    #[test]
-    fn ref_log_lww_still_works() {
-        let (_dir, store) = tmp_store();
-
-        let root1 = Digest::of_bytes(b"first");
-        let root2 = Digest::of_bytes(b"second");
-
-        let rec1 = RefRecord {
-            name: "dev".to_string(),
-            root: root1,
-            parent: None,
-            created_at_unix: 100,
-            tool_version: "0.1.0".to_string(),
-        };
-        let rec2 = RefRecord {
-            name: "dev".to_string(),
-            root: root2,
-            parent: Some(root1),
-            created_at_unix: 200,
-            tool_version: "0.1.0".to_string(),
-        };
-
-        store.ref_put(&rec1).unwrap();
-        store.ref_put(&rec2).unwrap();
-
-        // ref_get must return the LWW (latest).
-        let current = store.ref_get("dev").unwrap().unwrap();
-        assert_eq!(current.root, root2, "LWW violated after R1 extension");
-    }
-
-    // ── R1: list_refs ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn list_refs_returns_both_names_sorted() {
-        let (_dir, store) = tmp_store();
-
-        let rec_b = RefRecord {
-            name: "beta".to_string(),
-            root: Digest::of_bytes(b"beta"),
-            parent: None,
-            created_at_unix: 1,
-            tool_version: "0.1.0".to_string(),
-        };
-        let rec_a = RefRecord {
-            name: "alpha".to_string(),
-            root: Digest::of_bytes(b"alpha"),
-            parent: None,
-            created_at_unix: 2,
-            tool_version: "0.1.0".to_string(),
-        };
-
-        store.ref_put(&rec_b).unwrap();
-        store.ref_put(&rec_a).unwrap();
-
-        let refs = store.list_refs().unwrap();
-        assert_eq!(
-            refs,
-            vec!["alpha", "beta"],
-            "list_refs must be sorted ascending"
-        );
-    }
-
-    #[test]
-    fn list_refs_empty_store() {
-        let (_dir, store) = tmp_store();
-        assert!(store.list_refs().unwrap().is_empty());
-    }
-
-    // ── R1: list_ac ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn list_ac_roundtrip_two_values() {
-        let (_dir, store) = tmp_store();
-
-        let key1 = Digest::of_bytes(b"k1");
-        let key2 = Digest::of_bytes(b"k2");
-        let val1 = b"value-one";
-        let val2 = b"value-two";
-
-        store.ac_put(&key1, val1).unwrap();
-        store.ac_put(&key2, val2).unwrap();
-
-        let mut values = store.list_ac().unwrap();
-        values.sort(); // order unspecified per spec; sort for determinism.
-        assert_eq!(values.len(), 2, "expected exactly 2 AC values");
-        assert!(values.contains(&val1.to_vec()), "missing val1");
-        assert!(values.contains(&val2.to_vec()), "missing val2");
-    }
-
-    #[test]
-    fn list_ac_empty_store() {
-        let (_dir, store) = tmp_store();
-        assert!(store.list_ac().unwrap().is_empty());
-    }
-
-    // ── R1: remove_object ────────────────────────────────────────────────────
-
-    #[test]
-    fn remove_object_removes_and_is_idempotent() {
-        let (_dir, store) = tmp_store();
-        let data = b"to be removed";
-        let d = store.put_bytes(data).unwrap();
-
-        assert!(store.exists(&d), "object must exist after put");
-        store.remove_object(&d).unwrap();
-        assert!(!store.exists(&d), "object must not exist after remove");
-
-        // Second remove must be Ok(()) — idempotent.
-        store.remove_object(&d).unwrap();
-    }
-
-    #[test]
-    fn remove_object_absent_is_ok() {
-        let (_dir, store) = tmp_store();
-        let d = Digest::of_bytes(b"never stored");
-        // Must succeed without error.
-        store.remove_object(&d).unwrap();
-    }
-
-    // ── WP-A-dur: fsync path ─────────────────────────────────────────────────
-
-    /// fsync path: write → drop store → reopen → content intact.
-    /// fsync doesn't change observable behavior, but we assert the write+read
-    /// roundtrip still works and the fsync helper is exercised.
-    #[test]
-    fn fsync_put_reopen_roundtrip() {
-        let dir = TempDir::new().unwrap();
-        let store_path = dir.path().join("store");
-        let data = b"durable object data";
-
-        // Write and explicitly drop the store (simulates process restart).
-        let digest = {
-            let store = Store::open(&store_path).unwrap();
-            store.put_bytes(data).unwrap()
-        };
-
-        // Reopen the store.
-        let store2 = Store::open(&store_path).unwrap();
-        let got = store2.get_bytes(&digest).unwrap();
-        assert_eq!(&got[..], data);
-    }
-
-    /// Same fsync path via ingest_file.
-    #[test]
-    fn fsync_ingest_file_reopen_roundtrip() {
-        let dir = TempDir::new().unwrap();
-        let store_path = dir.path().join("store");
-        let src = dir.path().join("src.txt");
-        let data = b"ingest durable data";
-        fs::write(&src, data).unwrap();
-
-        let digest = {
-            let store = Store::open(&store_path).unwrap();
-            store.ingest_file(&src).unwrap()
-        };
-
-        let store2 = Store::open(&store_path).unwrap();
-        let got = store2.get_bytes(&digest).unwrap();
-        assert_eq!(&got[..], data);
-    }
-
-    // ── WP-A-dur: gc-vs-writer lock test ────────────────────────────────────
-
-    /// gc/writer lock contract: an EXCLUSIVE `gc_guard` must BLOCK while any
-    /// SHARED `write_guard` is held, and only proceed once it's released.
-    ///
-    /// This is the real guarantee the flock gives — gc cannot run its
-    /// mark+sweep concurrently with an in-flight write (so it never sees a
-    /// torn/partial object or races a rename). It is NOT a claim that an
-    /// unreferenced `put_bytes` survives gc (an object with no ref IS garbage
-    /// and real gc rightly sweeps it).
-    ///
-    /// Deterministic: a holder thread takes `write_guard` and sleeps; the main
-    /// thread times `gc_guard()` acquisition. If the lock were a no-op the
-    /// exclusive guard would return immediately and the elapsed-time assertion
-    /// would fire.
-    #[test]
-    fn gc_guard_blocks_until_write_guard_released() {
-        use std::sync::mpsc;
-        use std::thread;
-        use std::time::{Duration, Instant};
-
-        let (_dir, store) = tmp_store();
-        let store = std::sync::Arc::new(store);
-
-        const HOLD: Duration = Duration::from_millis(300);
-        let (tx, rx) = mpsc::channel::<()>();
-
-        // Holder: take the SHARED write guard, signal, hold it for HOLD, release.
-        let store_h = std::sync::Arc::clone(&store);
-        let holder = thread::spawn(move || {
-            let _wg = store_h.write_guard().unwrap();
-            tx.send(()).unwrap(); // signal "shared lock is held"
-            thread::sleep(HOLD);
-            // _wg dropped here → LOCK_UN
-        });
-
-        // Wait until the shared lock is definitely held, then time the
-        // exclusive acquisition — it must block ~HOLD until the holder releases.
-        rx.recv().unwrap();
-        let start = Instant::now();
-        let gg = store.gc_guard().unwrap();
-        let waited = start.elapsed();
-        drop(gg);
-        holder.join().unwrap();
-
-        // Allow generous slack for scheduling, but it MUST have blocked a
-        // substantial fraction of HOLD — a no-op lock returns in ~microseconds.
-        assert!(
-            waited >= HOLD / 2,
-            "gc_guard must block while a write_guard is held: waited only {waited:?} \
-             (expected ≥ {:?}) — the shared/exclusive flock protocol is broken",
-            HOLD / 2
-        );
-    }
-
-    // ── WP-A-dur: write_guard / gc_guard basic ───────────────────────────────
-
-    #[test]
-    fn write_guard_acquired_and_released() {
-        let (_dir, store) = tmp_store();
-        let wg = store.write_guard().unwrap();
-        // Multiple shared locks can coexist.
-        let wg2 = store.write_guard().unwrap();
-        drop(wg);
-        drop(wg2);
-    }
-
-    #[test]
-    fn gc_guard_acquired_and_released() {
-        let (_dir, store) = tmp_store();
-        let gg = store.gc_guard().unwrap();
-        drop(gg);
-        // After release, a new gc_guard must succeed.
-        let gg2 = store.gc_guard().unwrap();
-        drop(gg2);
     }
 }
