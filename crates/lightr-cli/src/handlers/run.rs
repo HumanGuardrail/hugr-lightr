@@ -33,8 +33,8 @@ use lightr_core::{validate_ref_name, ResourceLimits};
 use lightr_engine::{engine_for, EngineKind, ExecSpec};
 use lightr_index;
 use lightr_run::{
-    run_memoized_deep, run_memoized_with, run_vz_memoized, spawn_detached, DeepMemoConfig, Mount,
-    PortMap, RunSpec, StoreFile, VzMemoKey,
+    run_memoized_deep, run_memoized_with, run_vz_memoized, spawn_detached, spawn_detached_engine,
+    DeepMemoConfig, Mount, PortMap, RunSpec, StoreFile, VzMemoKey,
 };
 use lightr_store::Store;
 use serde::Serialize;
@@ -207,11 +207,16 @@ pub fn run(
             eprintln!("lightr: -p/--publish requires -d (a published service runs detached)");
             return 2;
         }
-        // 2. Publishing is wired only for the native detached path. vz/ns
-        //    networking is Phase 2.
-        if use_engine_path {
+        // 2. Publishing is wired for (a) the native detached path and (b) the vz
+        //    detached container path (WP-NET2: `--engine vz --rootfs <img>`, host→
+        //    guest forward). Every other engine (ns/wsl) + vz-without-rootfs is
+        //    still Phase 2 — an honest error, never a silently dropped port.
+        let native = engine_kind == EngineKind::Native && rootfs_ref.is_none();
+        let vz_container = engine_kind == EngineKind::Vz && rootfs_ref.is_some();
+        if !native && !vz_container {
             eprintln!(
-                "lightr: -p/--publish is wired for the native detached path; --engine vz/ns networking is Phase 2"
+                "lightr: -p/--publish is wired for the native and `--engine vz --rootfs` \
+                 detached paths; other engines are Phase 2"
             );
             return 2;
         }
@@ -285,6 +290,7 @@ pub fn run(
                 command,
                 rootfs: Some(rootfs_path.as_path()),
                 limits,
+                net: false, // vz-memo path is non-detached + non-networked
             };
             // Suppress the guest CONSOLE (kernel boot log + the exit marker) from
             // the host's stdout on a memo MISS: the command's real stdout/stderr
@@ -371,6 +377,40 @@ pub fn run(
         return outcome.exit_code;
     }
 
+    // ── vz detached container path (WP-NET2) ──────────────────────────────────
+    // A `vz` run WITH a rootfs that IS detached boots a Linux container in a
+    // microVM under the supervisor, which forwards each published port to the
+    // guest's DHCP IP (`-p` for a Linux image — the flagship Docker-parity case).
+    // The non-detached vz+rootfs case is the memo path above; ns/native fall
+    // through. This runs the VM detached (the old engine path ignored `-d` and
+    // blocked synchronously) — `spawn_detached_engine` returns immediately.
+    if let (EngineKind::Vz, Some(ref_name), true) = (engine_kind, rootfs_ref, detach) {
+        let mut ports: Vec<PortMap> = Vec::new();
+        for raw in publish_raw {
+            match parse_publish(raw) {
+                Ok(p) => ports.push(p),
+                Err(code) => return code,
+            }
+        }
+        let spec = RunSpec {
+            cwd,
+            inputs: Vec::new(),
+            command: command.to_vec(),
+            env_keys: env_keys.to_vec(),
+            mounts,
+            secrets,
+            configs,
+            ports,
+        };
+        return match spawn_detached_engine(&spec, &store, None, EngineKind::Vz, Some(ref_name)) {
+            Ok(handle) => {
+                println!("id={}", handle.id);
+                0
+            }
+            Err(e) => die_lightr(&e),
+        };
+    }
+
     if use_engine_path {
         // ── Engine path (non-memoized) ────────────────────────────────────────
         // Hydrate rootfs ref into a temp dir if provided
@@ -405,6 +445,7 @@ pub fn run(
             command,
             rootfs: rootfs_path.as_deref(),
             limits,
+            net: false, // synchronous CLI engine path; networked vz is detached (supervisor)
         };
 
         let code = match engine.run(&spec) {

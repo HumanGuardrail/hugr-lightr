@@ -2,6 +2,7 @@
 //! Memo key, native exec, replay, supervisor, ps, logs, stop, exec_in.
 
 use lightr_core::{Digest, LightrError, Result, OUTPUT_CAP_BYTES};
+use lightr_engine::EngineKind;
 use lightr_index::{scan, Index};
 use lightr_store::Store;
 use serde::{Deserialize, Serialize};
@@ -626,6 +627,23 @@ struct SpecOnDisk {
     // Vec, so an old detached run never breaks on read.
     #[serde(default)]
     ports: Vec<(u16, u16)>,
+    // WP-NET2: the engine that runs this detached job. `#[serde(default)]` →
+    // "native" for spec.json files written before this field existed, so an old
+    // detached run keeps the native supervisor branch. The vz branch (a Linux
+    // container in a microVM, with host→guest port forwarding) is selected by
+    // engine == "vz" AND a present `rootfs_ref`.
+    #[serde(default = "default_engine")]
+    engine: String,
+    // WP-NET2: the rootfs ref the vz branch hydrates + boots. None for native
+    // runs (serde default). Present ⇒ a vz container run.
+    #[serde(default)]
+    rootfs_ref: Option<String>,
+}
+
+/// Serde default for [`SpecOnDisk::engine`] — the native supervisor branch, so a
+/// pre-WP-NET2 spec.json (no `engine` field) keeps its original behaviour.
+fn default_engine() -> String {
+    "native".to_string()
 }
 
 fn read_spec_on_disk(dir: &std::path::Path) -> Result<SpecOnDisk> {
@@ -858,7 +876,7 @@ fn send_ctl_op(dir: &std::path::Path, op: &str) -> Option<serde_json::Value> {
 // ---------------------------------------------------------------------------
 
 pub fn spawn_detached(spec: &RunSpec, store: &Store) -> Result<RunHandle> {
-    spawn_detached_with_health(spec, store, None)
+    spawn_detached_engine(spec, store, None, EngineKind::Native, None)
 }
 
 /// `spawn_detached` plus an optional healthcheck (F-309). When `hc` is
@@ -873,8 +891,26 @@ pub fn spawn_detached(spec: &RunSpec, store: &Store) -> Result<RunHandle> {
 /// unchanged.
 pub fn spawn_detached_with_health(
     spec: &RunSpec,
+    store: &Store,
+    hc: Option<&crate::healthcheck::Healthcheck>,
+) -> Result<RunHandle> {
+    spawn_detached_engine(spec, store, hc, EngineKind::Native, None)
+}
+
+/// `spawn_detached_with_health` plus the engine + rootfs ref (WP-NET2). The
+/// `native` path (`engine = Native`, `rootfs_ref = None`) is the existing
+/// supervisor: it spawns the command as a host process. The `vz` path
+/// (`engine = Vz` + a `rootfs_ref`) boots a Linux container in a microVM inside
+/// the supervisor and forwards each published port to the guest's DHCP IP — the
+/// `-p`-for-a-Linux-image case. The engine + rootfs ref are persisted to
+/// spec.json (serde-defaulted, so old native runs read back unchanged) and are
+/// NOT memo-key inputs (a detached run is never memoized).
+pub fn spawn_detached_engine(
+    spec: &RunSpec,
     _store: &Store,
     hc: Option<&crate::healthcheck::Healthcheck>,
+    engine: EngineKind,
+    rootfs_ref: Option<&str>,
 ) -> Result<RunHandle> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -908,6 +944,8 @@ pub fn spawn_detached_with_health(
         detached: true,
         created_at_unix,
         ports: spec.ports.iter().map(|p| (p.host, p.container)).collect(),
+        engine: engine.as_str().to_string(),
+        rootfs_ref: rootfs_ref.map(|s| s.to_string()),
     };
     write_spec_json(&dir, &spec_on_disk)?;
 
@@ -951,6 +989,218 @@ pub fn spawn_detached_with_health(
 }
 
 // ---------------------------------------------------------------------------
+// supervise_vz (WP-NET2) — detached vz container with host→guest port forwarding
+// ---------------------------------------------------------------------------
+
+/// Supervise a `vz` container run: boot a Linux microVM in THIS process and
+/// forward each published port (`127.0.0.1:host` → `guest_ip:container`) to the
+/// guest's DHCP IP. This is the `-p`-for-a-Linux-image case.
+///
+/// Lifecycle:
+/// 1. Hydrate the rootfs ref CoW into `<run_dir>/rootfs` (lives for the VM, gc'd
+///    with the run dir).
+/// 2. Boot the VM on a worker thread — `engine.run(net=true)` blocks until the VM
+///    stops. `net=true` makes the engine attach the NAT NIC (`ip=dhcp`) and the
+///    guest publish its IP to `IP_FILE`.
+/// 3. Read the guest IP from `IP_FILE` (or bail if the VM exits first).
+/// 4. Write pid (our own) + status, start a forwarder per published port.
+/// 5. Serve `ctl.sock` (status/signal) + poll the VM. `signal` writes the guest
+///    `EXIT_FILE` with the `128+sig` code; the shim polls it and force-stops the
+///    VM (no new shim code), the worker returns, and we exit cleanly.
+///
+/// Stop semantics: `stop` sends `signal` via `ctl.sock` (→ force-stop, clean
+/// status), with the usual pid-SIGKILL fallback — and since the VM runs IN this
+/// process, killing the supervisor tears the VM down too.
+#[cfg(unix)]
+fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Store) -> Result<i32> {
+    use lightr_engine::{engine_for, ExecSpec};
+    use lightr_init::{EXIT_FILE, IP_FILE};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let rootfs_ref = spec
+        .rootfs_ref
+        .clone()
+        .ok_or_else(|| LightrError::InvalidRef("vz supervise: missing rootfs_ref".to_string()))?;
+    let cwd = PathBuf::from(&spec.cwd);
+
+    // 1. Hydrate the rootfs ref into <run_dir>/rootfs (persists for the VM's life;
+    //    cleaned with the run dir, unlike the memo path's throwaway temp dir).
+    let rootfs_dir = dir.join("rootfs");
+    std::fs::create_dir_all(&rootfs_dir).map_err(LightrError::Io)?;
+    lightr_index::hydrate(&rootfs_dir, store, &rootfs_ref)?;
+
+    // The guest's durable EXIT_FILE + IP_FILE on the share. Writing EXIT_FILE
+    // force-stops the VM (the shim polls it); IP_FILE is where the guest publishes
+    // its DHCP IP. Both paths agree with the engine/guest by construction (rootfs
+    // dir + the lightr_init const), so they can never drift.
+    let exit_file = rootfs_dir.join(EXIT_FILE.trim_start_matches('/'));
+    let ip_file = rootfs_dir.join(IP_FILE.trim_start_matches('/'));
+
+    // 2. Boot the VM on a worker thread (engine.run blocks until the VM stops).
+    //    Safety of env mutation inside engine.run: VzEngine::run sets LIGHTR_VZ_NET
+    //    / LIGHTR_VZ_EXITFILE ONCE at the very start of run() — before the VM boot
+    //    FFI call — at which point the only other live thread is this main thread,
+    //    polling IP_FILE via std::fs (no getenv). The forwarder + ctl threads do
+    //    not exist yet (they start in step 4, ~1–2s later after the IP appears), so
+    //    no thread reads the environment concurrently with those set_var calls.
+    let vm_done = Arc::new(AtomicBool::new(false));
+    let vm_code = Arc::new(Mutex::new(255i32));
+    let command = spec.command.clone();
+    {
+        let vm_done = Arc::clone(&vm_done);
+        let vm_code = Arc::clone(&vm_code);
+        let rootfs_dir = rootfs_dir.clone();
+        let cwd = cwd.clone();
+        std::thread::spawn(move || {
+            let code = match engine_for(EngineKind::Vz) {
+                Ok(engine) => {
+                    let spec = ExecSpec {
+                        cwd: &cwd,
+                        command: &command,
+                        rootfs: Some(&rootfs_dir),
+                        limits: lightr_core::ResourceLimits::default(),
+                        net: true,
+                    };
+                    engine.run(&spec).unwrap_or(255)
+                }
+                Err(_) => 255, // vz unavailable (non-macOS / no pack) → honest non-zero
+            };
+            *vm_code.lock().expect("vm_code mutex") = code;
+            vm_done.store(true, Ordering::SeqCst);
+        });
+    }
+
+    // 3. Wait for the guest IP (boot + kernel DHCP, ~1–2s) OR an early VM exit
+    //    (boot failure / instant command exit). Generous deadline for a cold boot.
+    let ip_deadline = Instant::now() + Duration::from_secs(60);
+    let guest_ip: Option<String> = loop {
+        if let Ok(s) = std::fs::read_to_string(&ip_file) {
+            let ip = s.trim().to_string();
+            if !ip.is_empty() {
+                break Some(ip);
+            }
+        }
+        if vm_done.load(Ordering::SeqCst) {
+            break None; // VM stopped before publishing an IP
+        }
+        if Instant::now() >= ip_deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    // No IP ⇒ the run is not networkable: record the VM's (final) exit code and
+    // stop. Force-stop best-effort in case the VM is up but networking failed.
+    let Some(guest_ip) = guest_ip else {
+        for _ in 0..20 {
+            if vm_done.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = std::fs::write(&exit_file, "143");
+        let code = *vm_code.lock().expect("vm_code mutex");
+        let _ = std::fs::write(dir.join("status"), format!("exited {code}"));
+        return Ok(code);
+    };
+
+    // 4. Live: write our pid (stop()'s SIGKILL fallback kills us → the in-process
+    //    VM dies with us) + status, then forward each published port to the guest.
+    std::fs::write(dir.join("pid"), format!("{}", std::process::id())).map_err(LightrError::Io)?;
+    std::fs::write(dir.join("status"), "running").map_err(LightrError::Io)?;
+
+    // 5. A forwarder per published port → the guest IP. A bind failure is logged
+    //    and skipped (a port clash on one publish must not down the whole run),
+    //    exactly like the native path. Held until the loop exits, then dropped.
+    let mut forwarders: Vec<crate::portforward::Forwarder> = Vec::new();
+    for &(host_port, container_port) in &spec.ports {
+        match crate::portforward::start_to(host_port, &guest_ip, container_port) {
+            Ok(fwd) => forwarders.push(fwd),
+            Err(e) => {
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join("stderr.log"))
+                {
+                    let _ = writeln!(
+                        f,
+                        "lightr: publish 127.0.0.1:{host_port} -> {guest_ip}:{container_port} failed: {e}"
+                    );
+                }
+            }
+        }
+    }
+
+    // 6. ctl.sock loop: serve status/signal + poll the VM (mirrors the unix native
+    //    loop). `signal` writes EXIT_FILE (force-stop); the shim stops the VM, the
+    //    worker returns, vm_done flips, and we break with the real exit code.
+    let sock_path = ctl_sock_path(dir);
+    let listener = UnixListener::bind(&sock_path).map_err(LightrError::Io)?;
+    listener.set_nonblocking(true).map_err(LightrError::Io)?;
+
+    let exit_code = loop {
+        if vm_done.load(Ordering::SeqCst) {
+            break *vm_code.lock().expect("vm_code mutex");
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
+                stream.set_write_timeout(Some(Duration::from_secs(1))).ok();
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_ok() {
+                    let line = line.trim();
+                    if let Ok(req) = serde_json::from_str::<serde_json::Value>(line) {
+                        let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                        let reply: serde_json::Value = match op {
+                            "status" => serde_json::json!({"status": "running"}),
+                            "signal" => {
+                                // Force-stop: write the guest EXIT_FILE with the
+                                // 128+signal code; the shim polls it and stops the
+                                // VM. Default sig 15 (SIGTERM ⇒ 143). The VM is
+                                // in-process, so this is how the supervisor relays
+                                // a "stop" into the guest's force-teardown.
+                                let sig = req.get("sig").and_then(|v| v.as_i64()).unwrap_or(15);
+                                let code = 128 + sig as i32;
+                                let _ = std::fs::write(&exit_file, format!("{code}"));
+                                serde_json::json!({"ok": true})
+                            }
+                            _ => serde_json::json!({"error": "unknown op"}),
+                        };
+                        let mut reply_bytes = serde_json::to_vec(&reply).unwrap_or_default();
+                        reply_bytes.push(b'\n');
+                        let mut w = &stream;
+                        let _ = w.write_all(&reply_bytes);
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    std::fs::write(dir.join("status"), format!("exited {exit_code}")).map_err(LightrError::Io)?;
+    let _ = std::fs::remove_file(&sock_path);
+    drop(forwarders); // close listeners + per-connection threads
+    Ok(exit_code)
+}
+
+/// Non-unix stub: the `vz` engine is macOS-only (unix). On a non-unix host a vz
+/// run never reaches here (the CLI won't route it), but the symbol must exist for
+/// `supervise`'s unconditional call to compile. Fails closed.
+#[cfg(not(unix))]
+fn supervise_vz(_dir: &std::path::Path, _spec: &SpecOnDisk, _store: &Store) -> Result<i32> {
+    Err(LightrError::InvalidRef(
+        "vz supervise requires a unix host (macOS)".to_string(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // supervise
 // ---------------------------------------------------------------------------
 
@@ -962,6 +1212,15 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
     // We need a store for hydration — open from LIGHTR_HOME
     let store_root = lightr_home().join("store");
     let store = Store::open(&store_root)?;
+
+    // WP-NET2: a vz container run (engine "vz" + a rootfs ref) boots a Linux
+    // microVM in this supervisor process and forwards each published port to the
+    // guest's DHCP IP, instead of spawning a host child. Everything below is the
+    // unchanged native path. Selected by the engine field written at spawn time.
+    if spec.engine == "vz" && spec.rootfs_ref.is_some() {
+        return supervise_vz(dir, &spec, &store);
+    }
+
     for m in &spec.mounts {
         validate_mount_target(&m.target)?;
         let dest = cwd.join(&m.target);
@@ -1755,6 +2014,51 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // WP-NET2: SpecOnDisk gains engine + rootfs_ref — serde back-compat + roundtrip
+    // -----------------------------------------------------------------------
+
+    /// A pre-WP-NET2 spec.json (no `engine`/`rootfs_ref`) must still parse, with
+    /// `engine == "native"` (the supervisor's native branch) and no rootfs ref —
+    /// so an old detached native run is read back byte-for-byte in behaviour.
+    #[test]
+    fn spec_on_disk_legacy_json_defaults_to_native() {
+        let legacy = r#"{
+            "cwd": "/w", "command": ["sleep","1"], "env_keys": [],
+            "mounts": [], "detached": true, "created_at_unix": 1
+        }"#;
+        let spec: SpecOnDisk = serde_json::from_str(legacy).expect("legacy spec parses");
+        assert_eq!(spec.engine, "native", "missing engine ⇒ native branch");
+        assert!(spec.rootfs_ref.is_none(), "missing rootfs_ref ⇒ None");
+        assert!(
+            spec.ports.is_empty(),
+            "missing ports ⇒ empty (existing default)"
+        );
+    }
+
+    /// A vz container spec roundtrips through write/read with engine + rootfs_ref
+    /// preserved — what the supervisor reads to select the vz branch.
+    #[test]
+    fn spec_on_disk_vz_roundtrip_preserves_engine_and_rootfs() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = SpecOnDisk {
+            cwd: "/w".to_string(),
+            command: vec!["sh".to_string()],
+            env_keys: vec![],
+            mounts: vec![],
+            detached: true,
+            created_at_unix: 1,
+            ports: vec![(18080, 80)],
+            engine: "vz".to_string(),
+            rootfs_ref: Some("alpine".to_string()),
+        };
+        write_spec_json(dir.path(), &spec).expect("write");
+        let back = read_spec_on_disk(dir.path()).expect("read");
+        assert_eq!(back.engine, "vz");
+        assert_eq!(back.rootfs_ref.as_deref(), Some("alpine"));
+        assert_eq!(back.ports, vec![(18080, 80)]);
+    }
+
+    // -----------------------------------------------------------------------
     // key_stability: same spec twice => same key via two scans
     // -----------------------------------------------------------------------
     #[test]
@@ -2144,6 +2448,8 @@ mod tests {
             detached: false,
             created_at_unix: nanos / 1_000_000_000,
             ports: vec![],
+            engine: "native".to_string(),
+            rootfs_ref: None,
         };
         write_spec_json(&run_dir, &spec_on_disk).unwrap();
 
@@ -2840,6 +3146,8 @@ mod tests {
             detached: false,
             created_at_unix: nanos / 1_000_000_000,
             ports: vec![],
+            engine: "native".to_string(),
+            rootfs_ref: None,
         };
         write_spec_json(&run_dir, &spec_on_disk).unwrap();
         healthcheck::save_for(

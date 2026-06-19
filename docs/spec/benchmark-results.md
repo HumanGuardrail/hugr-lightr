@@ -134,6 +134,15 @@ always-on daemon VM. Measured on this Intel box (release binary, `--rootfs alpin
    compounds across reuse + a shared CAS (the work happens once, globally). Docker
    has **no memory** — it structurally cannot do this.
 
+**Published ports work in the container modality too (WP-NET2).** The flagship
+Docker case — *run a real Linux container with a published port on a Mac* —
+is shipped + validated: `lightr run -d -p 8080:80 --engine vz --rootfs <img> --
+<server>` boots the container in a microVM, the host forwards `127.0.0.1:8080`
+into the guest, and `stop` tears it down cleanly. Proven end-to-end by
+`spikes/s5-vz-net/run.sh` (GREEN on Intel: `curl` reaches a busybox server inside
+the VM, then the port closes on `stop` with no leaked process). So the vz
+modality isn't just "run a command" — it runs **services**, the Docker way.
+
 **Why would anyone use Docker instead of Lightr?** No reason: **∞** where the work
 repeats (memo — the common dev/CI/agent loop), **40–452×** on the structural axes
 (install, idle, materialize), and **parity + zero idle** on the one physics-bound
