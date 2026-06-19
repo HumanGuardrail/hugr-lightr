@@ -1363,7 +1363,12 @@ pub fn push(name: &str, target: &str, store: &Store) -> Result<PushReport> {
         build_layer_tar_gz(&tree, store, &layer_path)?;
 
     // c. Build the minimal OCI image config JSON.
-    let (os, arch) = (std::env::consts::OS, host_arch());
+    // `os` MUST describe the IMAGE, not the host that synthesized it: every image
+    // lightr holds is a LINUX container rootfs (vz/ns boot Linux; OCI imports are
+    // Linux images). Using `std::env::consts::OS` here would wrongly stamp "macos"
+    // on a Linux image and make `docker run` warn about a platform mismatch.
+    // `architecture` is the materialized rootfs arch (host arch on a native pull).
+    let (os, arch) = ("linux", host_arch());
     let config_json = serde_json::json!({
         "architecture": arch,
         "os": os,
