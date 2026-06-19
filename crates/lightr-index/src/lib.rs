@@ -1513,6 +1513,17 @@ pub fn gc(store: &Store, dry_run: bool, min_age_secs: u64) -> Result<GcReport> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    // Hard-killed runs leave status=="running" forever — reclaim them via a
+    // coarse-age heuristic.  We cannot use kill(pid, 0) because this crate
+    // forbids unsafe code and libc is not a dependency.  Instead we treat a
+    // run dir as provably-dead when ALL of:
+    //   1. status does NOT start with "exited" (still shows "running" or is absent)
+    //   2. a `pid` file is present in the dir (written by lightr-run)
+    //   3. dir mtime is older than now − HARD_KILLED_STALE_SECS (24 h default)
+    //   4. dir mtime is also older than now − min_age_secs (caller's preference)
+    // If no pid file exists we leave the dir alone (conservative).
+    const HARD_KILLED_STALE_SECS: u64 = 24 * 3600;
+
     if run_root.exists() {
         for dir_entry in std::fs::read_dir(&run_root)
             .map_err(LightrError::Io)?
@@ -1522,15 +1533,9 @@ pub fn gc(store: &Store, dry_run: bool, min_age_secs: u64) -> Result<GcReport> {
             if !dir_path.is_dir() {
                 continue;
             }
-            // Check status file starts with "exited"
+            // Shared: read status and dir mtime up front — used by both branches.
             let status_path = dir_path.join("status");
-            let status_ok = std::fs::read_to_string(&status_path)
-                .map(|s| s.starts_with("exited"))
-                .unwrap_or(false);
-            if !status_ok {
-                continue;
-            }
-            // Check dir mtime older than now − min_age_secs
+            let status_str = std::fs::read_to_string(&status_path).unwrap_or_default();
             let mtime_secs = dir_path
                 .metadata()
                 .and_then(|m| m.modified())
@@ -1538,12 +1543,34 @@ pub fn gc(store: &Store, dry_run: bool, min_age_secs: u64) -> Result<GcReport> {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            if now_secs.saturating_sub(mtime_secs) <= min_age_secs {
-                continue;
-            }
-            run_dirs_removed += 1;
-            if !dry_run {
-                let _ = std::fs::remove_dir_all(&dir_path);
+            let age_secs = now_secs.saturating_sub(mtime_secs);
+
+            if status_str.starts_with("exited") {
+                // ── Normal clean-exit path ────────────────────────────────────
+                if age_secs <= min_age_secs {
+                    continue;
+                }
+                run_dirs_removed += 1;
+                if !dry_run {
+                    let _ = std::fs::remove_dir_all(&dir_path);
+                }
+            } else {
+                // ── Hard-killed / stuck "running" path ────────────────────────
+                // Only reclaim if a pid file exists (proof that a run was started)
+                // AND the dir is older than both the caller's min_age and the
+                // hard-killed floor (24 h).  NEVER reclaim if pid file is absent.
+                let pid_path = dir_path.join("pid");
+                if !pid_path.exists() {
+                    continue;
+                }
+                let effective_min = min_age_secs.max(HARD_KILLED_STALE_SECS);
+                if age_secs <= effective_min {
+                    continue;
+                }
+                run_dirs_removed += 1;
+                if !dry_run {
+                    let _ = std::fs::remove_dir_all(&dir_path);
+                }
             }
         }
     }
@@ -2045,6 +2072,121 @@ mod r1_tests {
             got.as_slice(),
             live_content,
             "hydrated file content must be byte-identical"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // gc Fix 1: hard-killed run dirs are reclaimed via coarse-age heuristic
+    // -----------------------------------------------------------------------
+
+    /// A run dir with status "running" and a pid file, whose mtime is backdated
+    /// far enough (> 24 h) to exceed the hard-killed floor, MUST be reclaimed.
+    /// Unix-only: uses `touch -t` to backdate mtime without extra dependencies.
+    #[test]
+    #[cfg(unix)]
+    fn gc_reclaims_hard_killed_run_dir() {
+        let home = TempDir::new().unwrap();
+        let _env_guard = with_lightr_home(&home);
+
+        let store_root = home.path().join("store");
+        let store = Store::open(&store_root).unwrap();
+
+        // Create a run dir under LIGHTR_HOME/run/fake-run-001
+        let run_root = home.path().join("run");
+        fs::create_dir_all(&run_root).unwrap();
+        let run_dir = run_root.join("fake-run-001");
+        fs::create_dir_all(&run_dir).unwrap();
+
+        // Write status = "running" (not "exited")
+        fs::write(run_dir.join("status"), b"running").unwrap();
+        // Write a pid file with a high-numbered PID that is certainly dead.
+        // We pick 999999999 — well above Linux/macOS PID_MAX — so it cannot
+        // be alive. The coarse-age path does NOT use kill(0); it only checks
+        // presence of the pid file.
+        fs::write(run_dir.join("pid"), b"999999999").unwrap();
+
+        // Backdate the dir's mtime to 202001010000 (2020-01-01 00:00) via
+        // `touch -t` — no extra crate dependency required.
+        let status = std::process::Command::new("touch")
+            .args(["-t", "202001010000", run_dir.to_str().unwrap()])
+            .status()
+            .expect("touch must be available on unix");
+        assert!(status.success(), "touch -t backdating must succeed");
+
+        // gc with min_age=0: the hard-killed floor (24 h) is the binding limit.
+        let report = gc(&store, false, 0).unwrap();
+        assert!(
+            report.run_dirs_removed >= 1,
+            "gc must reclaim the hard-killed run dir (run_dirs_removed={})",
+            report.run_dirs_removed
+        );
+        assert!(
+            !run_dir.exists(),
+            "hard-killed run dir must be removed from disk"
+        );
+    }
+
+    /// A run dir with status "running" and a pid file, but whose mtime is only
+    /// 1 h ago (< 24 h hard-killed floor), must NOT be reclaimed.
+    #[test]
+    fn gc_does_not_reclaim_recent_running_dir() {
+        let home = TempDir::new().unwrap();
+        let _env_guard = with_lightr_home(&home);
+
+        let store_root = home.path().join("store");
+        let store = Store::open(&store_root).unwrap();
+
+        let run_root = home.path().join("run");
+        fs::create_dir_all(&run_root).unwrap();
+        let run_dir = run_root.join("recent-run-001");
+        fs::create_dir_all(&run_dir).unwrap();
+
+        fs::write(run_dir.join("status"), b"running").unwrap();
+        // Use current process PID — definitely alive.
+        fs::write(
+            run_dir.join("pid"),
+            std::process::id().to_string().as_bytes(),
+        )
+        .unwrap();
+        // mtime is "now" (created just above) — far below 24 h floor.
+
+        let report = gc(&store, false, 0).unwrap();
+        assert_eq!(
+            report.run_dirs_removed, 0,
+            "gc must NOT reclaim a recently-created running dir"
+        );
+        assert!(
+            run_dir.exists(),
+            "recent running dir must still exist after gc"
+        );
+    }
+
+    /// A run dir with status "running" but NO pid file must NOT be reclaimed
+    /// (conservative: no pid file = unknown origin).
+    #[test]
+    fn gc_does_not_reclaim_running_dir_without_pid_file() {
+        let home = TempDir::new().unwrap();
+        let _env_guard = with_lightr_home(&home);
+
+        let store_root = home.path().join("store");
+        let store = Store::open(&store_root).unwrap();
+
+        let run_root = home.path().join("run");
+        fs::create_dir_all(&run_root).unwrap();
+        let run_dir = run_root.join("nopid-run-001");
+        fs::create_dir_all(&run_dir).unwrap();
+
+        fs::write(run_dir.join("status"), b"running").unwrap();
+        // Deliberately NO pid file.
+
+        let report = gc(&store, false, 0).unwrap();
+        assert_eq!(
+            report.run_dirs_removed, 0,
+            "gc must not reclaim a running dir that has no pid file"
+        );
+        assert!(
+            run_dir.exists(),
+            "running dir without pid file must survive gc"
         );
     }
 
