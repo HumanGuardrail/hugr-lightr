@@ -41,6 +41,10 @@ const DNS_PORT: u16 = 53;
 const DNS_HDR_LEN: usize = 12;
 
 const QTYPE_A: u16 = 1;
+/// IPv6 address record. Our mesh names are IPv4-only, so an AAAA for an owned
+/// name is answered NODATA (see [`handle`]); used by name in the tests.
+#[allow(dead_code)]
+const QTYPE_AAAA: u16 = 28;
 const QCLASS_IN: u16 = 1;
 
 /// TTL handed out for answers we synthesize from the name table (seconds).
@@ -56,19 +60,30 @@ pub fn handle(frame: &[u8], names: &NameTable, upstream: Option<Ipv4Addr>) -> Op
     // ── Peel Ethernet → IPv4 → UDP → DNS, validating as we go. ──────────────
     let parsed = parse_query(frame)?;
 
-    // We only synthesize answers for A / IN questions. Anything else we either
-    // relay upstream (so e.g. AAAA still works through the host resolver) or,
-    // with no upstream, leave alone.
-    let answerable = parsed.qtype == QTYPE_A && parsed.qclass == QCLASS_IN;
+    // Is this a name WE own (in the registry name table)?
+    let in_class = parsed.qclass == QCLASS_IN;
+    let owned = in_class && names.contains_key(&normalize_name(&parsed.qname));
 
-    if answerable {
+    if owned {
         let key = normalize_name(&parsed.qname);
-        if let Some(&ip) = names.get(&key) {
+        if parsed.qtype == QTYPE_A {
+            // We have the A record — synthesize it.
+            let ip = names[&key];
             return Some(build_response(&parsed, ip));
         }
+        // We own the name but have no record of this type (notably AAAA: our
+        // mesh members are IPv4-only). We MUST answer authoritatively with
+        // NOERROR / empty-answer (NODATA) rather than relay upstream — the
+        // upstream returns NXDOMAIN for these private names, and musl's
+        // getaddrinfo() (Alpine/busybox guests) fires A+AAAA in parallel and
+        // discards the valid A answer the instant the AAAA comes back NXDOMAIN,
+        // failing the whole lookup ("bad address"). NODATA = "name exists, no
+        // record of this type" keeps the A answer authoritative.
+        // Ref: musl getaddrinfo A/AAAA-parallel behavior; NODATA vs NXDOMAIN.
+        return Some(build_nodata(&parsed));
     }
 
-    // Not in the table (or not an A/IN question): forward upstream if we can.
+    // Not a name we own: forward upstream if we can; else stay transparent.
     match upstream {
         Some(server) => relay_upstream(frame, &parsed, server),
         None => None,
@@ -269,6 +284,24 @@ fn build_response(q: &ParsedQuery, ip: Ipv4Addr) -> Vec<u8> {
         q.src_ip,   // reply dst IP  = query src IP (the guest)
         q.src_port, // reply dst port = query src port
     )
+}
+
+/// Build a NOERROR / empty-answer (NODATA) reply: the queried name EXISTS but
+/// has no record of the requested type. Header QR=1, RA=1, RCODE=0, ANCOUNT=0;
+/// the question is echoed (some resolvers require it). This is the correct
+/// answer for an AAAA query on an IPv4-only mesh name — see [`handle`].
+fn build_nodata(q: &ParsedQuery) -> Vec<u8> {
+    let mut dns = Vec::with_capacity(DNS_HDR_LEN + q.question.len());
+    dns.extend_from_slice(&q.id.to_be_bytes());
+    // QR=1, RA=1, RCODE=0 (NOERROR) → 0x8080.
+    dns.extend_from_slice(&0x8080u16.to_be_bytes());
+    dns.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+    dns.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT = 0  (NODATA)
+    dns.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
+    dns.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
+    dns.extend_from_slice(&q.question); // echo the question
+
+    encapsulate(&dns, q.dst_mac, q.src_mac, q.dst_ip, q.src_ip, q.src_port)
 }
 
 /// Wrap a DNS payload in UDP(53→dst_port)/IPv4/Ethernet with a valid IPv4
