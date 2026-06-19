@@ -256,10 +256,11 @@ pub fn run(
         //    PATH; it does not inherit the host env). The memo key must use the
         //    SAME env so the key and the executed environment agree. Keep this
         //    in lock-step with VzEngine::run in crates/lightr-engine/src/lib.rs.
-        let vz_env: Vec<(String, String)> = vec![(
-            "PATH".to_string(),
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
-        )];
+        // The memo key hashes the SAME PATH the vz engine injects into the guest
+        // command — one source of truth (lightr_engine::GUEST_PATH, re-exported
+        // from lightr_init) so the key can never drift from the actual env.
+        let vz_env: Vec<(String, String)> =
+            vec![("PATH".to_string(), lightr_engine::GUEST_PATH.to_string())];
 
         let key = VzMemoKey {
             command: command.to_vec(),

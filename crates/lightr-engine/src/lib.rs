@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 pub mod limits;
 pub mod pack;
 
+/// Re-export the guest-env PATH so the vz-memo key (lightr-cli handler) hashes
+/// the EXACT value the engine injects into the guest command — one source of
+/// truth (lightr_init::GUEST_PATH), so they can never drift and replay a HIT
+/// produced under a different environment.
+pub use lightr_init::GUEST_PATH;
+
 // ── EngineKind ────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -604,7 +610,7 @@ fn ns_engine_box() -> Box<dyn Engine> {
 mod vz_impl {
     use super::{pack_dir, Engine, ExecSpec};
     use lightr_core::{LightrError, Result};
-    use lightr_init::{InitSpec, CMD_FILE, EXIT_FILE};
+    use lightr_init::{InitSpec, CMD_FILE, EXIT_FILE, GUEST_PATH};
     use std::ffi::CString;
 
     /// Exit code returned when the VM booted (and stopped) but the guest never
@@ -682,10 +688,7 @@ mod vz_impl {
             let init_spec = InitSpec {
                 command: spec.command.to_vec(),
                 cwd: "/".to_string(),
-                env: vec![(
-                    "PATH".to_string(),
-                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
-                )],
+                env: vec![("PATH".to_string(), GUEST_PATH.to_string())],
             };
             std::fs::write(&cmd_path, init_spec.to_json()).map_err(LightrError::Io)?;
 
