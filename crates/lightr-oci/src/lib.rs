@@ -74,7 +74,7 @@ pub struct PushReport {
 // JSON shapes for OCI index / manifest
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 struct OciDescriptor {
     #[serde(default)]
     digest: String,
@@ -106,6 +106,12 @@ struct OciIndex {
 #[derive(Deserialize)]
 struct OciManifest {
     layers: Vec<OciDescriptor>,
+    /// The image config descriptor (entrypoint/cmd/env/os/arch live in this
+    /// blob). Captured at pull/import + stored via `Store::image_config_put` so
+    /// `oci push` re-emits a runnable image. `#[serde(default)]`: a manifest
+    /// without it (or an unparsable one) yields an empty descriptor → skipped.
+    #[serde(default)]
+    config: OciDescriptor,
 }
 
 // docker-save manifest.json item
@@ -113,6 +119,11 @@ struct OciManifest {
 struct DockerSaveItem {
     #[serde(rename = "Layers")]
     layers: Vec<String>,
+    /// Path (within the tar) of the image config JSON — `<hex>.json` (legacy) or
+    /// `blobs/sha256/<hex>` (modern/OCI-layout export). Captured for push-fidelity
+    /// (entrypoint/cmd/env). `#[serde(default)]`: absent ⇒ push falls back.
+    #[serde(rename = "Config", default)]
+    config: String,
 }
 
 // OCI distribution API responses
@@ -697,7 +708,21 @@ fn import_oci_layout_dir(layout_dir: &Path, store: &Store, name: &str) -> Result
         blobs.push(LayerBlob::Bytes(layer_bytes));
     }
 
-    apply_and_snapshot(blobs, layer_count, store, name)
+    let report = apply_and_snapshot(blobs, layer_count, store, name)?;
+
+    // push-fidelity: capture the image config blob from the layout (it sits at
+    // blobs/sha256/<config-hex>). sha256-verified; best-effort (the filesystem
+    // is already snapshotted, so a missing config only costs push-fidelity).
+    if let Some(cfg_hex) = sha256_hex(&manifest.config.digest) {
+        let cfg_path = layout_dir.join("blobs").join("sha256").join(cfg_hex);
+        if let Ok(cfg_bytes) = fs::read(&cfg_path) {
+            if verify_sha256(&cfg_bytes, cfg_hex).is_ok() {
+                let _ = store.image_config_put(name, &cfg_bytes);
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 fn import_docker_save_tar(tar_path: &Path, store: &Store, name: &str) -> Result<ImportReport> {
@@ -733,7 +758,11 @@ fn import_docker_save_tar(tar_path: &Path, store: &Store, name: &str) -> Result<
             } else if path_str.ends_with(".tar")
                 || path_str.ends_with("/layer.tar")
                 || path_str.trim_start_matches("./").starts_with("blobs/")
+                || path_str.ends_with(".json")
             {
+                // `.json` also captures the legacy `<hex>.json` image config for
+                // push-fidelity (manifest.json is already handled above). Modern
+                // configs live under `blobs/` and are caught by that arm.
                 // Legacy docker-save names layers `<hash>/layer.tar` / `<hash>.tar`;
                 // MODERN docker-save (OCI-layout export, Docker 25+/containerd image
                 // store) names them `blobs/sha256/<digest>` with NO extension and a
@@ -783,7 +812,25 @@ fn import_docker_save_tar(tar_path: &Path, store: &Store, name: &str) -> Result<
         blobs.push(LayerBlob::Bytes(data));
     }
 
-    apply_and_snapshot(blobs, layer_count, store, name)
+    let report = apply_and_snapshot(blobs, layer_count, store, name)?;
+
+    // push-fidelity: capture the image config JSON the manifest points at
+    // (legacy `<hex>.json` or modern `blobs/sha256/<hex>`, both collected in the
+    // first pass). sha256-verified when the path carries a digest; best-effort.
+    if !item.config.is_empty() {
+        let cfg_key = item.config.trim_start_matches("./").to_string();
+        if let Some(cfg_bytes) = layer_data.get(&cfg_key) {
+            let ok = match cfg_key.strip_prefix("blobs/sha256/") {
+                Some(hex) => verify_sha256(cfg_bytes, hex).is_ok(),
+                None => true, // legacy <hex>.json carries no in-path digest to check
+            };
+            if ok {
+                let _ = store.image_config_put(name, cfg_bytes);
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 /// Create a fresh tempdir, apply the blobs, snapshot, return report.
@@ -1207,40 +1254,42 @@ pub fn pull(image: &str, store: &Store, name: &str) -> Result<ImportReport> {
     let content_type = resp.content_type().to_string();
     let manifest_bytes = read_response_bytes(resp)?;
 
-    // Handle manifest list / index — pick best linux arch.
-    let layer_descs: Vec<OciDescriptor> = if content_type.contains("manifest.list")
-        || content_type.contains("image.index")
-    {
-        let list: ManifestList = serde_json::from_slice(&manifest_bytes)
-            .map_err(|e| LightrError::InvalidManifest(format!("manifest list parse error: {e}")))?;
+    // Handle manifest list / index — pick best linux arch. Capture the config
+    // descriptor alongside the layers (push-fidelity: the config blob holds
+    // entrypoint/cmd/env/os/arch, re-emitted by `oci push`).
+    let (layer_descs, config_desc): (Vec<OciDescriptor>, OciDescriptor) =
+        if content_type.contains("manifest.list") || content_type.contains("image.index") {
+            let list: ManifestList = serde_json::from_slice(&manifest_bytes).map_err(|e| {
+                LightrError::InvalidManifest(format!("manifest list parse error: {e}"))
+            })?;
 
-        let chosen = pick_from_manifest_list(&list.manifests)?;
+            let chosen = pick_from_manifest_list(&list.manifests)?;
 
-        // Fetch the specific manifest (with retry).
-        let spec_url = format!("https://{registry}/v2/{repo}/manifests/{}", chosen.digest);
-        let resp2 = retry_request(
-            || {
-                let mut req2 = agent.get(&spec_url).set(
-                    "Accept",
-                    "application/vnd.oci.image.manifest.v1+json, \
+            // Fetch the specific manifest (with retry).
+            let spec_url = format!("https://{registry}/v2/{repo}/manifests/{}", chosen.digest);
+            let resp2 = retry_request(
+                || {
+                    let mut req2 = agent.get(&spec_url).set(
+                        "Accept",
+                        "application/vnd.oci.image.manifest.v1+json, \
                      application/vnd.docker.distribution.manifest.v2+json",
-                );
-                if let Some(h) = auth_ref {
-                    req2 = req2.set("Authorization", h);
-                }
-                req2.call()
-            },
-            &format!("{registry}/{repo}"),
-        )?;
-        let bytes2 = read_response_bytes(resp2)?;
-        let m: OciManifest = serde_json::from_slice(&bytes2)
-            .map_err(|e| LightrError::InvalidManifest(format!("manifest parse error: {e}")))?;
-        m.layers
-    } else {
-        let m: OciManifest = serde_json::from_slice(&manifest_bytes)
-            .map_err(|e| LightrError::InvalidManifest(format!("manifest parse error: {e}")))?;
-        m.layers
-    };
+                    );
+                    if let Some(h) = auth_ref {
+                        req2 = req2.set("Authorization", h);
+                    }
+                    req2.call()
+                },
+                &format!("{registry}/{repo}"),
+            )?;
+            let bytes2 = read_response_bytes(resp2)?;
+            let m: OciManifest = serde_json::from_slice(&bytes2)
+                .map_err(|e| LightrError::InvalidManifest(format!("manifest parse error: {e}")))?;
+            (m.layers, m.config)
+        } else {
+            let m: OciManifest = serde_json::from_slice(&manifest_bytes)
+                .map_err(|e| LightrError::InvalidManifest(format!("manifest parse error: {e}")))?;
+            (m.layers, m.config)
+        };
 
     let layer_count = layer_descs.len() as u64;
 
@@ -1285,7 +1334,34 @@ pub fn pull(image: &str, store: &Store, name: &str) -> Result<ImportReport> {
         }
     }
 
-    apply_and_snapshot(blobs, layer_count, store, name)
+    let report = apply_and_snapshot(blobs, layer_count, store, name)?;
+
+    // push-fidelity: capture the original image config (entrypoint/cmd/env/os/arch)
+    // so a later `oci push` re-emits a RUNNABLE image, not a config-less layer.
+    // Best-effort: the image filesystem is already snapshotted above, so a
+    // config-fetch hiccup must NOT fail the pull — push just falls back to a
+    // synthesized minimal config. Verified by sha256 (Some(cfg_hex)).
+    if let Some(cfg_hex) = sha256_hex(&config_desc.digest) {
+        let cfg_url = format!("https://{registry}/v2/{repo}/blobs/{}", config_desc.digest);
+        let cfg_file = blob_tmp_dir.join(format!("config-{cfg_hex}"));
+        let repo_disp = format!("{registry}/{repo}");
+        if stream_blob_to_file(
+            &agent,
+            &cfg_url,
+            auth_ref,
+            &cfg_file,
+            Some(cfg_hex),
+            &repo_disp,
+        )
+        .is_ok()
+        {
+            if let Ok(cfg_bytes) = fs::read(&cfg_file) {
+                let _ = store.image_config_put(name, &cfg_bytes);
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1362,24 +1438,48 @@ pub fn push(name: &str, target: &str, store: &Store) -> Result<PushReport> {
     let (layer_digest_hex, diff_id_hex, layer_size) =
         build_layer_tar_gz(&tree, store, &layer_path)?;
 
-    // c. Build the minimal OCI image config JSON.
-    // `os` MUST describe the IMAGE, not the host that synthesized it: every image
-    // lightr holds is a LINUX container rootfs (vz/ns boot Linux; OCI imports are
-    // Linux images). Using `std::env::consts::OS` here would wrongly stamp "macos"
-    // on a Linux image and make `docker run` warn about a platform mismatch.
-    // `architecture` is the materialized rootfs arch (host arch on a native pull).
-    let (os, arch) = ("linux", host_arch());
-    let config_json = serde_json::json!({
-        "architecture": arch,
-        "os": os,
-        "rootfs": {
-            "type": "layers",
-            "diff_ids": [format!("sha256:{diff_id_hex}")]
-        },
-        "config": {}
-    });
-    let config_bytes = serde_json::to_vec(&config_json)
-        .map_err(|e| LightrError::InvalidManifest(format!("config serialize error: {e}")))?;
+    // c. Build the OCI image config JSON.
+    // push-fidelity: if the ORIGINAL config was captured at pull/import, re-emit
+    // it — preserving entrypoint/cmd/env/workingdir/os/arch so the pushed image
+    // RUNS identically — with ONLY `rootfs.diff_ids` replaced by the single
+    // synthesized layer's diff_id (the original diff_ids described the original
+    // layers, which we collapsed into one). Otherwise (a `snapshot`'d ref, or a
+    // ref pulled before push-fidelity) synthesize a minimal Linux config.
+    let config_bytes = match store.image_config_get(name)? {
+        Some(orig) => {
+            let mut v: serde_json::Value = serde_json::from_slice(&orig).map_err(|e| {
+                LightrError::InvalidManifest(format!("stored image config parse error: {e}"))
+            })?;
+            v["rootfs"] = serde_json::json!({
+                "type": "layers",
+                "diff_ids": [format!("sha256:{diff_id_hex}")],
+            });
+            // `history` enumerates the ORIGINAL layers; with a single synthesized
+            // layer it would disagree with diff_ids (some runtimes reject that),
+            // so drop it. os/architecture/config (entrypoint/cmd/env) are kept.
+            if let Some(obj) = v.as_object_mut() {
+                obj.remove("history");
+            }
+            serde_json::to_vec(&v)
+                .map_err(|e| LightrError::InvalidManifest(format!("config serialize error: {e}")))?
+        }
+        None => {
+            // Minimal config. `os` MUST describe the IMAGE (Linux rootfs), not the
+            // host that synthesized it — `std::env::consts::OS` would wrongly stamp
+            // "macos" and make `docker run` warn. `architecture` = host arch.
+            let config_json = serde_json::json!({
+                "architecture": host_arch(),
+                "os": "linux",
+                "rootfs": {
+                    "type": "layers",
+                    "diff_ids": [format!("sha256:{diff_id_hex}")],
+                },
+                "config": {}
+            });
+            serde_json::to_vec(&config_json)
+                .map_err(|e| LightrError::InvalidManifest(format!("config serialize error: {e}")))?
+        }
+    };
     let config_digest_hex = sha256_hex_of(&config_bytes);
     let config_size = config_bytes.len() as u64;
 
