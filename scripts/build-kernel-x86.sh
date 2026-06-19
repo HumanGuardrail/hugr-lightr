@@ -84,10 +84,14 @@ scripts/config \
     --enable VIRTIO --enable VIRTIO_PCI --enable VIRTIO_CONSOLE \
     --enable VIRTIO_BLK --enable VIRTIO_NET --enable VIRTIO_FS --enable FUSE_FS \
     --enable BLK_DEV_INITRD --enable DEVTMPFS --enable DEVTMPFS_MOUNT \
-    --enable PRINTK --enable TTY
+    --enable PRINTK --enable TTY \
+    --enable IP_PNP --enable IP_PNP_DHCP
 make olddefconfig >/dev/null
 echo "[config] boot-critical options:"
 grep -E "^CONFIG_(PVH|VIRTIO_PCI|VIRTIO_CONSOLE|VIRTIO_FS|FUSE_FS|BLK_DEV_INITRD|DEVTMPFS)=" .config
+# ADR-0018: guest DHCP lease from the userspace switch's embedded DHCP server
+grep -q "^CONFIG_IP_PNP=y"      .config || { echo "[config] MISSING: CONFIG_IP_PNP=y"      >&2; exit 1; }
+grep -q "^CONFIG_IP_PNP_DHCP=y" .config || { echo "[config] MISSING: CONFIG_IP_PNP_DHCP=y" >&2; exit 1; }
 make -j"$(nproc)" vmlinux bzImage 2>&1 | tail -4
 cp vmlinux /out/vmlinux
 cp arch/x86/boot/bzImage /out/bzImage
