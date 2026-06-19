@@ -50,6 +50,13 @@ pub const STDOUT_FILE: &str = "/.lightr-stdout";
 /// / [`EXIT_FILE`].
 pub const STDERR_FILE: &str = "/.lightr-stderr";
 
+/// The PATH injected into the guest command's environment. SINGLE SOURCE OF
+/// TRUTH: the vz engine puts this in the command's env (InitSpec), and the
+/// vz-memo key (lightr-cli handler) hashes the SAME value — if these drifted, a
+/// memo HIT could replay a result produced under a different environment. Both
+/// reference this const so they can never diverge.
+pub const GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 /// Exit code reported when the command cannot be spawned (ENOENT etc.). Matches
 /// the shell "command not found" convention so the host sees a real, non-zero
 /// outcome rather than a fabricated success.
