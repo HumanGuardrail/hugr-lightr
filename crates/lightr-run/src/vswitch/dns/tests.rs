@@ -193,19 +193,57 @@ fn non_dns_frame_is_none() {
     assert_eq!(handle(&frame, &names, None), None);
 }
 
-#[test]
-fn dns_non_a_query_without_upstream_is_none() {
-    // An AAAA (type 28) query for a known name is not synthesizable here;
-    // with no upstream it must be None rather than a forged A answer.
-    let names = table_with("web", Ipv4Addr::new(10, 0, 0, 42));
+/// Build an AAAA (type 28) query frame for `name`, guest→gateway.
+fn build_aaaa_query_frame(name: &str) -> Vec<u8> {
     let mut dns = Vec::new();
     dns.extend_from_slice(&QUERY_ID.to_be_bytes());
     dns.extend_from_slice(&0x0100u16.to_be_bytes());
     dns.extend_from_slice(&1u16.to_be_bytes());
     dns.extend_from_slice(&[0u8; 6]);
-    dns.extend_from_slice(b"\x03web\x00");
-    dns.extend_from_slice(&28u16.to_be_bytes()); // QTYPE AAAA
+    for label in name.split('.') {
+        dns.push(label.len() as u8);
+        dns.extend_from_slice(label.as_bytes());
+    }
+    dns.push(0);
+    dns.extend_from_slice(&QTYPE_AAAA.to_be_bytes());
     dns.extend_from_slice(&QCLASS_IN.to_be_bytes());
-    let frame = encapsulate_for_test(&dns, GUEST_MAC, GW_MAC, GUEST_IP, GW_IP, CLIENT_PORT);
+    encapsulate_for_test(&dns, GUEST_MAC, GW_MAC, GUEST_IP, GW_IP, CLIENT_PORT)
+}
+
+#[test]
+fn dns_aaaa_for_owned_name_is_nodata_not_nxdomain() {
+    // CRITICAL musl-compat contract (WP-C10 E2E finding): a guest's
+    // getaddrinfo() fires A + AAAA in parallel; if the AAAA for an owned,
+    // IPv4-only mesh name comes back NXDOMAIN (or unanswered → upstream
+    // NXDOMAIN), musl discards the valid A answer and the lookup fails with
+    // "bad address". So an AAAA for a KNOWN name must be NOERROR/NODATA:
+    // QR=1, RCODE=0, ANCOUNT=0, the question echoed.
+    let names = table_with("web", Ipv4Addr::new(10, 0, 0, 42));
+    let frame = build_aaaa_query_frame("web");
+
+    // Even WITH an upstream set, an owned name must be answered locally as
+    // NODATA — never relayed (the upstream would say NXDOMAIN).
+    let reply = handle(&frame, &names, Some(Ipv4Addr::new(8, 8, 8, 8)))
+        .expect("owned AAAA must get a local NODATA answer, not None/relay");
+
+    let ip = &reply[ETH_HDR_LEN..];
+    let ihl = ((ip[0] & 0x0f) as usize) * 4;
+    let dns = &ip[ihl + 8..];
+    assert_eq!(read_u16(dns, 0).unwrap(), QUERY_ID, "transaction id echoed");
+    let flags = read_u16(dns, 2).unwrap();
+    assert_eq!(flags & 0x8000, 0x8000, "QR set (response)");
+    assert_eq!(flags & 0x000f, 0, "RCODE = 0 (NOERROR), NOT NXDOMAIN(3)");
+    assert_eq!(read_u16(dns, 4).unwrap(), 1, "QDCOUNT = 1");
+    assert_eq!(read_u16(dns, 6).unwrap(), 0, "ANCOUNT = 0 (NODATA)");
+    // Question echoed: "web" → 1+3+1+2+2 = 9 bytes; nothing after it.
+    assert_eq!(dns.len(), DNS_HDR_LEN + 9, "question echoed, no answer RRs");
+}
+
+#[test]
+fn dns_aaaa_for_unowned_name_without_upstream_is_none() {
+    // For a name we do NOT own, with no upstream, stay transparent (None) —
+    // we must not forge a NODATA for a name that isn't ours.
+    let names = table_with("web", Ipv4Addr::new(10, 0, 0, 42));
+    let frame = build_aaaa_query_frame("nope");
     assert_eq!(handle(&frame, &names, None), None);
 }

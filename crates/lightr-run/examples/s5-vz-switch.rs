@@ -258,36 +258,78 @@ fn step_2_and_3(
 
     let (a_host, a_guest) = datagram_socketpair();
     let (b_host, b_guest) = datagram_socketpair();
-    sw.add_member(a_host, a.mac.0, a.ip, "a")
+    // The DNS name registered with the switch is MULTI-LABEL ("a.mesh"), not the
+    // bare "a". This is deliberate and load-bearing: the alpine guest's musl
+    // libc does NOT issue a DNS query for single-label (dotless) names from
+    // getaddrinfo() — it only consults /etc/hosts for them — so `wget http://a/`
+    // fails with "bad address" before any packet reaches our DNS. (A direct
+    // `nslookup a.` DOES get answered 10.69.x.2 by vswitch/dns.rs, proving the
+    // resolver path works; the gap is purely musl's dotless-name policy.) Giving
+    // the service a dotted name makes getaddrinfo actually query DNS, which our
+    // embedded server answers from this NameTable entry.
+    const SERVER_DNS_NAME: &str = "a.mesh";
+    sw.add_member(a_host, a.mac.0, a.ip, SERVER_DNS_NAME)
         .unwrap_or_else(|e| fail(&format!("add_member(a): {e}")));
-    sw.add_member(b_host, b.mac.0, b.ip, "b")
+    sw.add_member(b_host, b.mac.0, b.ip, "b.mesh")
         .unwrap_or_else(|e| fail(&format!("add_member(b): {e}")));
 
     // Server: lease eth1, then serve a fixed body on :80 for a bounded window so
     // the client (which boots concurrently + needs DHCP) has time to connect
-    // twice (by-IP then by-name). busybox `nc -ll -p 80 -e` keeps re-accepting.
-    // We loop a fixed number of accepts then exit so the VM powers off cleanly.
+    // twice (by-IP then by-name). We loop a fixed number of accepts then exit so
+    // the VM powers off cleanly.
+    //
+    // LIVENESS: each `nc -l` blocks until a peer connects. If any client request
+    // fails to connect (the exact failure mode under validation), the server
+    // would block forever on that accept and the VM would never power off,
+    // hanging the harness. We bound EACH accept with `timeout` (so a stuck nc is
+    // killed and the loop advances) AND bound the whole server with an outer
+    // `timeout` as a backstop. This is behavior-preserving for the GREEN path
+    // (both connections arrive well within the windows) and guarantees the VM
+    // always powers off so the harness reports instead of hanging. `timeout`
+    // returns 124 on expiry; we swallow it so the loop continues / exits 0.
     let server_cmd = "ip link set eth1 up; \
                       udhcpc -i eth1 -n -q -f -t 8 >/dev/null 2>&1; \
                       echo SERVER_IP=$(ip -4 addr show eth1 | sed -n 's/.*inet \\([0-9.]*\\).*/\\1/p'); \
                       i=0; while [ $i -lt 2 ]; do \
-                        printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 8\\r\\n\\r\\nMESH-OK\\n' | nc -l -p 80; \
+                        printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 8\\r\\n\\r\\nMESH-OK\\n' \
+                          | timeout 45 nc -l -p 80 || true; \
                         i=$((i+1)); \
                       done; \
                       echo SERVER_DONE";
 
     // Client: lease eth1, set resolv.conf (udhcpc does this from our DHCP option
-    // 6 = gateway). Then wget BY IP (step2) and BY NAME 'a' (step3).
+    // 6 = gateway). Then wget BY IP (step2) and BY NAME 'a.mesh' (step3). The
+    // dotted name is what makes musl's getaddrinfo issue the DNS query our
+    // embedded server answers (see the SERVER_DNS_NAME note above).
+    //
+    // LIVENESS: busybox `nc -l` is a ONE-SHOT listener — the server serves one
+    // connection, exits, and the loop re-binds for the next. There is a small
+    // window between serving the by-IP request and the next `nc -l` binding; a
+    // client request landing in that gap gets "Connection refused". That is a
+    // server-side accept-loop artifact, NOT a networking defect (DNS already
+    // resolved the name to the right IP). We make each client fetch RETRY a few
+    // times with a short backoff so the validation no longer depends on winning
+    // the re-bind race. Behavior-preserving: a working path still succeeds on
+    // the first try; only the gap is tolerated. `fetch URL MARKER` prints the
+    // body on success or the MARKER on persistent failure.
     let a_ip = a.ip;
+    let server_name = SERVER_DNS_NAME;
     let client_cmd = format!(
         "ip link set eth1 up; \
          udhcpc -i eth1 -n -q -f -t 8 >/dev/null 2>&1; \
          echo CLIENT_IP=$(ip -4 addr show eth1 | sed -n 's/.*inet \\([0-9.]*\\).*/\\1/p'); \
          echo '--- resolv.conf ---'; cat /etc/resolv.conf 2>&1; \
+         fetch() {{ url=$1; marker=$2; n=0; \
+           while [ $n -lt 15 ]; do \
+             body=$(wget -T 8 -q -O - \"$url\" 2>/dev/null) && \
+               {{ printf '%s\\n' \"$body\"; return 0; }}; \
+             n=$((n+1)); sleep 1; \
+           done; \
+           echo \"$marker\"; return 1; }}; \
          echo '--- BY IP ({a_ip}) ---'; \
-         wget -T 12 -q -O - http://{a_ip}/ 2>&1 || echo WGET_IP_FAIL; \
-         echo '--- BY NAME (a) ---'; \
-         wget -T 12 -q -O - http://a/ 2>&1 || echo WGET_NAME_FAIL"
+         fetch http://{a_ip}/ WGET_IP_FAIL; \
+         echo '--- BY NAME ({server_name}) ---'; \
+         fetch http://{server_name}/ WGET_NAME_FAIL"
     );
 
     // Boot both VMs on their own threads; the client must start ~immediately so
@@ -366,16 +408,23 @@ fn step_2_and_3(
 
     if !by_name_ok {
         eprintln!(
-            "  DIAGNOSIS (step3): by-name wget did not round-trip.\n  \
+            "  DIAGNOSIS (step3): by-name wget for http://{server_name}/ did not round-trip.\n  \
              Check the client's resolv.conf above: it must read 'nameserver {gw}'.\n  \
              If it does but the name didn't resolve → vswitch/dns.rs is not answering\n  \
-             the A query for 'a'. If resolv.conf is wrong → our DHCP option 6 (DNS)\n  \
-             is not being honored by udhcpc.",
+             the A query for '{server_name}', or the gateway-IP ARP responder\n  \
+             (vswitch/switch.rs::arp_gateway_reply) is not handing the guest the\n  \
+             nameserver's MAC so the DNS query never leaves the guest. If resolv.conf\n  \
+             is wrong → our DHCP option 6 (DNS) is not being honored by udhcpc.",
             gw = subnet.gateway
         );
-        fail("STEP 3: curl-by-name http://a/ did NOT round-trip via embedded DNS");
+        fail(&format!(
+            "STEP 3: curl-by-name http://{server_name}/ did NOT round-trip via embedded DNS"
+        ));
     }
-    ok("b fetched http://a/ by NAME (vswitch/dns.rs A-record + DHCP DNS=gateway confirmed)");
+    ok(&format!(
+        "b fetched http://{server_name}/ by NAME (ARP gateway reply + vswitch/dns.rs \
+         A-record + DHCP DNS=gateway confirmed)"
+    ));
 
     (a.ip, b.ip)
 }
@@ -409,9 +458,18 @@ fn step_4(id: &str, store_root: &Path, _a_ip: Ipv4Addr, _b_ip: Ipv4Addr) {
     ok("VSwitch threads joined on shutdown; no leaked VM/supervisor procs; net dir reclaimed");
 }
 
-/// Any process whose argv mentions this harness id or a lingering lightr VM from
-/// our run. We scan `ps` for the harness binary + the network id.
-fn leaked_procs(id: &str) -> String {
+/// A genuinely-leaked process: an actual `s5-vz-switch` executable (a second
+/// copy of THIS harness that failed to exit) still running after teardown.
+///
+/// We must NOT flag processes that merely MENTION the binary in their argv:
+/// the launching shell's command line echoes `target/debug/examples/s5-vz-switch`
+/// and so trivially substring-matches — that's the launcher, not a leak. So we
+/// parse each `ps` line into (pid, argv) and flag it only when argv[0]'s
+/// BASENAME is exactly `s5-vz-switch` (i.e. the executable itself is running),
+/// excluding our own PID. This is the daemonless proof: the VZ engine runs the
+/// microVM in-process (no child supervisor), so after `run()` returns and the
+/// switch threads join, no `s5-vz-switch` image other than us may remain.
+fn leaked_procs(_id: &str) -> String {
     let out = std::process::Command::new("ps")
         .args(["-axo", "pid=,command="])
         .output();
@@ -419,17 +477,25 @@ fn leaked_procs(id: &str) -> String {
         return String::new();
     };
     let text = String::from_utf8_lossy(&out.stdout);
-    let me = std::process::id().to_string();
+    let me = std::process::id();
     text.lines()
-        .filter(|l| l.contains("s5-vz-switch") || l.contains(id))
-        // Exclude our own process line.
-        .filter(|l| {
-            !l.split_whitespace()
-                .next()
-                .map(|p| p == me)
-                .unwrap_or(false)
+        .filter_map(|l| {
+            let l = l.trim_start();
+            let (pid_str, cmd) = l.split_once(char::is_whitespace)?;
+            let pid = pid_str.parse::<u32>().ok()?;
+            if pid == me {
+                return None; // ourselves
+            }
+            // argv[0] is the first whitespace-delimited token of the command.
+            let argv0 = cmd.split_whitespace().next()?;
+            // The executable IS this harness iff its path basename matches.
+            let basename = argv0.rsplit('/').next().unwrap_or(argv0);
+            if basename == "s5-vz-switch" {
+                Some(l.to_string())
+            } else {
+                None
+            }
         })
-        .map(|l| l.to_string())
         .collect::<Vec<_>>()
         .join("\n")
 }

@@ -168,7 +168,11 @@ mod tests {
         assert_eq!(&reply[12..14], &[0x08, 0x06], "ethertype ARP");
         assert_eq!(&reply[20..22], &[0x00, 0x02], "opcode = reply");
         assert_eq!(&reply[22..28], &gw_mac, "sender HW = gateway MAC");
-        assert_eq!(&reply[28..32], &[10, 69, 81, 1], "sender proto = gateway IP");
+        assert_eq!(
+            &reply[28..32],
+            &[10, 69, 81, 1],
+            "sender proto = gateway IP"
+        );
         assert_eq!(&reply[32..38], &MAC_A, "target HW = requester");
         // Non-gateway target is ignored.
         assert!(arp_gateway_reply(&arp_request([10, 69, 81, 9]), gw_ip, gw_mac).is_none());
