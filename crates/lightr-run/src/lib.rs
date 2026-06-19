@@ -441,6 +441,141 @@ pub fn predict(spec: &RunSpec, store: &Store) -> Result<(lightr_core::Digest, bo
 }
 
 // ---------------------------------------------------------------------------
+// vz-memo — memoize container runs (build-spec-prod.md, the product's moat).
+//
+// A `vz` container run (`lightr run --engine vz --rootfs <ref> -- <cmd>`) is
+// memoized EXACTLY like the native path: the 1st run boots the VM + captures
+// {exit, stdout, stderr}; an identical 2nd run is a HIT that replays them from
+// the Action Cache with NO VM boot. The hit/miss flow mirrors
+// `run_memoized_with` byte-for-byte — the only difference is that the "run" is a
+// caller-supplied closure (boot the VM, read the guest's capture files) instead
+// of a native `Command`. Caching law is identical: store ONLY when `exit == 0`
+// AND both streams are within `OUTPUT_CAP_BYTES`; replay is byte-exact.
+//
+// The memo key is a SEPARATE, domain-separated key (`b"lightr-vz-memo-v1"`) — a
+// vz run keys on (command, rootfs image digest, env), NOT on a cwd scan, so it
+// never collides with a native `run/v1` key.
+// ---------------------------------------------------------------------------
+
+/// Inputs that identify a memoizable `vz` container run. A different command,
+/// rootfs image, or env ⇒ a different run ⇒ a different key.
+///
+/// `rootfs_digest` is the resolved content digest of the rootfs image (the
+/// ref's current root), so two refs pointing at the same content share a memo
+/// entry and a ref re-pointed at new content misses — exactly like a mount's
+/// key contribution in `assemble_key`.
+pub struct VzMemoKey {
+    pub command: Vec<String>,
+    pub rootfs_digest: lightr_core::Digest,
+    pub env: Vec<(String, String)>,
+}
+
+/// Compute the memo key for a `vz` container run. blake3 over a
+/// DOMAIN-SEPARATED, length-prefixed encoding so the layout is unambiguous and
+/// no field boundary can be forged by concatenation:
+///   update(b"lightr-vz-memo-v1")            // fixed domain tag
+///   update(rootfs_digest.0)                 // 32B image content digest
+///   for arg in command:  len(u64 LE) + arg  // length-prefixed, ordered
+///   for (k, v) in env:   len(k=v, u64 LE) + "k=v"  // length-prefixed, ordered
+///   update(OS) update("-") update(ARCH)     // target triple
+///
+/// Determinism is essential: identical inputs ⇒ identical key (see
+/// `vz_memo_key_is_deterministic`); any field change ⇒ a different key (see
+/// `vz_memo_key_is_sensitive_to_every_field`).
+pub fn vz_memo_key(k: &VzMemoKey) -> lightr_core::Digest {
+    let mut hasher = blake3::Hasher::new();
+
+    // Fixed domain tag — separates this key space from `run/v1` etc.
+    hasher.update(b"lightr-vz-memo-v1");
+
+    // Rootfs image content digest (32 bytes, fixed width — no length prefix
+    // needed; it is always exactly 32 bytes).
+    hasher.update(&k.rootfs_digest.0);
+
+    // Command args — length-prefixed, in order.
+    for arg in &k.command {
+        let len = arg.len() as u64;
+        hasher.update(&len.to_le_bytes());
+        hasher.update(arg.as_bytes());
+    }
+
+    // Env — length-prefixed `key=value`, in order. The encoded `k=v` is
+    // length-prefixed as a whole so an env split (e.g. `A`,`B=C` vs `A=B`,`C`)
+    // can never collide.
+    for (key, val) in &k.env {
+        let mut kv = Vec::with_capacity(key.len() + 1 + val.len());
+        kv.extend_from_slice(key.as_bytes());
+        kv.push(b'=');
+        kv.extend_from_slice(val.as_bytes());
+        let len = kv.len() as u64;
+        hasher.update(&len.to_le_bytes());
+        hasher.update(&kv);
+    }
+
+    // Target triple: os/arch (a cached Linux-guest result is host-arch specific).
+    hasher.update(std::env::consts::OS.as_bytes());
+    hasher.update(b"-");
+    hasher.update(std::env::consts::ARCH.as_bytes());
+
+    Digest(*hasher.finalize().as_bytes())
+}
+
+/// Memoize a `vz` container run. Mirrors `run_memoized_with`'s hit/miss flow
+/// EXACTLY, with the "run" supplied as a closure returning
+/// `(exit_code, stdout, stderr)`:
+///
+/// * HIT  — `ac_get(key)` → `decode_ac_record` → `get_bytes` both streams ⇒
+///   `RunOutcome { hit: true, .. }`. The closure is NEVER invoked (no VM boot).
+/// * MISS — invoke `run()`, then store ONLY when `exit == 0` AND both streams
+///   are `<= OUTPUT_CAP_BYTES` (`put_bytes` × 2 + `encode_ac_record` +
+///   `ac_put`) ⇒ `RunOutcome { hit: false, .. }`.
+///
+/// Caching law is identical to the native memo: a non-zero exit or an oversized
+/// stream is environmental/unbounded and is never cached, so it always re-runs.
+pub fn run_vz_memoized(
+    k: &VzMemoKey,
+    store: &Store,
+    run: impl FnOnce() -> Result<(i32, Vec<u8>, Vec<u8>)>,
+) -> Result<RunOutcome> {
+    let key = vz_memo_key(k);
+
+    // --- Hit path (mirror of run_memoized_with) ---
+    if let Ok(Some(record_bytes)) = store.ac_get(&key) {
+        if let Some((exit_code, stdout_d, stderr_d)) = decode_ac_record(&record_bytes) {
+            let stdout_res = store.get_bytes(&stdout_d);
+            let stderr_res = store.get_bytes(&stderr_d);
+            if let (Ok(stdout), Ok(stderr)) = (stdout_res, stderr_res) {
+                return Ok(RunOutcome {
+                    key,
+                    hit: true,
+                    exit_code,
+                    stdout,
+                    stderr,
+                });
+            }
+        }
+    }
+
+    // --- Miss path: run the closure (boots the VM) and capture the result ---
+    let (exit_code, stdout, stderr) = run()?;
+
+    if exit_code == 0 && stdout.len() <= OUTPUT_CAP_BYTES && stderr.len() <= OUTPUT_CAP_BYTES {
+        let stdout_d = store.put_bytes(&stdout)?;
+        let stderr_d = store.put_bytes(&stderr)?;
+        let record = encode_ac_record(exit_code, &stdout_d, &stderr_d);
+        store.ac_put(&key, &record)?;
+    }
+
+    Ok(RunOutcome {
+        key,
+        hit: false,
+        exit_code,
+        stdout,
+        stderr,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // R1 — run control types and helpers
 // ---------------------------------------------------------------------------
 
@@ -2744,5 +2879,252 @@ mod tests {
         // Clean up the sleeper + supervisor.
         let _ = stop(&run_dir, 2);
         let _ = t.join();
+    }
+
+    // =======================================================================
+    // vz-memo — key determinism/sensitivity + HIT/MISS flow (the product moat)
+    // =======================================================================
+
+    fn vz_key(command: Vec<&str>, rootfs: [u8; 32], env: Vec<(&str, &str)>) -> VzMemoKey {
+        VzMemoKey {
+            command: command.into_iter().map(|s| s.to_string()).collect(),
+            rootfs_digest: lightr_core::Digest(rootfs),
+            env: env
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // vz_memo_key_is_deterministic: identical inputs ⇒ identical key.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn vz_memo_key_is_deterministic() {
+        let k1 = vz_key(
+            vec!["/bin/echo", "hi"],
+            [7u8; 32],
+            vec![("PATH", "/usr/bin")],
+        );
+        let k2 = vz_key(
+            vec!["/bin/echo", "hi"],
+            [7u8; 32],
+            vec![("PATH", "/usr/bin")],
+        );
+        assert_eq!(
+            vz_memo_key(&k1).0,
+            vz_memo_key(&k2).0,
+            "same inputs must produce the same vz memo key"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // vz_memo_key_is_sensitive_to_every_field: any field change ⇒ a new key.
+    // Covers command, rootfs_digest, and env (the three key inputs), plus
+    // env-split ambiguity (the length-prefix must defeat it).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn vz_memo_key_is_sensitive_to_every_field() {
+        let base = vz_key(
+            vec!["/bin/echo", "hi"],
+            [7u8; 32],
+            vec![("PATH", "/usr/bin")],
+        );
+        let base_key = vz_memo_key(&base).0;
+
+        // (a) command arg change
+        let diff_cmd = vz_key(
+            vec!["/bin/echo", "bye"],
+            [7u8; 32],
+            vec![("PATH", "/usr/bin")],
+        );
+        assert_ne!(
+            base_key,
+            vz_memo_key(&diff_cmd).0,
+            "a command change must change the key"
+        );
+
+        // (b) command arity change (one arg vs two — length-prefix defeats
+        //     "echo"+"hi" colliding with "echohi").
+        let diff_arity = vz_key(vec!["/bin/echohi"], [7u8; 32], vec![("PATH", "/usr/bin")]);
+        assert_ne!(
+            base_key,
+            vz_memo_key(&diff_arity).0,
+            "argument boundaries must matter (length-prefixed)"
+        );
+
+        // (c) rootfs digest change (a different image ⇒ a different run)
+        let diff_rootfs = vz_key(
+            vec!["/bin/echo", "hi"],
+            [8u8; 32],
+            vec![("PATH", "/usr/bin")],
+        );
+        assert_ne!(
+            base_key,
+            vz_memo_key(&diff_rootfs).0,
+            "a rootfs image change must change the key"
+        );
+
+        // (d) env value change
+        let diff_env_val = vz_key(vec!["/bin/echo", "hi"], [7u8; 32], vec![("PATH", "/bin")]);
+        assert_ne!(
+            base_key,
+            vz_memo_key(&diff_env_val).0,
+            "an env value change must change the key"
+        );
+
+        // (e) env split ambiguity: ["A=B", "C"] vs ["A", "B=C"] must differ.
+        let split1 = vz_key(vec!["/bin/x"], [7u8; 32], vec![("A", "B"), ("CKEY", "V")]);
+        let split2 = vz_key(vec!["/bin/x"], [7u8; 32], vec![("A", "BCKEY"), ("", "V")]);
+        assert_ne!(
+            vz_memo_key(&split1).0,
+            vz_memo_key(&split2).0,
+            "env entries must be unambiguously delimited (length-prefixed k=v)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // run_vz_memoized_miss_runs_closure_and_stores: first call MISSes, invokes
+    // the closure, and (exit==0, bounded) caches the result.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn run_vz_memoized_miss_runs_closure_and_stores() {
+        let (_home, _env_guard) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = make_store(tmp.path());
+
+        let key = vz_key(vec!["/bin/echo", "hi"], [1u8; 32], vec![("PATH", "/bin")]);
+
+        let mut calls = 0u32;
+        let out = run_vz_memoized(&key, &store, || {
+            calls += 1;
+            Ok((0, b"out-bytes".to_vec(), b"err-bytes".to_vec()))
+        })
+        .expect("miss run");
+
+        assert_eq!(calls, 1, "closure must be invoked exactly once on a miss");
+        assert!(!out.hit, "first run must be a miss");
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, b"out-bytes");
+        assert_eq!(out.stderr, b"err-bytes");
+
+        // The result must now be in the Action Cache (exit==0 + bounded).
+        let rec = store
+            .ac_get(&vz_memo_key(&key))
+            .expect("ac_get")
+            .expect("record present after a cacheable miss");
+        assert!(
+            decode_ac_record(&rec).is_some(),
+            "the stored AC record must decode"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // run_vz_memoized_hit_replays_without_closure: after a cacheable first
+    // call, the second call is a HIT that replays {exit, stdout, stderr} from
+    // the CAS and NEVER invokes the closure (proven with a counter) — NO VM
+    // boot. This is the "work ceases to exist" thesis.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn run_vz_memoized_hit_replays_without_closure() {
+        let (_home, _env_guard) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = make_store(tmp.path());
+
+        let key = vz_key(vec!["/bin/echo", "hi"], [2u8; 32], vec![("PATH", "/bin")]);
+
+        // First call seeds the AC (exit==0, bounded).
+        let mut first_calls = 0u32;
+        let out1 = run_vz_memoized(&key, &store, || {
+            first_calls += 1;
+            Ok((0, b"replay-out".to_vec(), b"replay-err".to_vec()))
+        })
+        .expect("seed run");
+        assert_eq!(first_calls, 1);
+        assert!(!out1.hit);
+
+        // Second identical call MUST be a hit and MUST NOT invoke the closure.
+        let mut second_calls = 0u32;
+        let out2 = run_vz_memoized(&key, &store, || {
+            second_calls += 1;
+            // If this ever runs, return a DIFFERENT result so a regression is
+            // loud (a real boot would also differ from the cached replay).
+            Ok((123, b"SHOULD-NOT-RUN".to_vec(), b"SHOULD-NOT-RUN".to_vec()))
+        })
+        .expect("hit run");
+
+        assert_eq!(
+            second_calls, 0,
+            "the closure must NOT run on a hit (no VM boot)"
+        );
+        assert!(out2.hit, "second run must be a hit");
+        assert_eq!(out2.exit_code, 0, "replayed exit code");
+        assert_eq!(out2.stdout, b"replay-out", "stdout replayed byte-exact");
+        assert_eq!(out2.stderr, b"replay-err", "stderr replayed byte-exact");
+        assert_eq!(out1.key.0, out2.key.0, "same key across the two calls");
+    }
+
+    // -----------------------------------------------------------------------
+    // run_vz_memoized_nonzero_exit_not_cached: a non-zero exit is never cached
+    // (mirrors the native exit_nonzero_never_memoized law) ⇒ it re-runs.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn run_vz_memoized_nonzero_exit_not_cached() {
+        let (_home, _env_guard) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = make_store(tmp.path());
+
+        let key = vz_key(vec!["/bin/false"], [3u8; 32], vec![("PATH", "/bin")]);
+
+        let mut calls = 0u32;
+        let run = |calls: &mut u32| {
+            *calls += 1;
+            run_vz_memoized(&key, &store, || Ok((7, b"o".to_vec(), b"e".to_vec())))
+        };
+
+        let out1 = run(&mut calls).expect("run1");
+        assert!(!out1.hit, "first run is a miss");
+        assert_eq!(out1.exit_code, 7);
+
+        let out2 = run(&mut calls).expect("run2");
+        assert!(
+            !out2.hit,
+            "a non-zero exit must NOT be cached ⇒ the second run is also a miss"
+        );
+        assert_eq!(out2.exit_code, 7);
+
+        // Nothing was ever written to the AC for this key.
+        assert!(
+            store.ac_get(&vz_memo_key(&key)).expect("ac_get").is_none(),
+            "a non-zero exit must leave the AC empty"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // run_vz_memoized_oversized_output_not_cached: a stdout over OUTPUT_CAP
+    // bytes is never cached (mirrors the native output_cap_not_memoized law).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn run_vz_memoized_oversized_output_not_cached() {
+        let (_home, _env_guard) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = make_store(tmp.path());
+
+        let key = vz_key(vec!["/bin/yes"], [4u8; 32], vec![("PATH", "/bin")]);
+        let big = vec![b'x'; OUTPUT_CAP_BYTES + 1];
+
+        let out1 = run_vz_memoized(&key, &store, {
+            let big = big.clone();
+            || Ok((0, big, Vec::new()))
+        })
+        .expect("run1");
+        assert!(!out1.hit);
+        assert_eq!(out1.exit_code, 0);
+
+        // Over-cap ⇒ not cached ⇒ the next call is still a miss.
+        assert!(
+            store.ac_get(&vz_memo_key(&key)).expect("ac_get").is_none(),
+            "an over-cap stdout must not be cached"
+        );
     }
 }

@@ -15,6 +15,7 @@ fn main() -> std::process::ExitCode {
 mod linux {
     use lightr_init::{
         run_init, ExitSink, GuestOps, InitSpec, CMD_FILE, EXIT_FILE, ROOTFS_DEST, ROOTFS_TAG,
+        STDERR_FILE, STDOUT_FILE,
     };
     use std::ffi::CString;
     use std::io::{self, Write};
@@ -105,13 +106,38 @@ mod linux {
             if cmd.is_empty() {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty command"));
             }
+
+            // BOOT-PATH: redirect the command's stdout/stderr to capture files on
+            // the (writable) rootfs share so the HOST can MEMOIZE the run — the vz
+            // memo replays {exit, stdout, stderr} from the Action Cache on a HIT.
+            // We hold a second handle to each file (try_clone) so we can fsync it
+            // AFTER wait(); the originals are moved into the child's stdio. The
+            // files resolve inside the rootfs (PID1 has chrooted) → the rootfs
+            // share root → the host's materialized rootfs dir, like EXIT_FILE.
+            let stdout_file = std::fs::File::create(STDOUT_FILE)?;
+            let stderr_file = std::fs::File::create(STDERR_FILE)?;
+            let stdout_sync = stdout_file.try_clone()?;
+            let stderr_sync = stderr_file.try_clone()?;
+
             let mut c = std::process::Command::new(&cmd[0]);
             c.args(&cmd[1..])
                 .current_dir(if cwd.is_empty() { "/" } else { cwd })
                 .env_clear()
-                .envs(env.iter().cloned());
+                .envs(env.iter().cloned())
+                .stdout(std::process::Stdio::from(stdout_file))
+                .stderr(std::process::Stdio::from(stderr_file));
 
             let status = c.spawn()?.wait()?;
+
+            // CRITICAL ORDERING: make the capture files durable on virtiofs BEFORE
+            // run_init reports the exit (which the host taps via the console
+            // marker). When the host sees the marker, stdout/stderr/exit are all
+            // fsync'd. Both files were redirected into the child; the child has
+            // exited (wait returned), so all writes are flushed to the kernel —
+            // sync_all persists them through the share.
+            stdout_sync.sync_all()?;
+            stderr_sync.sync_all()?;
+
             Ok(exit_code(status))
         }
     }
