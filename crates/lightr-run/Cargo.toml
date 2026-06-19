@@ -43,3 +43,13 @@ windows-sys = { workspace = true, features = ["Win32_Security"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[features]
+vz = ["lightr-engine/vz"]
+
+# WP-C10: ADR-0018 networking keystone E2E. Boots real alpine microVMs to
+# validate the net_mac registry-MAC seam (DHCP/L2/DNS over the VSwitch). Gated
+# behind `vz` so the default (no-vz) build never compiles the vz engine path.
+[[example]]
+name = "s5-vz-switch"
+required-features = ["vz"]
