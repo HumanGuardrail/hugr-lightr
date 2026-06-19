@@ -7,12 +7,11 @@ use crate::run::types::{PortMap, RunSpec};
 use lightr_store::Store;
 use std::fs;
 
-// LIGHTR_HOME is process-global (index dir): serialize tests and isolate
-// each one in a tempdir home so ~ is never touched.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// LIGHTR_HOME is process-global (index dir): serialized via super::ENV_LOCK
+// (shared across all sibling test modules in the same binary).
 
 fn isolated_home() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
-    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let guard = super::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("LIGHTR_HOME", home.path());
     (home, guard)

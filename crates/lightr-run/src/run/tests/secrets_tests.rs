@@ -7,10 +7,8 @@ use crate::secrets;
 use lightr_store::Store;
 use std::fs;
 
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn isolated_home() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
-    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let guard = super::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("LIGHTR_HOME", home.path());
     (home, guard)

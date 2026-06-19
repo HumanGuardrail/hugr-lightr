@@ -1,6 +1,5 @@
 //! HTTP auth, retry, status-code mapping tests.
 
-use super::{tmp_store_and_home, ENV_LOCK};
 use crate::oci::http::{
     map_ureq_error, parse_docker_config_for_registry, read_creds_for_registry, retry_request,
 };

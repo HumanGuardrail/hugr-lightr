@@ -59,6 +59,13 @@ mod tests {
     /// message BEFORE any exec attempt.
     #[test]
     fn exec_vz_run_exits_1() {
+        // LIGHTR_HOME is process-global state: hold the crate-wide env lock for
+        // the duration of this test to prevent races with other tests in this
+        // binary that also call std::env::set_var("LIGHTR_HOME").
+        let _env_guard = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
         let tmp = tempfile::TempDir::new().expect("tmp dir");
         let run_dir = tmp.path().join("run").join("test-vz-id");
         std::fs::create_dir_all(&run_dir).expect("mkdir run_dir");

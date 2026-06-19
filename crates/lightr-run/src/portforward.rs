@@ -177,6 +177,14 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    // All three portforward tests use the "bind port 0 to discover a free port,
+    // drop the listener, then pass the port to the forwarder" pattern. This is
+    // inherently racy when test threads run in parallel: two threads may discover
+    // the same port, drop their respective listeners, and then both fail to bind.
+    // Serialise the tests with a process-wide lock so only one at a time goes
+    // through the discover-drop-re-bind sequence.
+    static PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Spawn a localhost echo server on an ephemeral port. Returns the bound
     /// port; the server runs until the test process exits (best-effort).
     fn spawn_echo() -> u16 {
@@ -229,6 +237,7 @@ mod tests {
 
     #[test]
     fn forwards_bytes_round_trip() {
+        let _port_guard = PORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let container_port = spawn_echo();
         // host_port 0 ⇒ ephemeral; read the real port back off the forwarder.
         // We can't bind 0 and learn the port from the public API, so bind a
@@ -248,6 +257,7 @@ mod tests {
 
     #[test]
     fn handles_a_second_connection() {
+        let _port_guard = PORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let container_port = spawn_echo();
         let free = TcpListener::bind("127.0.0.1:0").unwrap();
         let host_port = free.local_addr().unwrap().port();
@@ -271,6 +281,7 @@ mod tests {
 
     #[test]
     fn start_to_forwards_to_explicit_target() {
+        let _port_guard = PORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let echo_port = spawn_echo();
         let free = TcpListener::bind("127.0.0.1:0").unwrap();
         let host_port = free.local_addr().unwrap().port();
