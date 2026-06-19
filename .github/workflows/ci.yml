@@ -22,7 +22,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, macos-14, windows-latest]
+        # Windows runtime is WSL (a future ring), so the unix-runtime integration
+        # suite (lightr-acceptance) runs on Linux+macOS; Windows validates build +
+        # clippy + lib/bin unit tests via `--exclude lightr-acceptance`.
+        include:
+          - runner: ubuntu-latest
+            scope: "--workspace"
+          - runner: macos-14
+            scope: "--workspace"
+          - runner: windows-latest
+            scope: "--workspace --exclude lightr-acceptance"
 
     steps:
       - name: Checkout
@@ -41,10 +50,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy -D warnings
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy ${{ matrix.scope }} --all-targets -- -D warnings
 
       - name: cargo build (fresh bin for acceptance)
-        run: cargo build --workspace
+        run: cargo build ${{ matrix.scope }}
         # The lightr-acceptance tests exec `target/debug/lightr` via assert_cmd,
         # but `cargo test` builds *test* binaries — not the runnable bin artifact
         # (lightr-acceptance has no lightr-cli dep to trigger it). Build it
@@ -52,7 +61,7 @@ jobs:
         # stale-bin gate masked the F-309/scratch regression once — never again).
 
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test ${{ matrix.scope }}
         # LIGHTR_NET_TESTS intentionally unset; network tests excluded.
 
   # Cross-typecheck targets with no native runner above (linux/aarch64), so a
