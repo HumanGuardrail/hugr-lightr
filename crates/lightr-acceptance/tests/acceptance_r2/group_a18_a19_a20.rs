@@ -182,23 +182,28 @@ fn a19_engine_probes_honest() {
         "vz.detail must be non-empty (actionable); got: {vz}"
     );
 
-    // run --engine ns -- /bin/true must exit 2 with ns probe detail in stderr.
-    let run_ns = lightr_cmd(home.path())
-        .args(["run", "--engine", "ns", "--", "/bin/true"])
-        .output()
-        .expect("run --engine ns must launch");
-    assert_eq!(
-        run_ns.status.code().unwrap_or(-1),
-        2,
-        "run --engine ns must exit 2 on macOS; stderr: {}",
-        String::from_utf8_lossy(&run_ns.stderr)
-    );
-    let run_ns_stderr = String::from_utf8_lossy(&run_ns.stderr);
-    assert!(
-        run_ns_stderr.to_lowercase().contains("linux"),
-        "run --engine ns stderr must contain probe detail mentioning 'Linux'; got: \"{}\"",
-        run_ns_stderr
-    );
+    // ns is unavailable off-Linux: `run --engine ns` must exit 2 with a probe
+    // detail mentioning Linux. On Linux ns IS available, so this unavailable-path
+    // assertion does not apply (the namespaces engine is exercised elsewhere).
+    #[cfg(not(target_os = "linux"))]
+    {
+        let run_ns = lightr_cmd(home.path())
+            .args(["run", "--engine", "ns", "--", "/bin/true"])
+            .output()
+            .expect("run --engine ns must launch");
+        assert_eq!(
+            run_ns.status.code().unwrap_or(-1),
+            2,
+            "run --engine ns must exit 2 off-Linux; stderr: {}",
+            String::from_utf8_lossy(&run_ns.stderr)
+        );
+        let run_ns_stderr = String::from_utf8_lossy(&run_ns.stderr);
+        assert!(
+            run_ns_stderr.to_lowercase().contains("linux"),
+            "run --engine ns stderr must mention 'Linux'; got: \"{}\"",
+            run_ns_stderr
+        );
+    }
 
     // run --engine vz -- /bin/true must exit 2.
     let run_vz = lightr_cmd(home.path())
