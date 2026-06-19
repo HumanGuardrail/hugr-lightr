@@ -1102,6 +1102,7 @@ fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Store) -> Resu
                         // (eth1) alongside the NAT NIC (eth0). Until that lands,
                         // None keeps today's single-NAT-NIC behavior unchanged.
                         net_fd: None,
+                        net_mac: None,
                     };
                     engine.run(&spec).unwrap_or(255)
                 }
