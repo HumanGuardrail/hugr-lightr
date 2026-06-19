@@ -20,6 +20,15 @@ pub mod portforward;
 pub mod restart;
 pub mod secrets;
 
+// F-304 Phase-2 (ADR-0018): daemonless userspace L2 switch for vz container
+// networking (container↔container, name-DNS, udp). CONTRACT STUB — the C-wave
+// (C1 network / C2 switch / C3 dhcp / C4 dns / C5 runtime) fills the bodies.
+// unix-only (RawFd + datagram sockets); windows networking is a future ring.
+#[cfg(unix)]
+pub mod network;
+#[cfg(unix)]
+pub mod vswitch;
+
 /// A published-port mapping: `host` (on 127.0.0.1) → `container` (on 127.0.0.1
 /// where the run's server listens). TCP only in v1 (Networking Phase 1).
 ///
