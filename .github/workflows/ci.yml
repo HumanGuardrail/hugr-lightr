@@ -114,3 +114,41 @@ jobs:
       # signal to investigate, not an automatic merge block. Runs for visibility.
       - name: Run bench --check
         run: ./target/release/lightr bench --check
+
+  # Enforce the godfile invariant won by the split campaign: no source file may
+  # exceed 400 LOC. Cheap, deterministic, fails loudly on regression.
+  godfile-guard:
+    name: godfile guard (<=400 LOC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No source .rs may exceed 400 LOC
+        run: |
+          BIG=$(find crates -name '*.rs' -not -path '*/target/*' -print0 \
+            | xargs -0 wc -l | awk '$2!="total" && $1>400 {print}')
+          if [ -n "$BIG" ]; then
+            echo "::error::source files exceed 400 LOC:"; echo "$BIG"; exit 1
+          fi
+          echo "OK — every source file is <=400 LOC"
+
+  # vz feature builds the Swift shim (vz.swift) via build.rs and ad-hoc codesigns
+  # with the Virtualization entitlement. Until now ONLY the founder Intel Mac did
+  # this; this job validates the vz BUILD + codesign on a clean Apple-silicon
+  # runner. (The 2-VM E2E itself needs guest-boot support and stays box-gated for
+  # now.) continue-on-error while we confirm the runner's swiftc/codesign shape.
+  vz-build:
+    name: vz feature build (macOS)
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (honor rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build -p lightr-cli --features vz (Rust + Swift shim)
+        run: cargo build -p lightr-cli --features vz
+      - name: Ad-hoc codesign with vz entitlement
+        run: |
+          codesign --force --sign - --entitlements packaging/vz.entitlements target/debug/lightr
+          codesign -d --entitlements - target/debug/lightr 2>&1 | head -20
+          echo "vz build + ad-hoc codesign OK"
