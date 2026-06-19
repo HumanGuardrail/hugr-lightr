@@ -330,9 +330,15 @@ fn a11_gc() {
         run_dir.display()
     );
 
-    // Sleep 1 s so the run dir's mtime is at least 1 second old.
-    // gc uses `now - mtime > min_age_secs`; with min_age=0, age must be ≥1 s.
-    std::thread::sleep(Duration::from_secs(1));
+    // Sleep 2 s so the run dir's mtime is at least 2 whole seconds old.
+    // gc uses integer-second arithmetic: age_secs = now_secs - mtime_secs.
+    // The condition to remove is `age_secs > min_age_secs` (i.e. > 0 when
+    // min_age=0), so age_secs must be ≥ 1.  The run dir's mtime may be
+    // refreshed by the supervisor writing cleanup files (e.g. "status") up to
+    // ~100 ms after ps_is_exited returns.  Sleeping 1 s would make age_secs
+    // land on exactly 0 or 1 depending on OS scheduling jitter; 2 s guarantees
+    // age_secs ≥ 1 regardless of when the last write to the run dir occurred.
+    std::thread::sleep(Duration::from_secs(2));
 
     // gc --force --min-age 86400 → run_dirs_removed == 0 AND run dir still exists.
     let gc_min_age = lightr_cmd(home.path())
