@@ -1097,6 +1097,11 @@ fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Store) -> Resu
                         rootfs: Some(&rootfs_dir),
                         limits: lightr_core::ResourceLimits::default(),
                         net: true,
+                        // ADR-0018 dual-NIC: the L2 switch (WP-C9) will assign the
+                        // guest-side socketpair fd here to attach the mesh NIC
+                        // (eth1) alongside the NAT NIC (eth0). Until that lands,
+                        // None keeps today's single-NAT-NIC behavior unchanged.
+                        net_fd: None,
                     };
                     engine.run(&spec).unwrap_or(255)
                 }

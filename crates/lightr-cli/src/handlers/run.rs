@@ -290,7 +290,8 @@ pub fn run(
                 command,
                 rootfs: Some(rootfs_path.as_path()),
                 limits,
-                net: false, // vz-memo path is non-detached + non-networked
+                net: false,   // vz-memo path is non-detached + non-networked
+                net_fd: None, // no mesh NIC on the memo path (ADR-0018)
             };
             // Suppress the guest CONSOLE (kernel boot log + the exit marker) from
             // the host's stdout on a memo MISS: the command's real stdout/stderr
@@ -447,6 +448,7 @@ pub fn run(
             rootfs: rootfs_path.as_deref(),
             limits,
             net: false, // synchronous CLI engine path; networked vz is detached (supervisor)
+            net_fd: None, // mesh NIC is wired by the supervisor path (ADR-0018), not here
         };
 
         let code = match engine.run(&spec) {

@@ -42,6 +42,15 @@ import Virtualization
 ///   - cpuCount: F-203 vcpu count.  `0` = use the baseline default.  Clamped
 ///               to the VZ allowed range; a non-zero value above the maximum
 ///               is a config failure (return -1).
+///   - netFd:   ADR-0018 dual-NIC mesh.  The GUEST-side fd of a
+///               `socketpair(AF_UNIX, SOCK_DGRAM)` whose host end is owned by
+///               the userspace L2 switch (one datagram == one Ethernet frame).
+///               `>= 0` ⇒ attach a SECOND virtio-net NIC
+///               (`VZFileHandleNetworkDeviceAttachment` over this fd) ALONGSIDE
+///               the NAT NIC — the mesh (`eth1`).  `-1` ⇒ no file-handle NIC
+///               (today's single-NAT-NIC path).  The fd is owned by the caller
+///               (the switch); we wrap it `closeOnDealloc:false` so a transient
+///               FileHandle dealloc can't close it.
 ///   - argc:    Number of arguments in argv.
 ///   - argv:    C argv array (argv[0] = program, …).
 ///
@@ -55,6 +64,7 @@ public func lightr_vz_run(
     store:    UnsafePointer<CChar>,
     memoryMb: UInt64,
     cpuCount: UInt64,
+    netFd:    Int32,
     argc:     Int32,
     argv:     UnsafePointer<UnsafePointer<CChar>?>
 ) -> Int32 {
@@ -199,6 +209,42 @@ public func lightr_vz_run(
             netDevice.macAddress = mac
         }
         netDevices = [netDevice]
+    }
+
+    // ── 5c. File-handle mesh NIC (ADR-0018 dual-NIC) ─────────────────────────
+    // When the host hands us a guest-side socketpair fd (netFd >= 0), attach a
+    // SECOND virtio-net NIC over a VZFileHandleNetworkDeviceAttachment. Its host
+    // end is owned by the userspace L2 switch; one AF_UNIX SOCK_DGRAM datagram ==
+    // one Ethernet frame (boundaries preserved 1:1). This NIC COEXISTS with the
+    // NAT NIC above (eth0 = NAT egress, eth1 = mesh) — Docker's bridge+egress
+    // shape. Proven GREEN on this Intel box by the de-risk spike; honored here:
+    //   * FileHandle(closeOnDealloc:false) — a transient FileHandle dealloc must
+    //     NOT close the fd; the caller (the switch) keeps it alive for the VM's
+    //     lifetime and owns its close.
+    //   * SO_SNDBUF=256K / SO_RCVBUF=512K (>=2x ratio) — datagram buffering so a
+    //     burst of frames isn't dropped at the socket.
+    // Needs only com.apple.security.virtualization (already ad-hoc-signed).
+    if netFd >= 0 {
+        // Buffer tuning on the guest-side fd (best-effort: a setsockopt failure
+        // is non-fatal — the NIC still attaches; the kernel default applies).
+        var sndBuf: Int32 = 256 * 1024
+        var rcvBuf: Int32 = 512 * 1024
+        _ = withUnsafePointer(to: &sndBuf) {
+            setsockopt(netFd, SOL_SOCKET, SO_SNDBUF, $0, socklen_t(MemoryLayout<Int32>.size))
+        }
+        _ = withUnsafePointer(to: &rcvBuf) {
+            setsockopt(netFd, SOL_SOCKET, SO_RCVBUF, $0, socklen_t(MemoryLayout<Int32>.size))
+        }
+        // Non-owning FileHandle: the switch owns the fd's lifetime + close.
+        let meshHandle = FileHandle(fileDescriptor: netFd, closeOnDealloc: false)
+        let meshDevice = VZVirtioNetworkDeviceConfiguration()
+        meshDevice.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: meshHandle)
+        // Pin a distinct locally-administered MAC for the mesh NIC so it never
+        // collides with the NAT NIC's pinned MAC.
+        if let mac = VZMACAddress(string: "0a:00:00:24:18:02") {
+            meshDevice.macAddress = mac
+        }
+        netDevices.append(meshDevice)
     }
 
     // ── 6. Assemble configuration ───────────────────────────────────────────
