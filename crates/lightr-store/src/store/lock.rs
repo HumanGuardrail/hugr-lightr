@@ -40,7 +40,7 @@ impl Drop for WriteGuard {
             use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
             use windows_sys::Win32::System::IO::OVERLAPPED;
             let handle = self._file.as_raw_handle();
-            if handle != INVALID_HANDLE_VALUE as _ {
+            if !std::ptr::eq(handle as *const _, INVALID_HANDLE_VALUE as *const _) {
                 let mut ol: OVERLAPPED = unsafe { std::mem::zeroed() };
                 unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut ol) };
             }
@@ -71,7 +71,7 @@ impl Drop for GcGuard {
             use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
             use windows_sys::Win32::System::IO::OVERLAPPED;
             let handle = self._file.as_raw_handle();
-            if handle != INVALID_HANDLE_VALUE as _ {
+            if !std::ptr::eq(handle as *const _, INVALID_HANDLE_VALUE as *const _) {
                 let mut ol: OVERLAPPED = unsafe { std::mem::zeroed() };
                 unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut ol) };
             }
