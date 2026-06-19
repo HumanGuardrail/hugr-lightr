@@ -177,7 +177,6 @@ pub fn gc_guard(root: &Path) -> Result<GcGuard> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
     use crate::Store;
 

@@ -31,6 +31,12 @@ mod common;
 #[path = "acceptance_r3/helpers.rs"]
 mod helpers;
 
+/// Port-binding lock: all tests in this binary that bind fixed host ports must
+/// hold this guard for the duration of the test. Prevents two parallel test
+/// threads from fighting over the same port range when the binary is run with
+/// the default thread count.
+pub(crate) static PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[path = "acceptance_r3/group_a22_a23.rs"]
 mod group_a22_a23;
 

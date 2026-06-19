@@ -2,7 +2,6 @@
 
 use super::{make_layer, make_layout, make_modern_docker_save, tmp_store_and_home, ENV_LOCK};
 use crate::oci::import::import_layout;
-use lightr_core::LightrError;
 use std::fs;
 use tempfile::TempDir;
 

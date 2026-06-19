@@ -249,18 +249,7 @@ pub fn compose_supervise(stack_dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use lightr_store::Store;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
-    fn with_home<F: FnOnce()>(f: F) {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = TempDir::new().unwrap();
-        std::env::set_var("LIGHTR_HOME", tmp.path());
-        f();
-        std::env::remove_var("LIGHTR_HOME");
-    }
 
     #[test]
     fn prepare_service_cwd_hydrates_image_ref() {

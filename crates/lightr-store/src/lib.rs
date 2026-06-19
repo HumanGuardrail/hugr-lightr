@@ -179,13 +179,6 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-
-    fn tmp_store() -> (TempDir, Store) {
-        let dir = TempDir::new().unwrap();
-        let store = Store::open(dir.path().join("store")).unwrap();
-        (dir, store)
-    }
 
     // ── default_root ─────────────────────────────────────────────────────────
 

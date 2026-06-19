@@ -68,7 +68,6 @@ pub fn image_config_get(root: &Path, name: &str) -> Result<Option<Vec<u8>>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
     use crate::Store;
 

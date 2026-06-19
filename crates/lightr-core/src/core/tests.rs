@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod cases {
     use crate::{
         Digest, Entry, LightrError, Manifest, RefRecord, ref_key, validate_ref_name,
         REF_KEY_DOMAIN,

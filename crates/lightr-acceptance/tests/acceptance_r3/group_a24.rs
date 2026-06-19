@@ -24,6 +24,13 @@ use tempfile::TempDir;
 
 #[test]
 fn a24_compose_lazy() {
+    // Hold the port lock for the duration of this test: it binds fixed host
+    // ports (39000+pid_offset, 39513+pid_offset) and must not run concurrently
+    // with other port-binding tests in this binary.
+    let _port_guard = crate::PORT_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     let home = TempDir::new().unwrap();
 
     // Pick two ports from the high ephemeral range; use pid-derived offset for variety.
@@ -213,6 +220,13 @@ fn a24_compose_lazy() {
 
 #[test]
 fn a24b_compose_discovery_env() {
+    // Hold the port lock for the duration of this test: it binds fixed host
+    // ports (41000+pid_offset, 41513+pid_offset) and must not run concurrently
+    // with other port-binding tests in this binary.
+    let _port_guard = crate::PORT_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     let home = TempDir::new().unwrap();
 
     // web's container port — a high ephemeral loopback port web binds and the
