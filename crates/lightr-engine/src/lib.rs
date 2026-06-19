@@ -299,6 +299,16 @@ pub struct ExecSpec<'a> {
     /// guest. Other engines ignore it (native/ns/wsl don't VM-network here). NOT
     /// part of any memo key (runtime, like `limits`/`ports`). Default false.
     pub net: bool,
+    /// ADR-0018 dual-NIC mesh (WP-C6/C7). The GUEST-side fd of a
+    /// `socketpair(AF_UNIX, SOCK_DGRAM)` whose host end is owned by the userspace
+    /// L2 switch (a later WP creates the pair and owns the host end). When
+    /// `Some(fd)`, the vz engine attaches a SECOND virtio-net NIC — a
+    /// `VZFileHandleNetworkDeviceAttachment` over this fd (`eth1`, the mesh) —
+    /// ALONGSIDE the existing NAT NIC (`eth0`, egress). When `None`, behavior is
+    /// byte-for-byte the single-NAT-NIC path shipped today (zero regression).
+    /// Other engines ignore it (only vz attaches a file-handle NIC). NOT part of
+    /// any memo key (runtime, like `limits`/`net`). Default None.
+    pub net_fd: Option<std::os::unix::io::RawFd>,
 }
 
 // ── Engine trait ──────────────────────────────────────────────────────────────
@@ -643,6 +653,15 @@ mod vz_impl {
         /// parity.md §2.4). `0` means "use the shim default" (unlimited). When
         /// `memory_mb` is below the VZ memory floor the shim returns a config
         /// failure (< 0) rather than silently clamping — an honest boundary.
+        ///
+        /// ADR-0018 (WP-C6/C7): `net_fd` is the GUEST-side fd of a
+        /// `socketpair(AF_UNIX, SOCK_DGRAM)` (host end owned by the L2 switch).
+        /// `>= 0` ⇒ the shim attaches a SECOND virtio-net NIC
+        /// (`VZFileHandleNetworkDeviceAttachment` over a non-owning `FileHandle`
+        /// on the fd, with SO_*BUF tuning) ALONGSIDE the NAT NIC — the dual-NIC
+        /// mesh path. `-1` ⇒ no file-handle NIC (today's single-NAT-NIC path,
+        /// byte-for-byte). The fd's lifetime is the caller's (the switch); the
+        /// shim wraps it `closeOnDealloc:false`.
         fn lightr_vz_run(
             kernel: *const libc::c_char,
             initrd: *const libc::c_char,
@@ -650,6 +669,7 @@ mod vz_impl {
             store: *const libc::c_char,
             memory_mb: u64,
             cpu_count: u64,
+            net_fd: libc::c_int,
             argc: libc::c_int,
             argv: *const *const libc::c_char,
         ) -> libc::c_int;
@@ -754,6 +774,10 @@ mod vz_impl {
             // call spawns any thread.
             unsafe { std::env::set_var("LIGHTR_VZ_EXITFILE", &exit_path) };
             let (memory_mb, cpu_count) = vz_caps(&spec.limits);
+            // ADR-0018 dual-NIC: hand the GUEST-side socketpair fd to the shim
+            // (-1 = none → today's single-NAT-NIC path). The fd is owned by the
+            // L2 switch (a later WP); the shim wraps it non-owning.
+            let net_fd: libc::c_int = spec.net_fd.unwrap_or(-1);
             let vm_status = unsafe {
                 lightr_vz_run(
                     kernel_c.as_ptr(),
@@ -762,6 +786,7 @@ mod vz_impl {
                     store_c.as_ptr(),
                     memory_mb,
                     cpu_count,
+                    net_fd,
                     argv_ptrs.len() as libc::c_int - 1, // exclude null sentinel
                     argv_ptrs.as_ptr(),
                 )
@@ -1180,6 +1205,7 @@ mod tests {
             rootfs: None,
             limits: Default::default(),
             net: false,
+            net_fd: None,
         };
         let code = engine.run(&spec).expect("echo should not fail");
         assert_eq!(code, 0, "echo exits 0");
@@ -1201,6 +1227,7 @@ mod tests {
             rootfs: None,
             limits: Default::default(),
             net: false,
+            net_fd: None,
         };
         let code = engine.run(&spec).expect("sh should not fail to launch");
         assert_eq!(code, 5, "exit code must be 5, got {code}");
@@ -1219,6 +1246,7 @@ mod tests {
             rootfs: Some(&rootfs),
             limits: Default::default(),
             net: false,
+            net_fd: None,
         };
         let err = engine.run(&spec).unwrap_err();
         let msg = err.to_string();
