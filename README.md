@@ -63,8 +63,8 @@ staged (`CAP-DEDUP-CROSS-TENANT`).
 
 ## Status
 
-**R0–R4 + go-live hardening delivered (2026-06-17).** A **1.9 MB** release
-binary (measured, `spikes/RESULTS.md` B7); **411 tests, 0 failures**, clippy
+**R0–R4 + go-live hardening delivered (2026-06-17).** A **~4.5 MB** stripped
+release binary (measured, `bench B7`; ≤10 MB target met); **411 tests, 0 failures**, clippy
 `-D` clean (default + `--features vz`), fmt clean; `lightr bench --check` green
 on the Intel dev box (snapshot warm 233 ms, status 34 ms, memo HIT 51 ms — see
 `spikes/RESULTS.md`; the ~ms / boot-never targets bind to the O(1) views layer +
@@ -85,7 +85,7 @@ tier creates has somewhere to convert.
 ## Quickstart (today, on this machine)
 
 ```
-$ cargo build --release          # bin: target/release/lightr (~1.9 MB)
+$ cargo build --release          # bin: target/release/lightr (~4.5 MB, stripped)
 $ lightr snapshot --dir . --name @me/proj
 $ lightr hydrate /tmp/fresh --name @me/proj     # CoW, instant-ish
 $ lightr run --input src -- make test           # memoized: 2nd run = HIT
