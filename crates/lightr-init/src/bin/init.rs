@@ -27,8 +27,19 @@ mod linux {
         // virtiofs and the VM reaches a clean .stopped (not a "killed init"
         // kernel panic). A boot failure leaves no EXIT_FILE → the host maps the
         // missing file to a real non-zero (GUEST_NO_REPORT_CODE), never a fake 0.
-        if let Err(e) = run_init(&mut LinuxOps, &mut FileSink) {
-            eprintln!("lightr-init: boot failed: {e}");
+        match run_init(&mut LinuxOps, &mut FileSink) {
+            Ok(code) => {
+                // Real-time exit signal over the console (hvc0): the host taps the
+                // console stream and force-stops the VM the instant it sees this
+                // marker, bypassing the slow virtiofs EXIT_FILE visibility (~1.3s).
+                // EXIT_FILE is still written by FileSink inside run_init (fallback).
+                let mut out = io::stdout();
+                let _ = writeln!(out, "LIGHTR_EXIT:{code}");
+                let _ = out.flush();
+            }
+            Err(e) => {
+                eprintln!("lightr-init: boot failed: {e}");
+            }
         }
         sync_and_poweroff()
     }

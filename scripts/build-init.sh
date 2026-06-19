@@ -76,9 +76,13 @@ if ! command -v cargo-zigbuild >/dev/null 2>&1; then
     exit 3
 fi
 
-# 3. rustup target
-if ! rustup target list --installed 2>/dev/null | grep -qx "${TARGET}"; then
-    echo "build-init: rustup target '${TARGET}' is not installed." >&2
+# 3. target std — check the std lib dir directly via `rustc --print sysroot`.
+# (Do NOT shell out to `rustup`: it may be absent even when the target std IS
+# installed for the active toolchain, e.g. a pinned-toolchain PATH with no rustup
+# proxy. The std dir is what `cargo zigbuild` actually needs.)
+SYSROOT="$(rustc --print sysroot 2>/dev/null)"
+if [ -z "${SYSROOT}" ] || [ ! -d "${SYSROOT}/lib/rustlib/${TARGET}" ]; then
+    echo "build-init: target std '${TARGET}' not found under ${SYSROOT}/lib/rustlib." >&2
     echo "  Fix: rustup target add ${TARGET}" >&2
     exit 3
 fi
