@@ -309,6 +309,12 @@ pub struct ExecSpec<'a> {
     /// Other engines ignore it (only vz attaches a file-handle NIC). NOT part of
     /// any memo key (runtime, like `limits`/`net`). Default None.
     pub net_fd: Option<std::os::unix::io::RawFd>,
+    /// ADR-0018: the per-member MAC the mesh NIC (`eth1`) must use. The network
+    /// registry assigns it; the guest emits it, so the userspace switch's DHCP
+    /// lease, MAC-learning, and DNS all key on the SAME MAC. `None` ⇒ the vz shim
+    /// falls back to a pinned MAC (de-risk / single-guest path). Only meaningful
+    /// alongside `net_fd = Some`. NOT part of any memo key (runtime).
+    pub net_mac: Option<[u8; 6]>,
 }
 
 // ── Engine trait ──────────────────────────────────────────────────────────────
@@ -670,6 +676,7 @@ mod vz_impl {
             memory_mb: u64,
             cpu_count: u64,
             net_fd: libc::c_int,
+            net_mac: *const libc::c_char,
             argc: libc::c_int,
             argv: *const *const libc::c_char,
         ) -> libc::c_int;
@@ -778,6 +785,18 @@ mod vz_impl {
             // (-1 = none → today's single-NAT-NIC path). The fd is owned by the
             // L2 switch (a later WP); the shim wraps it non-owning.
             let net_fd: libc::c_int = spec.net_fd.unwrap_or(-1);
+            // ADR-0018: pass the registry-assigned per-member mesh MAC as a C
+            // string ("xx:xx:..") so the guest's eth1 emits it → the switch keys
+            // DHCP/L2/DNS on the same MAC. None → null → the shim's pinned fallback.
+            let net_mac_c: Option<std::ffi::CString> = spec.net_mac.map(|m| {
+                std::ffi::CString::new(format!(
+                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    m[0], m[1], m[2], m[3], m[4], m[5]
+                ))
+                .expect("formatted MAC has no interior NUL")
+            });
+            let net_mac_ptr: *const libc::c_char =
+                net_mac_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
             let vm_status = unsafe {
                 lightr_vz_run(
                     kernel_c.as_ptr(),
@@ -787,6 +806,7 @@ mod vz_impl {
                     memory_mb,
                     cpu_count,
                     net_fd,
+                    net_mac_ptr,
                     argv_ptrs.len() as libc::c_int - 1, // exclude null sentinel
                     argv_ptrs.as_ptr(),
                 )
@@ -1206,6 +1226,7 @@ mod tests {
             limits: Default::default(),
             net: false,
             net_fd: None,
+            net_mac: None,
         };
         let code = engine.run(&spec).expect("echo should not fail");
         assert_eq!(code, 0, "echo exits 0");
@@ -1228,6 +1249,7 @@ mod tests {
             limits: Default::default(),
             net: false,
             net_fd: None,
+            net_mac: None,
         };
         let code = engine.run(&spec).expect("sh should not fail to launch");
         assert_eq!(code, 5, "exit code must be 5, got {code}");
@@ -1247,6 +1269,7 @@ mod tests {
             limits: Default::default(),
             net: false,
             net_fd: None,
+            net_mac: None,
         };
         let err = engine.run(&spec).unwrap_err();
         let msg = err.to_string();

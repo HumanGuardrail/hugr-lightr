@@ -65,6 +65,7 @@ public func lightr_vz_run(
     memoryMb: UInt64,
     cpuCount: UInt64,
     netFd:    Int32,
+    netMac:   UnsafePointer<CChar>?,
     argc:     Int32,
     argv:     UnsafePointer<UnsafePointer<CChar>?>
 ) -> Int32 {
@@ -239,9 +240,15 @@ public func lightr_vz_run(
         let meshHandle = FileHandle(fileDescriptor: netFd, closeOnDealloc: false)
         let meshDevice = VZVirtioNetworkDeviceConfiguration()
         meshDevice.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: meshHandle)
-        // Pin a distinct locally-administered MAC for the mesh NIC so it never
-        // collides with the NAT NIC's pinned MAC.
-        if let mac = VZMACAddress(string: "0a:00:00:24:18:02") {
+        // MAC for the mesh NIC: prefer the host-supplied per-member MAC (ADR-0018
+        // — the registry assigns it, the guest emits it, so the switch's DHCP
+        // lease / MAC-learning / DNS all key on the SAME MAC). Fall back to a
+        // pinned locally-administered MAC when the host passes none (de-risk /
+        // single-guest path). Without this, all mesh guests share one MAC → L2
+        // can't distinguish them AND the DHCP lease (keyed on the registry MAC)
+        // never matches the guest's chaddr → no lease.
+        let meshMacStr = netMac.map { String(cString: $0) } ?? "0a:00:00:24:18:02"
+        if let mac = VZMACAddress(string: meshMacStr) {
             meshDevice.macAddress = mac
         }
         netDevices.append(meshDevice)

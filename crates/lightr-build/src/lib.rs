@@ -513,6 +513,7 @@ pub fn build(
                     limits: Default::default(),
                     net: false,   // build steps never network (WP-NET2 n/a)
                     net_fd: None, // native build steps have no mesh NIC (ADR-0018)
+                    net_mac: None,
                 };
                 // Propagate accumulated ENV to the subprocess
                 let mut cmd_builder = std::process::Command::new(&argv[0]);
