@@ -177,8 +177,7 @@ impl Index {
             digest_bytes.copy_from_slice(&data[pos..pos + 32]);
             let digest = Digest(digest_bytes);
             pos += 32;
-            let path_len =
-                u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+            let path_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
             pos += 2;
             if pos + path_len > data.len() {
                 return Err(LightrError::InvalidManifest("index path truncated".into()));
@@ -247,8 +246,7 @@ impl Index {
 
         // Atomic write: write to a tmp path in same dir, then rename.
         let dir = index_path.parent().unwrap_or(Path::new("."));
-        static TMP_COUNTER: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
+        static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tmp_path = dir.join(format!(
             ".lightr-index-tmp-{}-{}",
             std::process::id(),

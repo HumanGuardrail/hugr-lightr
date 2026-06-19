@@ -3,6 +3,9 @@
 //! Objects are content-addressed (blake3), sharded 2/62, stored read-only (0o444).
 //! Writes go through a temp+rename+fsync pipeline for crash durability.
 
+use super::cow::{cow_copy_file, try_cow_at_rung, CowRung};
+use super::lock::write_guard;
+use lightr_core::{Digest, LightrError, Result};
 #[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
 #[cfg(unix)]
@@ -13,9 +16,6 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use lightr_core::{Digest, LightrError, Result};
-use super::cow::{CowRung, try_cow_at_rung, cow_copy_file};
-use super::lock::write_guard;
 
 // ── path helpers ──────────────────────────────────────────────────────────────
 
@@ -223,7 +223,13 @@ pub fn exists(root: &Path, d: &Digest) -> bool {
 
 /// CoW the object identified by `d` to `dest`, then set its mode to
 /// `mode`.  Missing object → NotFound.  Parent dirs created if absent.
-pub fn materialize_file(root: &Path, d: &Digest, dest: &Path, mode: u32, rung: CowRung) -> Result<()> {
+pub fn materialize_file(
+    root: &Path,
+    d: &Digest,
+    dest: &Path,
+    mode: u32,
+    rung: CowRung,
+) -> Result<()> {
     let src = object_path(root, d);
     if !src.exists() {
         return Err(LightrError::NotFound(*d));

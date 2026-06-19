@@ -6,9 +6,9 @@
 
 use lightr_core::{LightrError, Result};
 use std::fs::File;
-use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+use std::path::Path;
 
 // ─────────────────────────────── gc lock guards ──────────────────────────────
 
@@ -125,8 +125,7 @@ pub fn write_guard(root: &Path) -> Result<WriteGuard> {
         use windows_sys::Win32::System::IO::OVERLAPPED;
         // Flags = 0: shared, blocking.
         let mut ol: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let ret =
-            unsafe { LockFileEx(f.as_raw_handle() as _, 0, 0, u32::MAX, u32::MAX, &mut ol) };
+        let ret = unsafe { LockFileEx(f.as_raw_handle() as _, 0, 0, u32::MAX, u32::MAX, &mut ol) };
         if ret == FALSE {
             return Err(LightrError::Io(std::io::Error::last_os_error()));
         }
@@ -177,8 +176,8 @@ pub fn gc_guard(root: &Path) -> Result<GcGuard> {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::TempDir;
     use crate::Store;
+    use tempfile::TempDir;
 
     fn tmp_store() -> (TempDir, Store) {
         let dir = TempDir::new().unwrap();

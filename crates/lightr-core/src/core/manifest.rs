@@ -201,4 +201,3 @@ impl Manifest {
         Digest::of_bytes(&self.encode())
     }
 }
-

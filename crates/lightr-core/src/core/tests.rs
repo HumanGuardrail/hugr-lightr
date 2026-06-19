@@ -1,8 +1,7 @@
 #[cfg(test)]
 mod cases {
     use crate::{
-        Digest, Entry, LightrError, Manifest, RefRecord, ref_key, validate_ref_name,
-        REF_KEY_DOMAIN,
+        ref_key, validate_ref_name, Digest, Entry, LightrError, Manifest, RefRecord, REF_KEY_DOMAIN,
     };
 
     // Known BLAKE3 vectors

@@ -17,8 +17,8 @@ pub(crate) mod test_lock {
 
 use clap::Parser;
 
-use cli::cmd::{Cli, Cmd, ComposeCmd, EngineCmd, OciCmd, SuperviseCmd};
 pub use cli::cmd::PlanCmd;
+use cli::cmd::{Cli, Cmd, ComposeCmd, EngineCmd, OciCmd, SuperviseCmd};
 use cli::dispatch::dispatch;
 
 // ──────────────────────────────────────────────────────────────────────────────

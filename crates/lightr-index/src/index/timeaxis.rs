@@ -137,8 +137,7 @@ pub fn bisect(store: &Store, name: &str, cmd: &[String]) -> Result<(usize, RefRe
             .duration_since(UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
-        let tmp_path =
-            std::env::temp_dir().join(format!("lightr-bisect-{}-{}", pid, nanos));
+        let tmp_path = std::env::temp_dir().join(format!("lightr-bisect-{}-{}", pid, nanos));
         std::fs::create_dir_all(&tmp_path).map_err(LightrError::Io)?;
         let _guard = TempDirGuard(tmp_path.clone());
 
@@ -180,8 +179,7 @@ pub fn bisect(store: &Store, name: &str, cmd: &[String]) -> Result<(usize, RefRe
                     }
                 }
                 Entry::Dir { path } => {
-                    std::fs::create_dir_all(tmp_path.join(path))
-                        .map_err(LightrError::Io)?;
+                    std::fs::create_dir_all(tmp_path.join(path)).map_err(LightrError::Io)?;
                 }
             }
         }

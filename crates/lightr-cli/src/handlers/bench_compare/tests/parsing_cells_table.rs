@@ -2,9 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::super::model::{
-    parse_runtimes, Cell, CmpRow, Detected, Runtime, Unit, Workload,
-};
+use super::super::model::{parse_runtimes, Cell, CmpRow, Detected, Runtime, Unit, Workload};
 use super::super::report::{
     build_report_json, header_line, render_cell, render_factor, render_table,
 };

@@ -12,8 +12,9 @@ pub use lightr_init::GUEST_PATH;
 
 // ── Flat re-exports (API-identical paths) ────────────────────────────────────
 
-pub use engine::{engine_for, pack_status, probe, Engine, EngineCaps, EngineKind, ExecSpec,
-                 NativeEngine};
+pub use engine::{
+    engine_for, pack_status, probe, Engine, EngineCaps, EngineKind, ExecSpec, NativeEngine,
+};
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

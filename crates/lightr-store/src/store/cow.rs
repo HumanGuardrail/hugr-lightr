@@ -282,8 +282,8 @@ pub fn try_cow_at_rung(src: &Path, dst: &Path, rung: CowRung) -> std::io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use crate::Store;
+    use tempfile::TempDir;
 
     fn tmp_store() -> (TempDir, Store) {
         let dir = TempDir::new().unwrap();

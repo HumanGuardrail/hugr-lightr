@@ -2,6 +2,7 @@
 //! All public items are re-exported at the crate root via `lib.rs`.
 
 mod ac;
+mod ctl;
 pub mod deepmemo;
 pub mod exec;
 pub mod logs;
@@ -14,7 +15,6 @@ pub mod supervise;
 mod svz;
 pub mod types;
 pub mod vzmemo;
-mod ctl;
 
 #[cfg(test)]
 mod tests;

@@ -28,7 +28,7 @@ use super::types::SpecOnDisk;
 /// process, killing the supervisor tears the VM down too.
 #[cfg(unix)]
 pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Store) -> Result<i32> {
-    use lightr_engine::{engine_for, ExecSpec, EngineKind};
+    use lightr_engine::{engine_for, EngineKind, ExecSpec};
     use lightr_init::{EXIT_FILE, IP_FILE};
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;

@@ -1,9 +1,9 @@
 //! A21–A22 test group: pull network-gated, oci push synthesis.
 
 use std::fs;
-use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::time::{Duration, Instant};
 
 use crate::common::lightr_cmd;
 use tempfile::TempDir;

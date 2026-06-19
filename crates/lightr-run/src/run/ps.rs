@@ -3,7 +3,9 @@
 use lightr_core::{LightrError, Result};
 
 use super::ctl::ctl_sock_path;
-use super::paths::{parse_exit_code_from_status, pid_alive, read_pid_file, read_spec_on_disk, read_status_file};
+use super::paths::{
+    parse_exit_code_from_status, pid_alive, read_pid_file, read_spec_on_disk, read_status_file,
+};
 use super::types::RunInfo;
 
 pub fn ps(store_home: &std::path::Path) -> Result<Vec<RunInfo>> {

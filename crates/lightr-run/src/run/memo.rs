@@ -345,4 +345,3 @@ pub fn predict(spec: &RunSpec, store: &Store) -> Result<(lightr_core::Digest, bo
     };
     Ok((key, hit))
 }
-

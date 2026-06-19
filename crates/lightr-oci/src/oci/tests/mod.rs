@@ -1,15 +1,18 @@
 //! Test suite for lightr-oci. Split across submodules to keep each file <400 LOC.
 
+mod http_tests;
 mod import_tests;
 mod integrity_tests;
-mod http_tests;
 mod pull_tests;
 mod push_tests;
 
 use crate::oci::util::sha256_hex_of;
 use flate2::{write::GzEncoder, Compression};
 use lightr_store::Store;
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use tempfile::TempDir;
 
 // ── Serialization lock: snapshot/hydrate touch LIGHTR_HOME ───────────────

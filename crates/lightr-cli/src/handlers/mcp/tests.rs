@@ -20,8 +20,7 @@ fn mcp_initialize_responds_with_protocol_version() {
 
 #[test]
 fn mcp_tools_list_returns_five_tools() {
-    let input =
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#.to_string() + "\n";
+    let input = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#.to_string() + "\n";
     let mut output = Vec::<u8>::new();
     let reader = Cursor::new(input.as_bytes().to_vec());
     run_mcp_loop(reader, &mut output);
@@ -61,9 +60,8 @@ fn mcp_eof_returns_0() {
 
 #[test]
 fn mcp_notification_no_response() {
-    let input = r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#
-        .to_string()
-        + "\n";
+    let input =
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#.to_string() + "\n";
     let mut output = Vec::<u8>::new();
     let reader = Cursor::new(input.as_bytes().to_vec());
     run_mcp_loop(reader, &mut output);

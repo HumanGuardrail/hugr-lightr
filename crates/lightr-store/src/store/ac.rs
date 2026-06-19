@@ -2,11 +2,11 @@
 //!
 //! AC entries are keyed by a Digest, sharded 2/62, stored with atomic rename.
 
+use super::cas::{atomic_write, shard_parts};
+use super::lock::write_guard;
+use lightr_core::{Digest, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use lightr_core::{Digest, Result};
-use super::cas::{shard_parts, atomic_write};
-use super::lock::write_guard;
 
 // ── path helper ───────────────────────────────────────────────────────────────
 
@@ -92,8 +92,8 @@ pub fn list_ac(root: &Path) -> Result<Vec<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use crate::Store;
+    use tempfile::TempDir;
 
     fn tmp_store() -> (TempDir, Store) {
         let dir = TempDir::new().unwrap();

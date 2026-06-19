@@ -255,8 +255,7 @@ pub(super) fn stream_blob_to_file(
         }
         if actual_hex_str != expected {
             let expected_digest = hex_to_digest(expected).unwrap_or(Digest([0u8; 32]));
-            let actual_digest =
-                hex_to_digest(&actual_hex_str).unwrap_or(Digest([0xff_u8; 32]));
+            let actual_digest = hex_to_digest(&actual_hex_str).unwrap_or(Digest([0xff_u8; 32]));
             return Err(LightrError::Integrity {
                 // sha256 bytes stored in Digest (not blake3) — see module doc
                 expected: expected_digest,

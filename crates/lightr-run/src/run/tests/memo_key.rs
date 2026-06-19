@@ -68,8 +68,14 @@ fn ports_excluded_from_key() {
 
     let mut spec_with_ports = make_spec(cwd, vec!["/bin/echo", "x"]);
     spec_with_ports.ports = vec![
-        PortMap { host: 8080, container: 80 },
-        PortMap { host: 9090, container: 90 },
+        PortMap {
+            host: 8080,
+            container: 80,
+        },
+        PortMap {
+            host: 9090,
+            container: 90,
+        },
     ];
 
     let k1 = build_key(&spec_no_ports).expect("k1");
@@ -96,7 +102,10 @@ fn key_changes_when_input_file_changes() {
     fs::write(cwd.join("data.txt"), b"version2").unwrap();
     let k2 = build_key(&spec).expect("k2");
 
-    assert_ne!(k1.0, k2.0, "key must change when input file content changes");
+    assert_ne!(
+        k1.0, k2.0,
+        "key must change when input file content changes"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -144,7 +153,10 @@ fn key_changes_when_selected_env_changes() {
     let k2 = build_key(&spec1).expect("k2");
 
     std::env::remove_var("LIGHTR_TEST_VAR_KCW");
-    assert_ne!(k1.0, k2.0, "key must change when selected env value changes");
+    assert_ne!(
+        k1.0, k2.0,
+        "key must change when selected env value changes"
+    );
 }
 
 // -----------------------------------------------------------------------

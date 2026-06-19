@@ -1,8 +1,8 @@
 use super::*;
-use std::fs::{self, Permissions};
-use lightr_core::{Digest, LightrError};
-use tempfile::TempDir;
 use crate::Store;
+use lightr_core::{Digest, LightrError};
+use std::fs::{self, Permissions};
+use tempfile::TempDir;
 
 fn tmp_store() -> (TempDir, Store) {
     let dir = TempDir::new().unwrap();

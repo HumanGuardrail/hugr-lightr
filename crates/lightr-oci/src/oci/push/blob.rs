@@ -278,4 +278,3 @@ pub(crate) fn upload_blob_from_file(
     )?;
     Ok(())
 }
-

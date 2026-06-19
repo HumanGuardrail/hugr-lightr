@@ -3,6 +3,7 @@
 use super::layer::{apply_and_snapshot, LayerBlob};
 use super::model::{DockerSaveItem, ImportReport, OciIndex, OciManifest};
 use super::util::{sha256_hex, verify_sha256};
+use flate2::read::GzDecoder;
 use lightr_core::{LightrError, Result};
 use lightr_store::Store;
 use std::{
@@ -10,7 +11,6 @@ use std::{
     io::{self, Read},
     path::Path,
 };
-use flate2::read::GzDecoder;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // import_layout — OCI layout dir or docker-save tar
@@ -219,7 +219,6 @@ pub(super) fn import_docker_save_tar(
             }
         }
     }
-
 
     Ok(report)
 }

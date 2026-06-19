@@ -3,9 +3,7 @@
 use std::path::PathBuf;
 
 use super::super::competitor::measure_competitor;
-use super::super::measure::{
-    comm_is_lightr_binary, lightr_idle_processes, lightr_materialize_ms,
-};
+use super::super::measure::{comm_is_lightr_binary, lightr_idle_processes, lightr_materialize_ms};
 use super::super::model::{
     which_in, which_on_path, Cell, Detected, MaterializeSize, ProbePolicy, Runtime, Unit, Workload,
 };

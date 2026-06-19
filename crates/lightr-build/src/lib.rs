@@ -54,7 +54,7 @@
 mod build;
 
 pub use build::{
-    build, compose_down, compose_supervise, compose_up, parse_compose,
-    step_reads_clock_or_net, BuildReport, BuildStep, Compose, ComposeHandle,
-    Instr, parse_dockerfile, Service, ServiceSpec, StackSpec,
+    build, compose_down, compose_supervise, compose_up, parse_compose, parse_dockerfile,
+    step_reads_clock_or_net, BuildReport, BuildStep, Compose, ComposeHandle, Instr, Service,
+    ServiceSpec, StackSpec,
 };

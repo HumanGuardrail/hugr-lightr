@@ -60,7 +60,11 @@ fn miss_then_hit() {
     assert_eq!(out1.exit_code, 0);
 
     let contents1 = fs::read_to_string(&side_effect).unwrap_or_default();
-    assert_eq!(contents1.lines().count(), 1, "side effect written once after first run");
+    assert_eq!(
+        contents1.lines().count(),
+        1,
+        "side effect written once after first run"
+    );
 
     let out2 = run_memoized(&spec, &store).expect("run2");
     assert!(out2.hit, "second run must be hit");
@@ -68,7 +72,11 @@ fn miss_then_hit() {
     assert_eq!(out1.stdout, out2.stdout, "replayed stdout must match");
 
     let contents2 = fs::read_to_string(&side_effect).unwrap_or_default();
-    assert_eq!(contents2.lines().count(), 1, "side effect must not be re-written on hit");
+    assert_eq!(
+        contents2.lines().count(),
+        1,
+        "side effect must not be re-written on hit"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -109,7 +117,11 @@ fn exit_nonzero_never_memoized() {
     assert_eq!(out2.exit_code, 7);
 
     let contents = fs::read_to_string(&side_effect).unwrap_or_default();
-    assert_eq!(contents.lines().count(), 2, "side effect must be written twice");
+    assert_eq!(
+        contents.lines().count(),
+        2,
+        "side effect must be written twice"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -134,7 +146,11 @@ fn output_cap_not_memoized() {
     let cmd = vec![
         "/bin/sh".to_string(),
         "-c".to_string(),
-        format!("cat {} && echo side >> {}", large_file.display(), side_effect.display()),
+        format!(
+            "cat {} && echo side >> {}",
+            large_file.display(),
+            side_effect.display()
+        ),
     ];
     let spec = RunSpec {
         cwd: cwd.to_path_buf(),
@@ -150,13 +166,23 @@ fn output_cap_not_memoized() {
     let out1 = run_memoized(&spec, &store).expect("run1");
     assert!(!out1.hit, "first run must be miss");
     assert_eq!(out1.exit_code, 0);
-    assert!(out1.stdout.len() > OUTPUT_CAP_BYTES, "stdout must exceed cap");
+    assert!(
+        out1.stdout.len() > OUTPUT_CAP_BYTES,
+        "stdout must exceed cap"
+    );
 
     let out2 = run_memoized(&spec, &store).expect("run2");
-    assert!(!out2.hit, "second run must also be miss (output cap exceeded)");
+    assert!(
+        !out2.hit,
+        "second run must also be miss (output cap exceeded)"
+    );
 
     let contents = fs::read_to_string(&side_effect).unwrap_or_default();
-    assert_eq!(contents.lines().count(), 2, "side effect must be written twice when output cap exceeded");
+    assert_eq!(
+        contents.lines().count(),
+        2,
+        "side effect must be written twice when output cap exceeded"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -203,7 +229,11 @@ fn corrupt_ac_record_treated_as_miss() {
     assert_eq!(out3.exit_code, 0);
 
     let contents = fs::read_to_string(&side_effect).unwrap_or_default();
-    assert_eq!(contents.lines().count(), 2, "command executed on miss and after corrupt");
+    assert_eq!(
+        contents.lines().count(),
+        2,
+        "command executed on miss and after corrupt"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -215,11 +245,20 @@ fn mount_escape_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path();
 
-    assert!(validate_mount_target("../escape").is_err(), "mount target with '..' must be rejected");
-    assert!(validate_mount_target("a/../../escape").is_err(), "escaping via a/../../ must be rejected");
+    assert!(
+        validate_mount_target("../escape").is_err(),
+        "mount target with '..' must be rejected"
+    );
+    assert!(
+        validate_mount_target("a/../../escape").is_err(),
+        "escaping via a/../../ must be rejected"
+    );
     assert!(validate_mount_target("subdir").is_ok());
     assert!(validate_mount_target("a/b/c").is_ok());
-    assert!(validate_mount_target("/abs").is_err(), "absolute path must be rejected");
+    assert!(
+        validate_mount_target("/abs").is_err(),
+        "absolute path must be rejected"
+    );
 
     let _ = cwd;
 }
@@ -247,9 +286,16 @@ fn mounts_run_and_key_change() {
     let spec = RunSpec {
         cwd: work.clone(),
         inputs: vec![],
-        command: vec!["/bin/sh".to_string(), "-c".to_string(), "cat mounted/hello.txt".to_string()],
+        command: vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "cat mounted/hello.txt".to_string(),
+        ],
         env_keys: vec![],
-        mounts: vec![Mount { ref_name: "testmount".to_string(), target: "mounted".to_string() }],
+        mounts: vec![Mount {
+            ref_name: "testmount".to_string(),
+            target: "mounted".to_string(),
+        }],
         secrets: vec![],
         configs: vec![],
         ports: vec![],
@@ -257,7 +303,10 @@ fn mounts_run_and_key_change() {
 
     let out1 = run_memoized(&spec, &store).expect("run1 with mount");
     assert_eq!(out1.exit_code, 0, "mounted run should exit 0");
-    assert!(out1.stdout.starts_with(b"hello from v1"), "stdout should contain file content");
+    assert!(
+        out1.stdout.starts_with(b"hello from v1"),
+        "stdout should contain file content"
+    );
 
     let key1 = out1.key;
 
@@ -273,6 +322,12 @@ fn mounts_run_and_key_change() {
 
     let out2 = run_memoized(&spec, &store).expect("run2 with mount v2");
     assert_eq!(out2.exit_code, 0);
-    assert!(out2.stdout.starts_with(b"hello from v2"), "stdout should contain v2 content");
-    assert_ne!(key1, out2.key, "key must change when mount ref is repointed");
+    assert!(
+        out2.stdout.starts_with(b"hello from v2"),
+        "stdout should contain v2 content"
+    );
+    assert_ne!(
+        key1, out2.key,
+        "key must change when mount ref is repointed"
+    );
 }

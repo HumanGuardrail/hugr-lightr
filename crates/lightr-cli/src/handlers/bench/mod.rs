@@ -68,7 +68,12 @@ struct Row {
 }
 
 impl Row {
-    fn new(indicator: &'static str, dur: std::time::Duration, budget_ms: u64, spawn_measured: bool) -> Self {
+    fn new(
+        indicator: &'static str,
+        dur: std::time::Duration,
+        budget_ms: u64,
+        spawn_measured: bool,
+    ) -> Self {
         let median_ms = dur.as_secs_f64() * 1000.0;
         let check_budget_ms = if spawn_measured {
             budget_ms * SPAWN_MARGIN
