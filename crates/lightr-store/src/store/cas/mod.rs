@@ -6,8 +6,6 @@
 use super::cow::{cow_copy_file, try_cow_at_rung, CowRung};
 use super::lock::write_guard;
 use lightr_core::{Digest, LightrError, Result};
-#[cfg(target_os = "linux")]
-use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::fs::Permissions;
 use std::fs::{self, File};
