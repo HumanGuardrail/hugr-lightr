@@ -138,7 +138,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: No source .rs may exceed 400 LOC
         run: |
-          BIG=$(find crates -name '*.rs' -not -path '*/target/*' -print0 \
+          # src + tests are held to <400; validation examples (run-on-demand
+          # harnesses, e.g. the vz E2E) are exempt.
+          BIG=$(find crates -name '*.rs' -not -path '*/target/*' -not -path '*/examples/*' -print0 \
             | xargs -0 wc -l | awk '$2!="total" && $1>400 {print}')
           if [ -n "$BIG" ]; then
             echo "::error::source files exceed 400 LOC:"; echo "$BIG"; exit 1
