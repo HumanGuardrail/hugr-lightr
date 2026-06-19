@@ -285,6 +285,17 @@ pub fn run(
                 rootfs: Some(rootfs_path.as_path()),
                 limits,
             };
+            // Suppress the guest CONSOLE (kernel boot log + the exit marker) from
+            // the host's stdout on a memo MISS: the command's real stdout/stderr
+            // come from the capture files below, so the console is pure noise that
+            // would otherwise prepend the boot log to the user's output (and make
+            // a MISS look different from a HIT). The shim still taps the pipe for
+            // the exit marker (the tap precedes the forward), so force-stop is
+            // unaffected. Respect an explicit LIGHTR_VZ_CONSOLE (user debugging).
+            if std::env::var_os("LIGHTR_VZ_CONSOLE").is_none() {
+                // Safety: single-threaded here, before the engine spawns the VM.
+                unsafe { std::env::set_var("LIGHTR_VZ_CONSOLE", "/dev/null") };
+            }
             let exit = engine.run(&spec)?;
 
             // Read the guest's stdout/stderr capture files off the rootfs share.
