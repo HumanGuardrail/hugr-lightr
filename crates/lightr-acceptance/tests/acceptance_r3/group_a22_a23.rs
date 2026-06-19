@@ -159,7 +159,12 @@ fn a22b_dir_copy_invalidates_on_nested_change() {
     let counter = counter_dir.path().join("counter.txt");
 
     std::fs::create_dir_all(ctx.path().join("src/nested")).unwrap();
-    std::fs::write(ctx.path().join("src/nested/b.txt"), b"one").unwrap();
+    // Use content that differs in both bytes AND length so that neither a
+    // content-based nor a size-based cache optimisation can produce a false
+    // hit.  "v1" (2 bytes) vs "v2-changed" (10 bytes) — the size difference
+    // ensures the stat-index racy-clean guard (which checks size equality)
+    // cannot serve a stale digest for the nested file.
+    std::fs::write(ctx.path().join("src/nested/b.txt"), b"v1").unwrap();
     let dockerfile = format!(
         "FROM scratch\nCOPY src /app\nRUN /bin/sh -c 'echo built >> {}'\n",
         counter.to_str().unwrap()
@@ -184,8 +189,9 @@ fn a22b_dir_copy_invalidates_on_nested_change() {
         "unchanged dir-COPY build must be cached (counter==1); got {lines_after_cached}"
     );
 
-    // change a NESTED file → the COPY step key must change → RUN re-executes
-    std::fs::write(ctx.path().join("src/nested/b.txt"), b"two").unwrap();
+    // change a NESTED file (different content AND different size) → the COPY
+    // step key must change → RUN re-executes
+    std::fs::write(ctx.path().join("src/nested/b.txt"), b"v2-changed").unwrap();
     assert_eq!(build(home.path()).status.code(), Some(0));
     let lines_after_change = std::fs::read_to_string(&counter).unwrap().lines().count();
     assert_eq!(
