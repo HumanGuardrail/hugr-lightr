@@ -202,7 +202,10 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          draft: false
+          # First-release safety: a tag creates a DRAFT release; verify the built
+          # artifacts (and fill packaging/lightr.rb SHAs) before promoting to
+          # published. Flip to false once the release flow is proven.
+          draft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           files: |
