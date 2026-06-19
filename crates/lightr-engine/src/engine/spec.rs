@@ -28,7 +28,7 @@ pub struct ExecSpec<'a> {
     /// byte-for-byte the single-NAT-NIC path shipped today (zero regression).
     /// Other engines ignore it (only vz attaches a file-handle NIC). NOT part of
     /// any memo key (runtime, like `limits`/`net`). Default None.
-    pub net_fd: Option<std::os::unix::io::RawFd>,
+    pub net_fd: Option<std::os::raw::c_int>,
     /// ADR-0018: the per-member MAC the mesh NIC (`eth1`) must use. The network
     /// registry assigns it; the guest emits it, so the userspace switch's DHCP
     /// lease, MAC-learning, and DNS all key on the SAME MAC. `None` ⇒ the vz shim

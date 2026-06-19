@@ -2,6 +2,8 @@
 
 use super::spec::ExecSpec;
 use super::Engine;
+// Used only by the non-Linux stub below; the Linux `ns_impl` has its own import.
+#[cfg(not(target_os = "linux"))]
 use lightr_core::{LightrError, Result};
 
 // ── NsEngine (Linux only) ─────────────────────────────────────────────────────
@@ -94,14 +96,13 @@ mod ns_impl {
             }
         };
         let none = CString::new("none").unwrap();
-        let bind = CString::new("bind").unwrap();
         let empty = CString::new("").unwrap();
 
         // Make root mount private
         let r = unsafe {
             libc::mount(
                 none.as_ptr(),
-                b"/\0".as_ptr() as *const libc::c_char,
+                c"/".as_ptr(),
                 std::ptr::null(),
                 libc::MS_REC | libc::MS_PRIVATE,
                 std::ptr::null(),
@@ -159,7 +160,7 @@ mod ns_impl {
         }
 
         // chdir to new root
-        if unsafe { libc::chdir(b"/\0".as_ptr() as *const libc::c_char) } != 0 {
+        if unsafe { libc::chdir(c"/".as_ptr()) } != 0 {
             eprintln!("lightr-engine ns: chdir / failed");
             return 1;
         }
@@ -198,7 +199,7 @@ mod ns_impl {
                 return 1;
             }
         };
-        let mut argv_c: Vec<CString> = command
+        let argv_c: Vec<CString> = command
             .iter()
             .filter_map(|s| CString::new(s.as_bytes()).ok())
             .collect();
