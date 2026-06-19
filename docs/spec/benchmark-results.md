@@ -77,6 +77,13 @@ present:** docker 28.3.2 (linux engine). OrbStack + Apple `container` absent fro
 | re-run (memo hit) | **105 ms** | 3 948 ms | **54×** | 30–65× |
 | idle processes | **0** | 8 | **∞** | 0 vs 7–9 (always) |
 | build (memoized 2nd) | **17.6 ms** | 1 434 ms | **81×** | 80–203× |
+| cold-image (CAS→CoW) | **63 ms** | 2 429 ms | **38.5×** | single run (2026-06-19) |
+
+The **cold-image** axis ("get a real OS image ready from cold"): Lightr CoW-hydrates
+the image from its CAS (the `oci pull` into CAS is untimed setup — "bytes already
+local"), Docker `docker pull`s the same image (`busybox:latest`, distinct from the
+shared `alpine:latest` so the cold-ness `rmi` never disturbs the other probes).
+Reproduce: `lightr bench-compare --vs docker --workload cold-image`.
 
 **Verdict: Lightr wins every adversarial axis in every run.** Docker's absolute
 ms is noisy (it crosses the macOS VM), so the factors vary — but the direction
