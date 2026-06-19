@@ -18,11 +18,13 @@ use std::path::Path;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::path::PathBuf;
 
-use lightr_run::restart::RestartPolicy;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use lightr_run::restart;
+use lightr_run::restart::RestartPolicy;
 
-use crate::{exit::die_lightr, lightr_home};
+use crate::exit::die_lightr;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::lightr_home;
 
 fn io_err(kind: std::io::ErrorKind, msg: impl Into<String>) -> lightr_core::LightrError {
     lightr_core::LightrError::Io(std::io::Error::new(kind, msg.into()))
