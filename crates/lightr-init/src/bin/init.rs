@@ -14,8 +14,8 @@ fn main() -> std::process::ExitCode {
 #[cfg(target_os = "linux")]
 mod linux {
     use lightr_init::{
-        run_init, ExitSink, GuestOps, InitSpec, CMD_FILE, EXIT_FILE, ROOTFS_DEST, ROOTFS_TAG,
-        STDERR_FILE, STDOUT_FILE,
+        run_init, ExitSink, GuestOps, InitSpec, CMD_FILE, EXIT_FILE, IP_FILE, ROOTFS_DEST,
+        ROOTFS_TAG, STDERR_FILE, STDOUT_FILE,
     };
     use std::ffi::CString;
     use std::io::{self, Write};
@@ -140,6 +140,19 @@ mod linux {
 
             Ok(exit_code(status))
         }
+
+        fn publish_ip(&mut self) -> io::Result<()> {
+            // BOOT-PATH: read the primary non-loopback IPv4 (kernel `ip=dhcp` already
+            // configured it before PID1) and write it to IP_FILE on the rootfs share
+            // (resolves inside the chrooted rootfs → host's materialized rootfs dir,
+            // like EXIT_FILE). getifaddrs walks the interface list; we take the first
+            // AF_INET that is not loopback and not 0.0.0.0.
+            let ip = primary_ipv4()?;
+            let mut f = std::fs::File::create(IP_FILE)?;
+            write!(f, "{ip}")?;
+            f.sync_all()?;
+            Ok(())
+        }
     }
 
     /// mount("<tag>", "<dest>", "virtiofs", 0, NULL); ensure the mountpoint
@@ -166,6 +179,39 @@ mod linux {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    /// First non-loopback IPv4 address as a dotted-quad string. Walks getifaddrs.
+    fn primary_ipv4() -> io::Result<String> {
+        // Safety: getifaddrs allocates a list we must freeifaddrs; we only read
+        // fields while the list is alive and copy out an owned String.
+        unsafe {
+            let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+            if libc::getifaddrs(&mut ifap) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut cur = ifap;
+            let mut found: Option<String> = None;
+            while !cur.is_null() {
+                let ifa = &*cur;
+                if !ifa.ifa_addr.is_null()
+                    && (*ifa.ifa_addr).sa_family as i32 == libc::AF_INET
+                    && (ifa.ifa_flags & libc::IFF_LOOPBACK as u32) == 0
+                {
+                    let sin = ifa.ifa_addr as *const libc::sockaddr_in;
+                    // s_addr is stored in network byte order; its in-memory bytes
+                    // are the octets in order.
+                    let o = (*sin).sin_addr.s_addr.to_ne_bytes();
+                    if o != [0, 0, 0, 0] {
+                        found = Some(format!("{}.{}.{}.{}", o[0], o[1], o[2], o[3]));
+                        break;
+                    }
+                }
+                cur = ifa.ifa_next;
+            }
+            libc::freeifaddrs(ifap);
+            found.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no non-loopback IPv4"))
+        }
     }
 
     /// Map an `ExitStatus` to an exit code (128+signal on signal termination).

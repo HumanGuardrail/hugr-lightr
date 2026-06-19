@@ -511,6 +511,7 @@ pub fn build(
                     command: argv,
                     rootfs: None, // native — no isolation
                     limits: Default::default(),
+                    net: false, // build steps never network (WP-NET2 n/a)
                 };
                 // Propagate accumulated ENV to the subprocess
                 let mut cmd_builder = std::process::Command::new(&argv[0]);

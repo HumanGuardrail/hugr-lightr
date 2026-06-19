@@ -50,6 +50,13 @@ pub const STDOUT_FILE: &str = "/.lightr-stdout";
 /// / [`EXIT_FILE`].
 pub const STDERR_FILE: &str = "/.lightr-stderr";
 
+/// IP file: when networking is enabled ([`InitSpec::net`]), the guest writes its
+/// primary non-loopback IPv4 (decimal dotted-quad, no trailing newline) here, on
+/// the rootfs share after chroot → rootfs root. The host reads it back to forward
+/// published ports to the guest. The sibling of [`EXIT_FILE`]; the kernel brings
+/// the interface up via `ip=dhcp` before PID1 runs, so the address is present.
+pub const IP_FILE: &str = "/.lightr-ip";
+
 /// The PATH injected into the guest command's environment. SINGLE SOURCE OF
 /// TRUTH: the vz engine puts this in the command's env (InitSpec), and the
 /// vz-memo key (lightr-cli handler) hashes the SAME value — if these drifted, a
@@ -69,6 +76,11 @@ pub struct InitSpec {
     pub command: Vec<String>,
     pub cwd: String,
     pub env: Vec<(String, String)>,
+    /// When true, the guest publishes its primary IPv4 to [`IP_FILE`] before
+    /// spawning the command (container networking). Default false (no-op) so the
+    /// non-networked path — including the vz-memo path — is byte-identical.
+    #[serde(default)]
+    pub net: bool,
 }
 
 impl InitSpec {
@@ -111,6 +123,11 @@ pub trait GuestOps {
         cwd: &str,
         env: &[(String, String)],
     ) -> std::io::Result<i32>;
+    /// Publish the guest's primary non-loopback IPv4 to [`IP_FILE`] (container
+    /// networking). Called by [`run_init`] only when [`InitSpec::net`] is true,
+    /// AFTER `enter_rootfs` (so the file lands on the rootfs share) and BEFORE
+    /// `spawn_wait` (the command may block forever as a server).
+    fn publish_ip(&mut self) -> std::io::Result<()>;
 }
 
 /// The init lifecycle: mount rootfs → read the command → enter the rootfs →
@@ -133,6 +150,12 @@ pub fn run_init<M: GuestOps>(ops: &mut M, sink: &mut dyn ExitSink) -> std::io::R
 
     // 3. Enter the rootfs so the command resolves there (not the initrd).
     ops.enter_rootfs()?;
+
+    // 3b. Container networking: publish the guest IP BEFORE spawn (a published
+    //     server blocks forever, so this must precede the spawn). Gated on net.
+    if spec.net {
+        ops.publish_ip()?;
+    }
 
     // 4. Spawn and capture the REAL exit code. A spawn failure (command not
     //    found) is still a real outcome → 127, not an Err.
@@ -160,6 +183,7 @@ mod tests {
                 ("PATH".to_string(), "/usr/bin".to_string()),
                 ("LANG".to_string(), "C".to_string()),
             ],
+            net: false,
         }
     }
 
@@ -180,6 +204,15 @@ mod tests {
         assert!(!err.is_empty(), "parse error must carry a message");
     }
 
+    #[test]
+    fn initspec_from_json_without_net_defaults_to_false() {
+        // Old host JSON predates the `net` field; serde(default) ⇒ net == false,
+        // so the non-networked path stays byte-identical for back-compat.
+        let spec = InitSpec::from_json(b"{\"command\":[],\"cwd\":\"/\",\"env\":[]}")
+            .expect("legacy json parses");
+        assert!(!spec.net, "missing net defaults to false");
+    }
+
     // ── FakeOps / VecSink seams ────────────────────────────────────────────
 
     /// A captured `spawn_wait` call: (command, cwd, env).
@@ -191,6 +224,7 @@ mod tests {
         spec: InitSpec,
         spawn_result: io::Result<i32>,
         spawned: Option<SpawnCall>,
+        published: bool,
         fail_at: Option<&'static str>, // "mount" | "read" | "enter"
     }
 
@@ -201,6 +235,7 @@ mod tests {
                 spec: sample_spec(),
                 spawn_result: Ok(code),
                 spawned: None,
+                published: false,
                 fail_at: None,
             }
         }
@@ -211,6 +246,7 @@ mod tests {
                 spec: sample_spec(),
                 spawn_result: Err(io::Error::from_raw_os_error(2)), // ENOENT
                 spawned: None,
+                published: false,
                 fail_at: None,
             }
         }
@@ -221,6 +257,7 @@ mod tests {
                 spec: sample_spec(),
                 spawn_result: Ok(0),
                 spawned: None,
+                published: false,
                 fail_at: Some(step),
             }
         }
@@ -263,6 +300,12 @@ mod tests {
                 Ok(code) => Ok(*code),
                 Err(e) => Err(io::Error::from(e.kind())),
             }
+        }
+
+        fn publish_ip(&mut self) -> io::Result<()> {
+            self.steps.push("publish_ip");
+            self.published = true;
+            Ok(())
         }
     }
 
@@ -311,6 +354,39 @@ mod tests {
         let rc = run_init(&mut ops, &mut sink).expect("ok");
         assert_eq!(rc, 7);
         assert_eq!(sink.reports, vec![7]);
+    }
+
+    // ── container networking: publish_ip is gated on InitSpec::net ──────────
+
+    #[test]
+    fn run_init_publishes_ip_when_net_enabled() {
+        let mut ops = FakeOps::spawning(0);
+        ops.spec.net = true;
+        let mut sink = VecSink::default();
+
+        run_init(&mut ops, &mut sink).expect("ok");
+
+        // publish_ip runs AFTER enter and BEFORE spawn (a server may block).
+        assert_eq!(
+            ops.steps,
+            vec!["mount", "read", "enter", "publish_ip", "spawn"],
+            "publish_ip is between enter and spawn"
+        );
+        assert!(ops.published, "the guest IP was published");
+    }
+
+    #[test]
+    fn run_init_skips_ip_when_net_disabled() {
+        let mut ops = FakeOps::spawning(0); // net defaults to false
+        let mut sink = VecSink::default();
+
+        run_init(&mut ops, &mut sink).expect("ok");
+
+        assert!(!ops.published, "no publish when net is off");
+        assert!(
+            !ops.steps.contains(&"publish_ip"),
+            "publish_ip is not in the lifecycle when net is off"
+        );
     }
 
     // ── spawn failure ⇒ 127, reported (a real outcome, not an Err) ─────────

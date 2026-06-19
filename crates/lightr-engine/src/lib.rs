@@ -293,6 +293,12 @@ pub struct ExecSpec<'a> {
     /// unlimited. Applied per engine: native/ns via `crate::limits`, vz via the
     /// VM config. NOT part of the memo key.
     pub limits: lightr_core::ResourceLimits,
+    /// Container networking (WP-NET2). When true, the vz engine attaches a NAT
+    /// NIC + `ip=dhcp` (via `LIGHTR_VZ_NET`) and tells the guest PID1 to publish
+    /// its IP (`InitSpec::net`), so the host can forward published ports to the
+    /// guest. Other engines ignore it (native/ns/wsl don't VM-network here). NOT
+    /// part of any memo key (runtime, like `limits`/`ports`). Default false.
+    pub net: bool,
 }
 
 // ── Engine trait ──────────────────────────────────────────────────────────────
@@ -689,8 +695,23 @@ mod vz_impl {
                 command: spec.command.to_vec(),
                 cwd: "/".to_string(),
                 env: vec![("PATH".to_string(), GUEST_PATH.to_string())],
+                // WP-NET2: when the run wants networking, the guest publishes its
+                // DHCP IP to IP_FILE before spawning the (possibly long-running)
+                // command, so the host supervisor can forward published ports.
+                net: spec.net,
             };
             std::fs::write(&cmd_path, init_spec.to_json()).map_err(LightrError::Io)?;
+
+            // WP-NET2: a networked run needs the shim to attach the NAT NIC +
+            // `ip=dhcp`. The shim gates that on LIGHTR_VZ_NET (env), so ExecSpec.net
+            // is the single switch that drives BOTH the guest (InitSpec.net above)
+            // and the shim. Respect a user-set value; set before the FFI spawns any
+            // thread (single-threaded here). A non-networked run leaves it unset,
+            // so the memo/one-shot path keeps its faster no-NIC boot.
+            if spec.net && std::env::var_os("LIGHTR_VZ_NET").is_none() {
+                // Safety: single-threaded here, before the engine spawns the VM.
+                unsafe { std::env::set_var("LIGHTR_VZ_NET", "1") };
+            }
 
             let kernel_c = path_to_cstr(&kernel)?;
             let initrd_c = path_to_cstr(&initrd)?;
@@ -1158,6 +1179,7 @@ mod tests {
             command: &command,
             rootfs: None,
             limits: Default::default(),
+            net: false,
         };
         let code = engine.run(&spec).expect("echo should not fail");
         assert_eq!(code, 0, "echo exits 0");
@@ -1178,6 +1200,7 @@ mod tests {
             command: &command,
             rootfs: None,
             limits: Default::default(),
+            net: false,
         };
         let code = engine.run(&spec).expect("sh should not fail to launch");
         assert_eq!(code, 5, "exit code must be 5, got {code}");
@@ -1195,6 +1218,7 @@ mod tests {
             command: &command,
             rootfs: Some(&rootfs),
             limits: Default::default(),
+            net: false,
         };
         let err = engine.run(&spec).unwrap_err();
         let msg = err.to_string();

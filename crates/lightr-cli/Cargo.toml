@@ -15,6 +15,13 @@ categories = ["command-line-utilities", "virtualization"]
 name = "lightr"
 path = "src/main.rs"
 
+[features]
+# Build the macOS Virtualization.framework `vz` engine (+ its Swift shim) into the
+# CLI. Forwards to lightr-engine's `vz` feature so `cargo build -p lightr-cli
+# --features vz` (docs/build.md, docs/RELEASE.md) yields the vz-capable binary.
+# Off by default — the daemonless core + native/ns engines need no VM toolchain.
+vz = ["lightr-engine/vz"]
+
 [dependencies]
 lightr-core = { workspace = true }
 lightr-store = { workspace = true }

@@ -16,6 +16,17 @@ blake3 = { workspace = true }
 lightr-core = { workspace = true }
 lightr-store = { workspace = true }
 lightr-index = { workspace = true }
+# WP-NET2: the detached supervisor boots the vz engine for a `-p` Linux-image run
+# (engine.run blocks in a thread while the host forwards ports to the guest IP).
+# lightr-engine does NOT depend on lightr-run, so this is acyclic; the `vz`
+# feature is enabled by the CLI and unified in — lightr-run carries no vz feature
+# itself, and a non-vz build's vz branch fails closed via engine_for's probe.
+lightr-engine = { workspace = true }
+# WP-NET2: the file-channel consts (EXIT_FILE for force-stop, IP_FILE for the
+# guest IP) come from lightr-init so the supervisor can never drift from the
+# guest PID1's contract. lightr-init is already in the tree (lightr-engine deps
+# it); this just makes the dependency explicit.
+lightr-init = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

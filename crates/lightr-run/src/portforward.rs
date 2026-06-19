@@ -36,6 +36,7 @@ use lightr_core::{LightrError, Result};
 pub struct Forwarder {
     host_port: u16,
     container_port: u16,
+    target_host: String,
     stop: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
 }
@@ -61,6 +62,11 @@ impl Forwarder {
     pub fn container_port(&self) -> u16 {
         self.container_port
     }
+
+    /// The target host this forwarder dials (`127.0.0.1` native, or a guest IP).
+    pub fn target_host(&self) -> &str {
+        &self.target_host
+    }
 }
 
 /// Bind `127.0.0.1:host_port` and run an accept loop that forwards every
@@ -70,11 +76,20 @@ impl Forwarder {
 /// accept loop runs on its own thread; each accepted connection is served on a
 /// further thread, so slow/long-lived clients never block new accepts.
 pub fn start(host_port: u16, container_port: u16) -> Result<Forwarder> {
+    start_to(host_port, "127.0.0.1", container_port)
+}
+
+/// Bind `127.0.0.1:host_port` and forward every accepted connection to
+/// `target_host:container_port`. `target_host` is `127.0.0.1` for a native run,
+/// or a microVM guest IP for a `vz` container run. Returns a [`Forwarder`].
+pub fn start_to(host_port: u16, target_host: &str, container_port: u16) -> Result<Forwarder> {
     let addr = format!("127.0.0.1:{host_port}");
     let listener = TcpListener::bind(&addr).map_err(LightrError::Io)?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
+
+    let dial_base = format!("{target_host}:{container_port}");
 
     let accept_thread = std::thread::spawn(move || {
         // Each `accept` yields one inbound client. After every accept we check
@@ -91,8 +106,8 @@ pub fn start(host_port: u16, container_port: u16) -> Result<Forwarder> {
             };
             // Serve this connection on its own thread so concurrent clients are
             // independent. Dial the container only after a client connects.
+            let dest = dial_base.clone();
             std::thread::spawn(move || {
-                let dest = format!("127.0.0.1:{container_port}");
                 if let Ok(outbound) = TcpStream::connect(&dest) {
                     proxy_bidirectional(inbound, outbound);
                 }
@@ -105,6 +120,7 @@ pub fn start(host_port: u16, container_port: u16) -> Result<Forwarder> {
     Ok(Forwarder {
         host_port,
         container_port,
+        target_host: target_host.to_string(),
         stop,
         accept_thread: Some(accept_thread),
     })
@@ -251,5 +267,21 @@ mod tests {
         // And concurrent: keep c1 open while c2 also round-trips.
         round_trip(&mut c1, b"first-again");
         round_trip(&mut c2, b"second-again");
+    }
+
+    #[test]
+    fn start_to_forwards_to_explicit_target() {
+        let echo_port = spawn_echo();
+        let free = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host_port = free.local_addr().unwrap().port();
+        drop(free);
+
+        // Using 127.0.0.1 as the explicit target keeps the test hermetic — it
+        // proves the new param is plumbed without needing a real VM.
+        let fwd = start_to(host_port, "127.0.0.1", echo_port).expect("start_to forwarder");
+        assert_eq!(fwd.target_host(), "127.0.0.1");
+
+        let mut c = connect_retry(host_port);
+        round_trip(&mut c, b"explicit-target");
     }
 }
