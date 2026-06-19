@@ -44,8 +44,13 @@ Cache hit returns in milliseconds without instantiating anything.
 |---|---|---|---|---|
 | Idle RAM | 2–4 GB | 0 | dockerd + image | ~5 MB/microVM |
 | "Pull" | whole layers | dedup chunks, lazy | layers | lazy, only what's touched |
-| Cold start | seconds | ms (native) | 1–5 s | ~125 ms (~5 ms w/ snapshot) |
+| Cold start | seconds | ms (native) | 1–5 s | ~125 ms (~5 ms w/ snapshot)¹ |
 | Cache hit | runs again | **does not run** | runs again | **does not run** |
+
+¹ Firecracker/CRIU precedent (Firecracker cold-start ~125 ms; CRIU restore
+~5 ms from snapshot) — not yet measured in Lightr's harness. The `fc` engine
+is a future ring; these figures are cited as industry baseline, not Lightr
+measurements.
 
 Honesty clause: Docker is not garbage on a Linux server — there it is thin.
 It is garbage **on the Mac** and **as a distribution/economic model**. The

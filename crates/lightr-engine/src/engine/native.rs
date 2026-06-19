@@ -22,7 +22,9 @@ impl Engine for NativeEngine {
         let mut cmd = std::process::Command::new(prog);
         cmd.args(args).current_dir(spec.cwd);
         // inherit all env from parent; inherit stdio (stdout/stderr passed through)
-        // F-203: apply resource caps. A0 stub is Ok(()); WP-A1 fills it.
+        // F-203: apply resource caps. On Linux: installs a pre_exec RLIMIT_AS/
+        // RLIMIT_DATA hook for memory_bytes; cpu_millis is unsupported on native
+        // (returns honest Err). No-op when limits are unlimited; Err on macOS cap.
         crate::limits::apply_native(&mut cmd, &spec.limits)?;
         let status = cmd.status().map_err(LightrError::Io)?;
         Ok(exit_code(status))

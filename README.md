@@ -66,8 +66,10 @@ staged (`CAP-DEDUP-CROSS-TENANT`).
 **R0–R4 + go-live hardening delivered (2026-06-17).** A **~4.5 MB** stripped
 release binary (measured, `bench B7`; ≤10 MB target met); **411 tests, 0 failures**, clippy
 `-D` clean (default + `--features vz`), fmt clean; `lightr bench --check` green
-on the Intel dev box (snapshot warm 233 ms, status 34 ms, memo HIT 51 ms — see
-`spikes/RESULTS.md`; the ~ms / boot-never targets bind to the O(1) views layer +
+on the Intel dev box (snapshot warm 233 ms, status 34 ms, memo HIT 51 ms
+end-to-end incl. input re-validation — see `spikes/RESULTS.md` for the full
+table; for head-to-head container replay numbers see
+`docs/spec/benchmark-results.md`; the ~ms / boot-never targets bind to the O(1) views layer +
 Apple Silicon, tense law). The `vz` engine is runtime-validated end-to-end on
 Intel x86_64 (F-205/F-206). Whitepaper v2 (working backwards) is canon. The
 platform it converges with already exists across three sibling repos:
