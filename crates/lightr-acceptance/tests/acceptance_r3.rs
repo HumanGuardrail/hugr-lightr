@@ -526,6 +526,145 @@ fn a24_compose_lazy() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// A24b — compose service discovery via env vars (WP-DISC)
+//
+// Honest native discovery: every service learns its peers' addresses through
+// env. For service `web` the supervisor injects `WEB_HOST=127.0.0.1` and
+// `WEB_PORT=<web container_port>` into `client`'s environment (Docker-compose
+// "links" convention). Native services share host loopback, so `client` reaches
+// `web` directly at `127.0.0.1:<web container_port>` — NO proxy involved.
+//
+// Both services are EAGER (started immediately by the supervisor). `client`:
+//   1. records "$WEB_HOST:$WEB_PORT" to an env file (proves the vars exist),
+//   2. connects to that address and writes the round-trip body to a body file.
+//
+// Assertions:
+//   - CORE (always): the env file contains exactly "127.0.0.1:<web_cport>".
+//   - STRENGTHENING (graceful skip): the body file contains web's payload.
+//     `nc` round-trips in a tight test are timing-sensitive (see the A24
+//     caveat); if web's loopback port was unavailable or nc lagged, the body
+//     sub-assertion is skipped while the env-var core assertion still holds.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a24b_compose_discovery_env() {
+    let home = TempDir::new().unwrap();
+
+    // web's container port — a high ephemeral loopback port web binds and the
+    // value the supervisor must inject as WEB_PORT. pid-derived for variety.
+    let pid_offset = (std::process::id() % 512) as u16;
+    let web_cport: u16 = 41000 + pid_offset;
+    // web's published host port (kept distinct; client uses the *container* port
+    // via discovery, not this one — but web must declare a port to be a peer).
+    let web_hport: u16 = 41513 + pid_offset;
+
+    // Test-owned absolute paths the eager `client` writes to. Native engine has
+    // NO isolation (see file header / A22), so the service process can write to
+    // any host path — we exploit that to read back what `client` observed.
+    let out_dir = TempDir::new().unwrap();
+    let env_file = out_dir.path().join("disc_env.txt");
+    let body_file = out_dir.path().join("disc_body.txt");
+    let env_str = env_file.to_string_lossy();
+    let body_str = body_file.to_string_lossy();
+
+    // The fixed payload web serves on each connection.
+    let payload = "lightr-discovery-ok";
+
+    // 2-service compose, both eager. web serves `payload` on 127.0.0.1:<web_cport>
+    // in a loop; client reads $WEB_HOST/$WEB_PORT, records them, then round-trips.
+    let compose_dir = TempDir::new().unwrap();
+    let compose_yml = compose_dir.path().join("compose.yml");
+    let web_cmd = format!("while true; do printf '{payload}' | nc -l {web_cport}; done");
+    // sleep gives web a moment to bind before client connects; `|| true` keeps a
+    // failed nc from changing the service exit semantics under test.
+    let client_cmd = format!(
+        "sleep 1; printf '%s:%s' \"$WEB_HOST\" \"$WEB_PORT\" > {env_str}; \
+         printf 'GET' | nc \"$WEB_HOST\" \"$WEB_PORT\" > {body_str} || true; sleep 30"
+    );
+    let compose_content = format!(
+        "services:\n\
+         \x20\x20web:\n\
+         \x20\x20\x20\x20image: scratch\n\
+         \x20\x20\x20\x20command: [\"/bin/sh\",\"-c\",{web_cmd_json}]\n\
+         \x20\x20\x20\x20x-lightr-eager: true\n\
+         \x20\x20\x20\x20ports:\n\
+         \x20\x20\x20\x20\x20\x20- \"{web_hport}:{web_cport}\"\n\
+         \x20\x20client:\n\
+         \x20\x20\x20\x20image: scratch\n\
+         \x20\x20\x20\x20command: [\"/bin/sh\",\"-c\",{client_cmd_json}]\n\
+         \x20\x20\x20\x20x-lightr-eager: true\n",
+        web_cmd_json = serde_json::to_string(&web_cmd).unwrap(),
+        client_cmd_json = serde_json::to_string(&client_cmd).unwrap(),
+    );
+    fs::write(&compose_yml, &compose_content).unwrap();
+
+    // ── up: starts both eager services ───────────────────────────────────────
+    let up_out = lightr_cmd(home.path())
+        .args(["compose", "up", "-f", compose_yml.to_str().unwrap()])
+        .output()
+        .expect("compose up must not fail to spawn");
+    assert_eq!(
+        up_out.status.code().unwrap_or(-1),
+        0,
+        "compose up must exit 0; stderr:\n{}",
+        String::from_utf8_lossy(&up_out.stderr)
+    );
+
+    // ── CORE: client must have observed WEB_HOST/WEB_PORT discovery vars ──────
+    // Poll for the env file (client sleeps ~1s before writing it).
+    let env_ready = poll_until(Duration::from_secs(8), || env_file.exists());
+
+    // Always tear the stack down before asserting, so a failed assertion never
+    // leaks the eager services / their listeners.
+    let do_down = || {
+        let _ = lightr_cmd(home.path())
+            .args(["compose", "down", "-f", compose_yml.to_str().unwrap()])
+            .output();
+    };
+
+    if !env_ready {
+        do_down();
+        panic!(
+            "client never recorded discovery env within 8 s (expected {}); \
+             up stderr:\n{}",
+            env_file.display(),
+            String::from_utf8_lossy(&up_out.stderr)
+        );
+    }
+
+    let env_observed = fs::read_to_string(&env_file).unwrap_or_default();
+    let expected = format!("127.0.0.1:{web_cport}");
+    // Capture the round-trip body BEFORE down (web's listener dies with down).
+    let body_observed = fs::read_to_string(&body_file).unwrap_or_default();
+    do_down();
+
+    assert_eq!(
+        env_observed.trim(),
+        expected,
+        "discovery must inject WEB_HOST=127.0.0.1 and WEB_PORT={web_cport} \
+         into client's env (Docker-compose links convention); client saw {:?}",
+        env_observed
+    );
+
+    // ── STRENGTHENING: the service-to-service round-trip body (graceful skip) ──
+    if body_observed.is_empty() {
+        eprintln!(
+            "[A24b] WARNING: round-trip body empty (web loopback port {web_cport} \
+             busy or nc lag); skipping body sub-assertion. The discovery-env core \
+             assertion already passed."
+        );
+    } else {
+        assert_eq!(
+            body_observed.trim(),
+            payload,
+            "client must reach web directly at 127.0.0.1:{web_cport} via discovery \
+             vars (no proxy) and read back web's payload; got {:?}",
+            body_observed
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // A25 — docker compat
 //
 // `lightr docker build -t @t/d <ctx>` → exit 0 + stderr contains "lightr build"

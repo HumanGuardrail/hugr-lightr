@@ -638,6 +638,12 @@ struct SpecOnDisk {
     // runs (serde default). Present ⇒ a vz container run.
     #[serde(default)]
     rootfs_ref: Option<String>,
+    /// WP-DISC: explicit env vars set on the detached child (compose service
+    /// discovery: <PEER>_HOST/<PEER>_PORT). serde-defaulted = back-compat. NOT a
+    /// memo-key input (runtime addressing, like ports) — and detached runs aren't
+    /// memoized anyway.
+    #[serde(default)]
+    env: Vec<(String, String)>,
 }
 
 /// Serde default for [`SpecOnDisk::engine`] — the native supervisor branch, so a
@@ -876,7 +882,7 @@ fn send_ctl_op(dir: &std::path::Path, op: &str) -> Option<serde_json::Value> {
 // ---------------------------------------------------------------------------
 
 pub fn spawn_detached(spec: &RunSpec, store: &Store) -> Result<RunHandle> {
-    spawn_detached_engine(spec, store, None, EngineKind::Native, None)
+    spawn_detached_engine(spec, store, None, EngineKind::Native, None, &[])
 }
 
 /// `spawn_detached` plus an optional healthcheck (F-309). When `hc` is
@@ -894,7 +900,7 @@ pub fn spawn_detached_with_health(
     store: &Store,
     hc: Option<&crate::healthcheck::Healthcheck>,
 ) -> Result<RunHandle> {
-    spawn_detached_engine(spec, store, hc, EngineKind::Native, None)
+    spawn_detached_engine(spec, store, hc, EngineKind::Native, None, &[])
 }
 
 /// `spawn_detached_with_health` plus the engine + rootfs ref (WP-NET2). The
@@ -905,12 +911,19 @@ pub fn spawn_detached_with_health(
 /// `-p`-for-a-Linux-image case. The engine + rootfs ref are persisted to
 /// spec.json (serde-defaulted, so old native runs read back unchanged) and are
 /// NOT memo-key inputs (a detached run is never memoized).
+///
+/// WP-DISC: `env` is an explicit set of `(key, value)` pairs applied to the
+/// detached NATIVE child (compose service discovery: `<PEER>_HOST`/`<PEER>_PORT`
+/// plus the service's own env). It is persisted to spec.json (serde-defaulted)
+/// and is NOT a memo-key input — runtime addressing, like ports, and detached
+/// runs aren't memoized anyway. The vz branch ignores it.
 pub fn spawn_detached_engine(
     spec: &RunSpec,
     _store: &Store,
     hc: Option<&crate::healthcheck::Healthcheck>,
     engine: EngineKind,
     rootfs_ref: Option<&str>,
+    env: &[(String, String)],
 ) -> Result<RunHandle> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -946,6 +959,7 @@ pub fn spawn_detached_engine(
         ports: spec.ports.iter().map(|p| (p.host, p.container)).collect(),
         engine: engine.as_str().to_string(),
         rootfs_ref: rootfs_ref.map(|s| s.to_string()),
+        env: env.to_vec(),
     };
     write_spec_json(&dir, &spec_on_disk)?;
 
@@ -1235,6 +1249,11 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
     let mut child = std::process::Command::new(&spec.command[0])
         .args(&spec.command[1..])
         .current_dir(&cwd)
+        // WP-DISC: explicit per-child env (compose service discovery
+        // <PEER>_HOST/<PEER>_PORT + the service's own env), plumbed through
+        // spec.json instead of the racy process-global set_var. Empty for a
+        // plain `lightr run -d` (byte-identical to before).
+        .envs(spec.env.iter().cloned())
         .stdout(std::process::Stdio::from(stdout_log))
         .stderr(std::process::Stdio::from(stderr_log))
         .spawn()
@@ -2050,6 +2069,7 @@ mod tests {
             ports: vec![(18080, 80)],
             engine: "vz".to_string(),
             rootfs_ref: Some("alpine".to_string()),
+            env: vec![],
         };
         write_spec_json(dir.path(), &spec).expect("write");
         let back = read_spec_on_disk(dir.path()).expect("read");
@@ -2450,6 +2470,7 @@ mod tests {
             ports: vec![],
             engine: "native".to_string(),
             rootfs_ref: None,
+            env: vec![],
         };
         write_spec_json(&run_dir, &spec_on_disk).unwrap();
 
@@ -3148,6 +3169,7 @@ mod tests {
             ports: vec![],
             engine: "native".to_string(),
             rootfs_ref: None,
+            env: vec![],
         };
         write_spec_json(&run_dir, &spec_on_disk).unwrap();
         healthcheck::save_for(

@@ -1279,10 +1279,24 @@ pub fn compose_supervise(stack_dir: &Path) -> Result<()> {
     let start = Instant::now();
     let stop_file = stack_dir.join("stop");
 
+    // WP-DISC: the stack's discovery peer table — each service's name + its FIRST
+    // container port (the side a peer connects to on 127.0.0.1). Services with no
+    // ports are skipped (nothing to address). Built once and shared with every
+    // `start_service_detached` so each child learns `<PEER>_HOST`/`<PEER>_PORT`.
+    let peers: Vec<(String, u16)> = spec
+        .services
+        .iter()
+        .filter_map(|s| {
+            s.ports
+                .first()
+                .map(|&(_, container)| (s.name.clone(), container))
+        })
+        .collect();
+
     // Start eager services
     for svc in &spec.services {
         if svc.eager && !svc.command.is_empty() {
-            start_service_detached(stack_dir, svc)?;
+            start_service_detached(stack_dir, svc, &peers)?;
         }
     }
 
@@ -1307,11 +1321,14 @@ pub fn compose_supervise(stack_dir: &Path) -> Result<()> {
             };
             let svc_clone = svc_spec.clone();
             let stack_dir_clone = stack_dir.to_path_buf();
+            let peers_clone = peers.clone();
             let jh = std::thread::spawn(move || {
                 // Block until first connection
                 if let Ok((inbound, _)) = listener.accept() {
                     // Start the service
-                    if let Err(e) = start_service_detached(&stack_dir_clone, &svc_clone) {
+                    if let Err(e) =
+                        start_service_detached(&stack_dir_clone, &svc_clone, &peers_clone)
+                    {
                         eprintln!("lightr compose: failed to start {}: {e}", svc_clone.name);
                         return;
                     }
@@ -1364,11 +1381,39 @@ fn prepare_service_cwd(svc: &ServiceSpec, store: &Store) -> Result<PathBuf> {
     Ok(cwd)
 }
 
+/// WP-DISC: sanitize a compose service name into an env-var key prefix —
+/// uppercase, every non-alphanumeric char mapped to `_` (Docker-compose "links"
+/// convention). e.g. `my-svc` → `MY_SVC`, used to build `MY_SVC_HOST` /
+/// `MY_SVC_PORT`.
+fn discovery_key(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Spawn a service as a detached lightr run.
 /// Writes the run dir into the stack spec's service entry.
-fn start_service_detached(stack_dir: &Path, svc: &ServiceSpec) -> Result<()> {
+///
+/// WP-DISC: `peers` is the full stack's `(name, first_container_port)` list
+/// (services with no ports excluded). For every peer whose name differs from
+/// this service's, two discovery env vars are injected into the child:
+/// `<PEER>_HOST=127.0.0.1` and `<PEER>_PORT=<container_port>` — the honest
+/// native discovery mechanism. All services share host loopback and a service
+/// binds `127.0.0.1:<container_port>`, so a peer reaches it directly there (NO
+/// proxy involved for service-to-service).
+fn start_service_detached(
+    stack_dir: &Path,
+    svc: &ServiceSpec,
+    peers: &[(String, u16)],
+) -> Result<()> {
     use lightr_run::healthcheck::Healthcheck;
-    use lightr_run::{Mount, RunSpec, StoreFile};
+    use lightr_run::{spawn_detached_engine, Mount, RunSpec, StoreFile};
 
     // We need a store both to hydrate the image ref and to call spawn_detached;
     // open the default store before choosing cwd.
@@ -1403,9 +1448,20 @@ fn start_service_detached(stack_dir: &Path, svc: &ServiceSpec) -> Result<()> {
         ports: Vec::new(),
     };
 
-    // Set env vars before spawning
-    for (k, v) in &svc.env {
-        std::env::set_var(k, v);
+    // WP-DISC: build the explicit child env, plumbed through spec.json instead
+    // of the old racy process-global `std::env::set_var` (which mutated the
+    // SHARED supervisor environment per service — a data race across the
+    // concurrent lazy-listener threads). It is: the service's OWN env (the
+    // `(k,v)` pairs) PLUS the discovery vars for every OTHER service in the
+    // stack. `RunSpec.env_keys` (the memo key) stays as the service's own keys.
+    let mut child_env: Vec<(String, String)> = svc.env.clone();
+    for (peer_name, container_port) in peers {
+        if peer_name == &svc.name {
+            continue;
+        }
+        let prefix = discovery_key(peer_name);
+        child_env.push((format!("{prefix}_HOST"), "127.0.0.1".to_string()));
+        child_env.push((format!("{prefix}_PORT"), container_port.to_string()));
     }
 
     // F-309: a service healthcheck becomes the detached supervisor's probe.
@@ -1418,7 +1474,14 @@ fn start_service_detached(stack_dir: &Path, svc: &ServiceSpec) -> Result<()> {
             retries: *retries,
         });
 
-    let handle = lightr_run::spawn_detached_with_health(&spec, &store, hc.as_ref())?;
+    let handle = spawn_detached_engine(
+        &spec,
+        &store,
+        hc.as_ref(),
+        lightr_engine::EngineKind::Native,
+        None,
+        &child_env,
+    )?;
 
     // Record run dir in the stack spec
     let spec_path = stack_dir.join("spec.json");
