@@ -402,7 +402,8 @@ pub fn run(
             configs,
             ports,
         };
-        return match spawn_detached_engine(&spec, &store, None, EngineKind::Vz, Some(ref_name)) {
+        return match spawn_detached_engine(&spec, &store, None, EngineKind::Vz, Some(ref_name), &[])
+        {
             Ok(handle) => {
                 println!("id={}", handle.id);
                 0
