@@ -742,20 +742,26 @@ mod vz_impl {
                     argv_ptrs.as_ptr(),
                 )
             };
-            if vm_status < 0 {
-                // The VM never booted (config/boot failure). No guest, no code to
-                // fake — surface a real error.
-                return Err(LightrError::InvalidRef(format!(
-                    "vz engine: VM boot/config failed (shim status {vm_status})"
-                )));
+            // Shim return contract (WAVE-VZ fast exit channel):
+            //   -1        = boot/config failure (no VM) → real error;
+            //   0..=255   = the guest's REAL exit code, captured in real time from
+            //               the console marker (no virtiofs lag) → use directly;
+            //   -2        = the VM stopped without a marker (guest crashed before
+            //               printing) → fall back to the durable EXIT_FILE.
+            if vm_status == -1 {
+                return Err(LightrError::InvalidRef(
+                    "vz engine: VM boot/config failed".to_string(),
+                ));
+            }
+            if vm_status >= 0 {
+                return Ok(vm_status);
             }
 
-            // ── 3. Read the guest's REAL exit code from the rootfs share ─────
-            // PID1 wrote EXIT_FILE (fsync) then powered off cleanly, so it is
-            // durable on the host's materialized rootfs by the time the shim
-            // returns. A missing/unparsable file means the guest never reported
-            // (crashed before writing) ⇒ GUEST_NO_REPORT_CODE (255), never a
-            // fabricated 0. A brief retry covers any virtiofs flush lag.
+            // ── 3. Fallback: read the guest's exit code from the rootfs share ──
+            // Only reached when no console marker arrived. PID1 wrote EXIT_FILE
+            // (fsync); a missing/unparsable file means the guest never reported
+            // ⇒ GUEST_NO_REPORT_CODE (255), never a fabricated 0. Retry covers
+            // virtiofs flush lag.
             for _ in 0..30 {
                 if let Ok(s) = std::fs::read_to_string(&exit_path) {
                     if let Ok(code) = s.trim().parse::<i32>() {

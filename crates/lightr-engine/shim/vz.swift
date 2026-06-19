@@ -173,10 +173,16 @@ public func lightr_vz_run(
     } else {
         consoleWrite = FileHandle.standardOutput
     }
+    // Tap the console: the guest writes to this pipe; the host forwards bytes to
+    // the real console destination (consoleWrite) AND scans them for the real-time
+    // exit marker ("LIGHTR_EXIT:<n>"), so it can force-stop the instant the command
+    // finishes — bypassing the slow virtiofs EXIT_FILE visibility (~1.3s). The
+    // guest's stdout (hvc0) carries both the command output and PID1's marker.
+    let consolePipe = Pipe()
     let consolePort = VZVirtioConsoleDeviceSerialPortConfiguration()
     consolePort.attachment = VZFileHandleSerialPortAttachment(
         fileHandleForReading:  FileHandle.standardInput,
-        fileHandleForWriting:  consoleWrite
+        fileHandleForWriting:  consolePipe.fileHandleForWriting
     )
 
     // ── 5b. NAT network device (WAVE-VZ networking) ──────────────────────────
@@ -235,6 +241,36 @@ public func lightr_vz_run(
     // Trace every lifecycle transition only when the console is being captured
     // (LIGHTR_VZ_CONSOLE set = debug); quiet otherwise. Real errors always log.
     let trace = !(ProcessInfo.processInfo.environment["LIGHTR_VZ_CONSOLE"] ?? "").isEmpty
+    var capturedExit: Int32? = nil
+
+    // Console tap: forward guest console bytes to the real destination AND scan for
+    // the real-time exit marker ("LIGHTR_EXIT:<n>\n"); the instant it parses, force-
+    // stop the VM (the command has finished). Requires a trailing newline so a
+    // chunk-split mid-number never captures a partial code.
+    var scanBuf = Data()
+    let exitMarker = Data("LIGHTR_EXIT:".utf8)
+    consolePipe.fileHandleForReading.readabilityHandler = { fh in
+        let chunk = fh.availableData
+        if chunk.isEmpty { return }
+        consoleWrite.write(chunk)
+        if capturedExit != nil { return }
+        scanBuf.append(chunk)
+        if let r = scanBuf.range(of: exitMarker) {
+            var digits = ""
+            var sawNewline = false
+            for b in scanBuf.suffix(from: r.upperBound) {
+                let ch = Character(UnicodeScalar(b))
+                if ch == "\n" || ch == "\r" { sawNewline = true; break }
+                digits.append(ch)
+            }
+            if sawNewline, let code = Int32(digits.trimmingCharacters(in: .whitespaces)) {
+                capturedExit = code
+                tlog("console exit marker = \(code), force-stopping")
+                vmQueue.async { if let m = vm, m.canStop { m.stop { _ in } } }
+            }
+        }
+        if scanBuf.count > 16384 { scanBuf = Data(scanBuf.suffix(2048)) }
+    }
 
     vmQueue.async {
         let machine = VZVirtualMachine(configuration: config, queue: vmQueue)
@@ -288,8 +324,20 @@ public func lightr_vz_run(
 
     // Block the CALLING thread (never vmQueue) until the VM stops or fails.
     semaphore.wait()
-    tlog("returning status=\(vmStatus)")
+    consolePipe.fileHandleForReading.readabilityHandler = nil
+    // Return contract: -1 boot/config failure; 0..=255 the guest's real exit code
+    // captured live from the console marker; -2 stopped without a marker (host then
+    // falls back to the durable EXIT_FILE).
+    let result: Int32
+    if vmStatus < 0 {
+        result = -1
+    } else if let c = capturedExit {
+        result = c
+    } else {
+        result = -2
+    }
+    tlog("returning result=\(result)")
     _ = vm           // keep the VM + observation alive until the wait returns
     _ = observation
-    return vmStatus
+    return result
 }
