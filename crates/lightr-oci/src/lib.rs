@@ -37,7 +37,8 @@
 #![allow(clippy::result_large_err)]
 
 use flate2::read::GzDecoder;
-use lightr_core::{Digest, LightrError, Result};
+use flate2::{write::GzEncoder, Compression};
+use lightr_core::{Digest, Entry, LightrError, Manifest, Result};
 use lightr_store::Store;
 use serde::Deserialize;
 use sha2::{Digest as Sha2Digest, Sha256};
@@ -56,6 +57,17 @@ pub struct ImportReport {
     pub root: Digest,
     pub layers: u64,
     pub files: u64,
+}
+
+/// Result of a `push`: the registry target written, the synthesized OCI image
+/// manifest's sha256 digest, the layer count (always 1 — see `push`), and the
+/// gzipped layer size in bytes.
+#[derive(Debug)]
+pub struct PushReport {
+    pub target: String,
+    pub manifest_digest: String,
+    pub layers: u64,
+    pub size: u64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1156,7 +1168,7 @@ pub fn pull(image: &str, store: &Store, name: &str) -> Result<ImportReport> {
         if registry == "registry-1.docker.io" {
             // Docker Hub token endpoint — pass Basic creds if we have them,
             // or anonymous if not.
-            let token = fetch_docker_token(&agent, &repo, creds.as_ref())?;
+            let token = fetch_docker_token(&agent, &repo, creds.as_ref(), "pull")?;
             (Some(token), None)
         } else if let Some(ref c) = creds {
             // Other registries: use Basic auth directly.
@@ -1276,6 +1288,439 @@ pub fn pull(image: &str, store: &Store, name: &str) -> Result<ImportReport> {
     apply_and_snapshot(blobs, layer_count, store, name)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// push — synthesize a single-layer OCI image and upload (OCI distribution v2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Choose the URL scheme for a registry host.
+///
+/// `localhost` / `127.0.0.1` (with or without a `:port`) → `http://` so a plain
+/// local registry (the common `registry:2` dev setup) works without TLS; every
+/// other host → `https://`. Pull is unaffected — only `push` calls this.
+fn registry_scheme(registry: &str) -> &'static str {
+    let host = registry.split(':').next().unwrap_or(registry);
+    if host == "localhost" || host == "127.0.0.1" {
+        "http://"
+    } else {
+        "https://"
+    }
+}
+
+/// Push a stored ref to a registry as a **single-layer OCI image**.
+///
+/// # Imageless model — honest synthesis (NOT a blob round-trip)
+///
+/// Lightr's store keeps a content-addressed filesystem **tree** (a BLAKE3
+/// `Manifest` of `File`/`Symlink`/`Dir` entries + their chunk objects), NOT the
+/// original OCI layer blobs an image was imported from. There is therefore
+/// nothing to "push back" verbatim. Instead `push` *synthesizes* a fresh,
+/// spec-valid OCI image from the hydrated tree:
+///
+///   1. Resolve `name` → its `Manifest` (fail-closed if the ref is absent).
+///   2. Assemble ONE tar layer from the tree (file bytes + mode, symlinks,
+///      dirs), gzip it, streamed to a tempfile so RAM stays bounded.
+///        - layer digest  = sha256 of the **gzipped** tar
+///        - diff_id       = sha256 of the **uncompressed** tar
+///   3. Build a minimal OCI image **config** (`rootfs.diff_ids = [diff_id]`).
+///   4. Build the OCI image **manifest** (config descriptor + the one layer).
+///   5. Upload config blob, layer blob (HEAD-skip if present, else
+///      POST→PUT monolithic), then PUT the manifest under `<tag>`.
+///
+/// This is deliberately on-brand: the image is a faithful snapshot of the tree
+/// the store actually holds, re-expressed in OCI's wire format. It will NOT be
+/// byte-identical to whatever image the tree was first imported from (different
+/// layer boundaries, no original history/config) — by design.
+///
+/// Network — bridge-only (ADR-0011). Auth reuses the pull machinery: a
+/// PUSH-scoped bearer token for docker.io, Basic-from-config for other
+/// registries (whose config creds already carry write perms).
+pub fn push(name: &str, target: &str, store: &Store) -> Result<PushReport> {
+    // a. Resolve the local ref → Manifest (fail-closed if missing).
+    let rec = store
+        .ref_get(name)?
+        .ok_or_else(|| LightrError::RefNotFound(name.to_string()))?;
+    let manifest_bytes = store.get_bytes(&rec.root)?;
+    let tree = Manifest::decode(&manifest_bytes)?;
+
+    // Parse/validate the target ref (empty/bad → InvalidRef → exit 2).
+    let (registry, repo, tag) = parse_image_ref(target)?;
+    let scheme = registry_scheme(&registry);
+    let agent = net_agent();
+
+    // b. Build the single tar layer streamed to a tempfile, computing BOTH the
+    //    uncompressed (diff_id) and gzipped (layer digest) sha256 as we go.
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let tmp_dir = std::env::temp_dir().join(format!("lightr-oci-push-{pid}-{nanos}"));
+    fs::create_dir_all(&tmp_dir).map_err(LightrError::Io)?;
+    let _guard = TempDirGuard(tmp_dir.clone());
+    let layer_path = tmp_dir.join("layer.tar.gz");
+
+    let (layer_digest_hex, diff_id_hex, layer_size) =
+        build_layer_tar_gz(&tree, store, &layer_path)?;
+
+    // c. Build the minimal OCI image config JSON.
+    let (os, arch) = (std::env::consts::OS, host_arch());
+    let config_json = serde_json::json!({
+        "architecture": arch,
+        "os": os,
+        "rootfs": {
+            "type": "layers",
+            "diff_ids": [format!("sha256:{diff_id_hex}")]
+        },
+        "config": {}
+    });
+    let config_bytes = serde_json::to_vec(&config_json)
+        .map_err(|e| LightrError::InvalidManifest(format!("config serialize error: {e}")))?;
+    let config_digest_hex = sha256_hex_of(&config_bytes);
+    let config_size = config_bytes.len() as u64;
+
+    // d. Build the OCI image manifest JSON.
+    let image_manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": format!("sha256:{config_digest_hex}"),
+            "size": config_size
+        },
+        "layers": [{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": format!("sha256:{layer_digest_hex}"),
+            "size": layer_size
+        }]
+    });
+    let image_manifest_bytes = serde_json::to_vec(&image_manifest)
+        .map_err(|e| LightrError::InvalidManifest(format!("manifest serialize error: {e}")))?;
+    let manifest_digest_hex = sha256_hex_of(&image_manifest_bytes);
+
+    // e. Auth: PUSH scope for docker.io; Basic-from-config elsewhere.
+    let creds = read_creds_for_registry(&registry);
+    let auth_header: Option<String> = if registry == "registry-1.docker.io" {
+        let token = fetch_docker_token(&agent, &repo, creds.as_ref(), "push,pull")?;
+        Some(format!("Bearer {token}"))
+    } else {
+        creds.as_ref().map(|c| format!("Basic {}", c.b64))
+    };
+    let auth_ref = auth_header.as_deref();
+
+    let repo_ref = format!("{registry}/{repo}");
+
+    // g. Upload config blob, then layer blob (HEAD-skip → POST → monolithic PUT).
+    upload_blob_from_bytes(
+        &agent,
+        scheme,
+        &registry,
+        &repo,
+        auth_ref,
+        &config_digest_hex,
+        &config_bytes,
+        &repo_ref,
+    )?;
+    upload_blob_from_file(
+        &agent,
+        scheme,
+        &registry,
+        &repo,
+        auth_ref,
+        &layer_digest_hex,
+        &layer_path,
+        layer_size,
+        &repo_ref,
+    )?;
+
+    // PUT the manifest under <tag>.
+    let manifest_url = format!("{scheme}{registry}/v2/{repo}/manifests/{tag}");
+    retry_request(
+        || {
+            let mut req = agent
+                .put(&manifest_url)
+                .set("Content-Type", "application/vnd.oci.image.manifest.v1+json");
+            if let Some(h) = auth_ref {
+                req = req.set("Authorization", h);
+            }
+            req.send_bytes(&image_manifest_bytes)
+        },
+        &repo_ref,
+    )?;
+
+    // h. Return the report.
+    Ok(PushReport {
+        target: format!("{registry}/{repo}:{tag}"),
+        manifest_digest: format!("sha256:{manifest_digest_hex}"),
+        layers: 1,
+        size: layer_size,
+    })
+}
+
+/// Assemble the tree into a gzipped tar at `dest`, streaming so neither the
+/// uncompressed nor the compressed layer is fully buffered in RAM. Computes the
+/// sha256 of the uncompressed tar (the OCI `diff_id`) AND of the gzipped tar
+/// (the layer digest) on the fly.
+///
+/// Returns `(layer_digest_hex, diff_id_hex, gzipped_size_bytes)`.
+///
+/// `File` bytes are read from the CAS via `store.get_bytes`; `Symlink` and `Dir`
+/// entries are emitted as the corresponding tar entry types.
+fn build_layer_tar_gz(
+    tree: &Manifest,
+    store: &Store,
+    dest: &Path,
+) -> Result<(String, String, u64)> {
+    /// A `Write` that tees bytes into a sha256 hasher AND an inner writer,
+    /// counting the total written. Used twice: once around the gzip output
+    /// (→ layer digest + size) and once between the tar and the gzip encoder
+    /// (→ diff_id over the uncompressed tar).
+    struct HashingWriter<W: Write> {
+        inner: W,
+        hasher: Sha256,
+        count: u64,
+    }
+    impl<W: Write> Write for HashingWriter<W> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let n = self.inner.write(buf)?;
+            self.hasher.update(&buf[..n]);
+            self.count += n as u64;
+            Ok(n)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    let file = fs::File::create(dest).map_err(LightrError::Io)?;
+    // Outer tee: hashes the GZIPPED bytes (layer digest) as they hit the file.
+    let gz_hasher = HashingWriter {
+        inner: io::BufWriter::new(file),
+        hasher: Sha256::new(),
+        count: 0,
+    };
+    let encoder = GzEncoder::new(gz_hasher, Compression::default());
+    // Inner tee: hashes the UNCOMPRESSED tar bytes (diff_id) before gzip.
+    let diff_hasher = HashingWriter {
+        inner: encoder,
+        hasher: Sha256::new(),
+        count: 0,
+    };
+    let mut builder = tar::Builder::new(diff_hasher);
+
+    for entry in &tree.entries {
+        match entry {
+            Entry::Dir { path } => {
+                let mut header = tar::Header::new_gnu();
+                header
+                    .set_path(path)
+                    .map_err(|e| LightrError::InvalidManifest(format!("bad dir path: {e}")))?;
+                header.set_mode(0o755);
+                header.set_size(0);
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_cksum();
+                builder
+                    .append(&header, io::empty())
+                    .map_err(LightrError::Io)?;
+            }
+            Entry::Symlink { path, target } => {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(0);
+                header.set_mode(0o777);
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_link_name(target).map_err(|e| {
+                    LightrError::InvalidManifest(format!("bad symlink target: {e}"))
+                })?;
+                builder
+                    .append_data(&mut header, path, io::empty())
+                    .map_err(LightrError::Io)?;
+            }
+            Entry::File {
+                path,
+                mode,
+                size,
+                digest,
+            } => {
+                let data = store.get_bytes(digest)?;
+                let mut header = tar::Header::new_gnu();
+                header.set_mode(*mode);
+                header.set_size(*size);
+                header.set_entry_type(tar::EntryType::Regular);
+                builder
+                    .append_data(&mut header, path, data.as_slice())
+                    .map_err(LightrError::Io)?;
+            }
+        }
+    }
+
+    // Finish the tar → flush into gzip; recover the diff_id hasher/count.
+    let diff_hasher = builder.into_inner().map_err(LightrError::Io)?;
+    let diff_id_hex = hasher_to_hex(diff_hasher.hasher.clone());
+    let encoder = diff_hasher.inner;
+    // Finish gzip → recover the outer (gzipped) hasher + byte count.
+    let gz_hasher = encoder.finish().map_err(LightrError::Io)?;
+    let layer_size = gz_hasher.count;
+    gz_hasher
+        .inner
+        .into_inner()
+        .map_err(|e| LightrError::Io(io::Error::other(e.to_string())))?
+        .sync_all()
+        .map_err(LightrError::Io)?;
+    let layer_digest_hex = hasher_to_hex(gz_hasher.hasher);
+
+    Ok((layer_digest_hex, diff_id_hex, layer_size))
+}
+
+/// Finalize a sha256 hasher into a lowercase hex string.
+fn hasher_to_hex(hasher: Sha256) -> String {
+    let bytes = hasher.finalize();
+    let mut s = String::with_capacity(64);
+    for b in bytes.iter() {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// HEAD the blob; if present (200) return `true` (caller skips upload).
+fn blob_exists(
+    agent: &ureq::Agent,
+    scheme: &str,
+    registry: &str,
+    repo: &str,
+    auth: Option<&str>,
+    digest_hex: &str,
+    repo_ref: &str,
+) -> Result<bool> {
+    let url = format!("{scheme}{registry}/v2/{repo}/blobs/sha256:{digest_hex}");
+    // A 404 here is the normal "not present" answer — map it to Ok(false)
+    // rather than letting it bubble up as a Registry error.
+    let result = retry_request(
+        || {
+            let mut req = agent.head(&url);
+            if let Some(h) = auth {
+                req = req.set("Authorization", h);
+            }
+            req.call()
+        },
+        repo_ref,
+    );
+    match result {
+        Ok(_) => Ok(true),
+        Err(LightrError::Registry { status: 404, .. }) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Start a monolithic blob upload: `POST /blobs/uploads/` → 202 + `Location`.
+fn begin_blob_upload(
+    agent: &ureq::Agent,
+    scheme: &str,
+    registry: &str,
+    repo: &str,
+    auth: Option<&str>,
+    repo_ref: &str,
+) -> Result<String> {
+    let url = format!("{scheme}{registry}/v2/{repo}/blobs/uploads/");
+    let resp = retry_request(
+        || {
+            let mut req = agent.post(&url).set("Content-Length", "0");
+            if let Some(h) = auth {
+                req = req.set("Authorization", h);
+            }
+            req.call()
+        },
+        repo_ref,
+    )?;
+    resp.header("Location")
+        .map(|s| s.to_string())
+        .ok_or_else(|| LightrError::Registry {
+            status: resp.status(),
+            msg: "blob upload POST returned no Location header".to_string(),
+        })
+}
+
+/// Append `digest=sha256:<hex>` to an upload `Location`, honoring an existing
+/// query string (`?` vs `&`). The `Location` may be absolute or registry-relative.
+fn upload_put_url(scheme: &str, registry: &str, location: &str, digest_hex: &str) -> String {
+    let base = if location.starts_with("http://") || location.starts_with("https://") {
+        location.to_string()
+    } else if let Some(rest) = location.strip_prefix('/') {
+        format!("{scheme}{registry}/{rest}")
+    } else {
+        format!("{scheme}{registry}/{location}")
+    };
+    let sep = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{sep}digest=sha256:{digest_hex}")
+}
+
+/// Upload an in-memory blob: HEAD-skip if present, else POST → monolithic PUT.
+#[allow(clippy::too_many_arguments)]
+fn upload_blob_from_bytes(
+    agent: &ureq::Agent,
+    scheme: &str,
+    registry: &str,
+    repo: &str,
+    auth: Option<&str>,
+    digest_hex: &str,
+    data: &[u8],
+    repo_ref: &str,
+) -> Result<()> {
+    if blob_exists(agent, scheme, registry, repo, auth, digest_hex, repo_ref)? {
+        return Ok(());
+    }
+    let location = begin_blob_upload(agent, scheme, registry, repo, auth, repo_ref)?;
+    let put_url = upload_put_url(scheme, registry, &location, digest_hex);
+    retry_request(
+        || {
+            let mut req = agent
+                .put(&put_url)
+                .set("Content-Type", "application/octet-stream");
+            if let Some(h) = auth {
+                req = req.set("Authorization", h);
+            }
+            req.send_bytes(data)
+        },
+        repo_ref,
+    )?;
+    Ok(())
+}
+
+/// Upload a blob streamed from a file: HEAD-skip if present, else POST →
+/// monolithic PUT with the file as the request body (RAM-bounded).
+#[allow(clippy::too_many_arguments)]
+fn upload_blob_from_file(
+    agent: &ureq::Agent,
+    scheme: &str,
+    registry: &str,
+    repo: &str,
+    auth: Option<&str>,
+    digest_hex: &str,
+    path: &Path,
+    size: u64,
+    repo_ref: &str,
+) -> Result<()> {
+    if blob_exists(agent, scheme, registry, repo, auth, digest_hex, repo_ref)? {
+        return Ok(());
+    }
+    let location = begin_blob_upload(agent, scheme, registry, repo, auth, repo_ref)?;
+    let put_url = upload_put_url(scheme, registry, &location, digest_hex);
+    retry_request(
+        || {
+            // Re-open the file per attempt so a retry restarts from byte 0.
+            let file = fs::File::open(path)?;
+            let mut req = agent
+                .put(&put_url)
+                .set("Content-Type", "application/octet-stream")
+                .set("Content-Length", &size.to_string());
+            if let Some(h) = auth {
+                req = req.set("Authorization", h);
+            }
+            req.send(file)
+        },
+        repo_ref,
+    )?;
+    Ok(())
+}
+
 /// Parse an image reference into `(registry, repo, tag)`.
 ///
 /// FIX 6: reject empty or structurally invalid refs → `LightrError::InvalidRef`
@@ -1357,9 +1802,10 @@ fn fetch_docker_token(
     agent: &ureq::Agent,
     repo: &str,
     creds: Option<&RegistryCreds>,
+    scope: &str,
 ) -> Result<String> {
     let url = format!(
-        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull"
+        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:{scope}"
     );
 
     let resp = retry_request(
@@ -2593,5 +3039,142 @@ mod tests {
         let hydrated = fs::read(&big).unwrap();
         assert_eq!(hydrated[0], first_byte, "first byte must match");
         assert_eq!(hydrated[FILE_SIZE - 1], last_byte, "last byte must match");
+    }
+
+    // ── WP-PUSH: registry_scheme ──────────────────────────────────────────────
+
+    #[test]
+    fn test_registry_scheme_localhost_is_http() {
+        assert_eq!(registry_scheme("localhost"), "http://");
+        assert_eq!(registry_scheme("localhost:5000"), "http://");
+        assert_eq!(registry_scheme("127.0.0.1"), "http://");
+        assert_eq!(registry_scheme("127.0.0.1:5000"), "http://");
+    }
+
+    #[test]
+    fn test_registry_scheme_remote_is_https() {
+        assert_eq!(registry_scheme("registry-1.docker.io"), "https://");
+        assert_eq!(registry_scheme("ghcr.io"), "https://");
+        assert_eq!(registry_scheme("myregistry.example.com:5000"), "https://");
+    }
+
+    // ── WP-PUSH: upload_put_url ────────────────────────────────────────────────
+
+    #[test]
+    fn test_upload_put_url_appends_digest() {
+        // Absolute Location with existing query → use '&'.
+        let u = upload_put_url(
+            "https://",
+            "ghcr.io",
+            "https://ghcr.io/v2/o/r/blobs/uploads/abc?state=xyz",
+            "deadbeef",
+        );
+        assert_eq!(
+            u,
+            "https://ghcr.io/v2/o/r/blobs/uploads/abc?state=xyz&digest=sha256:deadbeef"
+        );
+
+        // Absolute Location with no query → use '?'.
+        let u = upload_put_url(
+            "https://",
+            "ghcr.io",
+            "https://ghcr.io/v2/o/r/blobs/uploads/abc",
+            "deadbeef",
+        );
+        assert_eq!(
+            u,
+            "https://ghcr.io/v2/o/r/blobs/uploads/abc?digest=sha256:deadbeef"
+        );
+
+        // Registry-relative Location (leading slash) → prefix scheme+registry.
+        let u = upload_put_url(
+            "http://",
+            "localhost:5000",
+            "/v2/o/r/blobs/uploads/abc?x=1",
+            "cafe",
+        );
+        assert_eq!(
+            u,
+            "http://localhost:5000/v2/o/r/blobs/uploads/abc?x=1&digest=sha256:cafe"
+        );
+    }
+
+    // ── WP-PUSH: build_layer_tar_gz — well-formed + stable digests ─────────────
+
+    /// Synthesize a layer from a hydrated tree and assert that the layer digest,
+    /// diff_id, and size are well-formed (64-hex) and STABLE across two runs of
+    /// the same tree (gzip is deterministic at a fixed compression level here).
+    #[test]
+    fn test_build_layer_tar_gz_stable_and_wellformed() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let (_home, store) = tmp_store_and_home();
+
+        // Snapshot a small fixture tree into the store, then read its Manifest.
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("etc")).unwrap();
+        fs::write(src.join("etc/conf"), b"k=v\n").unwrap();
+        fs::write(src.join("hello"), b"hi").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(src.join("hello"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let snap = lightr_index::snapshot(&src, &store, "@t/push-fix").unwrap();
+        let manifest_bytes = store.get_bytes(&snap.root).unwrap();
+        let tree = Manifest::decode(&manifest_bytes).unwrap();
+
+        let p1 = tmp.path().join("l1.tar.gz");
+        let p2 = tmp.path().join("l2.tar.gz");
+        let (layer1, diff1, size1) = build_layer_tar_gz(&tree, &store, &p1).unwrap();
+        let (layer2, diff2, size2) = build_layer_tar_gz(&tree, &store, &p2).unwrap();
+
+        // Well-formed: 64-char lowercase hex.
+        for h in [&layer1, &diff1] {
+            assert_eq!(h.len(), 64, "digest must be 64 hex chars: {h}");
+            assert!(
+                h.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+                "digest must be lowercase hex: {h}"
+            );
+        }
+        // diff_id (uncompressed) must differ from the gzipped layer digest.
+        assert_ne!(layer1, diff1, "layer digest must differ from diff_id");
+        // Stable across runs of the same tree.
+        assert_eq!(layer1, layer2, "layer digest must be stable");
+        assert_eq!(diff1, diff2, "diff_id must be stable");
+        assert_eq!(size1, size2, "gzipped size must be stable");
+
+        // The on-disk gzipped file size matches the reported size, and the
+        // digest is the real sha256 of those bytes.
+        let on_disk = fs::read(&p1).unwrap();
+        assert_eq!(on_disk.len() as u64, size1, "reported size matches file");
+        assert_eq!(
+            sha256_hex_of(&on_disk),
+            layer1,
+            "layer digest must be sha256 of the gzipped bytes"
+        );
+
+        // The diff_id must equal the sha256 of the UNCOMPRESSED tar.
+        let mut gz = GzDecoder::new(&on_disk[..]);
+        let mut raw = Vec::new();
+        gz.read_to_end(&mut raw).unwrap();
+        assert_eq!(
+            sha256_hex_of(&raw),
+            diff1,
+            "diff_id must be sha256 of the uncompressed tar"
+        );
+    }
+
+    /// push of an unknown ref → RefNotFound (fail-closed, no network touched).
+    #[test]
+    fn test_push_unknown_ref_fails_closed() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_home, store) = tmp_store_and_home();
+        let err = push("@t/does-not-exist", "localhost:5000/x:latest", &store).unwrap_err();
+        assert!(
+            matches!(err, LightrError::RefNotFound(_)),
+            "unknown ref must be RefNotFound; got: {err:?}"
+        );
     }
 }

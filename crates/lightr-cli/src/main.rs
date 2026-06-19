@@ -197,6 +197,13 @@ pub enum OciCmd {
         #[arg(long)]
         name: String,
     },
+    /// Push a stored ref to a registry as a synthesized single-layer OCI image
+    Push {
+        /// Stored ref to push (e.g. @me/img)
+        store_ref: String,
+        /// Target registry reference (e.g. ghcr.io/owner/repo:tag)
+        target: String,
+    },
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -496,6 +503,7 @@ fn main() {
         Cmd::Oci { subcmd } => match subcmd {
             OciCmd::Import { .. } => "oci-import",
             OciCmd::Pull { .. } => "oci-pull",
+            OciCmd::Push { .. } => "oci-push",
         },
         Cmd::Bench { .. } => "bench",
         Cmd::Ps { .. } => "ps",
@@ -590,6 +598,9 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
         Cmd::Oci { subcmd } => match subcmd {
             OciCmd::Import { path, name } => handlers::oci::import(&path, &name, json),
             OciCmd::Pull { image, name } => handlers::oci::pull_image(&image, &name, json),
+            OciCmd::Push { store_ref, target } => {
+                handlers::oci::push_image(&store_ref, &target, json)
+            }
         },
         Cmd::Bench { vs_docker, check } => handlers::bench::run(vs_docker, check, json),
         Cmd::Ps { json: ps_json } => handlers::ps::run(ps_json),
@@ -1330,6 +1341,41 @@ mod tests {
     #[test]
     fn oci_pull_json_uses_global_flag() {
         let cli = parse(&["--json", "oci", "pull", "alpine", "--name", "a"]);
+        assert!(cli.json);
+    }
+
+    // ── oci push ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn oci_push_parses() {
+        let cli = parse(&["oci", "push", "@me/img", "ghcr.io/owner/repo:tag"]);
+        match &cli.cmd {
+            super::Cmd::Oci { subcmd } => match subcmd {
+                super::OciCmd::Push { store_ref, target } => {
+                    assert_eq!(store_ref, "@me/img");
+                    assert_eq!(target, "ghcr.io/owner/repo:tag");
+                }
+                _ => panic!("expected Push"),
+            },
+            _ => panic!("expected Oci cmd"),
+        }
+    }
+
+    #[test]
+    fn oci_push_requires_store_ref_and_target() {
+        assert!(try_parse(&["oci", "push"]).is_err());
+        assert!(try_parse(&["oci", "push", "@me/img"]).is_err());
+    }
+
+    #[test]
+    fn oci_push_json_uses_global_flag() {
+        let cli = parse(&[
+            "--json",
+            "oci",
+            "push",
+            "@me/img",
+            "localhost:5000/x:latest",
+        ]);
         assert!(cli.json);
     }
 

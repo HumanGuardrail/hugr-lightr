@@ -961,6 +961,166 @@ fn a21_liveness_lane() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// A22 — oci push: single-layer OCI synthesis (offline) + optional round-trip
+//
+// Offline lane (always): snapshot a fixture tree under a ref, then `oci push`
+// it at an UNROUTABLE registry port. The push must
+//   * resolve the ref and SYNTHESIZE the layer/config/manifest BEFORE any
+//     upload (proving the imageless synthesis path runs end-to-end), then
+//   * fail at the network stage with exit 1 (never exit 2 — a valid store-ref
+//     and a valid target ref are not usage errors) and a non-empty diagnostic.
+//   * A bad store-ref name (uppercase) must exit 2 (usage).
+//
+// LIGHTR_REG_TESTS=1 lane: push to $LIGHTR_PUSH_TARGET (e.g. a local
+// `registry:2` at localhost:5000/acc/test:latest), then assert exit 0 and a
+// well-formed `sha256:<64hex>` manifest digest in stdout. Skipped if unset,
+// mirroring the LIGHTR_NET_TESTS gating style above.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a22_push_synthesis_offline() {
+    let reg_tests = std::env::var("LIGHTR_REG_TESTS")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    if reg_tests {
+        eprintln!("[A22] LIGHTR_REG_TESTS=1: running real push round-trip lane");
+        a22_real_push_lane();
+    } else {
+        eprintln!("[A22] LIGHTR_REG_TESTS not set: running offline-synthesis lane");
+        a22_offline_lane();
+    }
+}
+
+fn a22_offline_lane() {
+    let home = TempDir::new().unwrap();
+
+    // Build a fixture tree and snapshot it under a ref.
+    let src = TempDir::new().unwrap();
+    fs::create_dir_all(src.path().join("etc")).unwrap();
+    fs::write(src.path().join("etc/conf"), b"k=v\n").unwrap();
+    fs::write(src.path().join("hello"), b"hi").unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(src.path().join("hello"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    lightr_cmd(home.path())
+        .args([
+            "snapshot",
+            "--dir",
+            src.path().to_str().unwrap(),
+            "--name",
+            "@t/pushme",
+        ])
+        .assert()
+        .success();
+
+    // 1) Bad store-ref name → exit 2 (usage), no network.
+    let bad = lightr_cmd(home.path())
+        .args(["oci", "push", "INVALID", "localhost:1/x:latest"])
+        .output()
+        .expect("oci push must spawn");
+    assert_eq!(
+        bad.status.code().unwrap_or(-1),
+        2,
+        "bad store-ref name must exit 2; stderr: {}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+
+    // 2) Valid ref + valid target at an unroutable port → synthesis runs, then
+    //    the upload fails: exit 1 (NEVER 2), non-empty diagnostic, bounded time.
+    let start = Instant::now();
+    let out = lightr_cmd(home.path())
+        .args(["oci", "push", "@t/pushme", "localhost:1/acc/test:latest"])
+        .timeout(Duration::from_secs(90))
+        .output()
+        .expect("oci push must spawn");
+    let elapsed = start.elapsed();
+    let code = out.status.code().unwrap_or(-1);
+
+    eprintln!(
+        "[A22 offline] exit={} elapsed={:.1}s stderr={}",
+        code,
+        elapsed.as_secs_f32(),
+        String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .next()
+            .unwrap_or("(empty)")
+    );
+
+    assert_ne!(
+        code,
+        2,
+        "valid store-ref + valid target must NEVER exit 2 (not a usage error); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        code,
+        1,
+        "push to an unroutable registry must exit 1 (network error after synthesis); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.stderr.is_empty(),
+        "push exit 1 must produce a non-empty diagnostic on stderr"
+    );
+}
+
+fn a22_real_push_lane() {
+    let home = TempDir::new().unwrap();
+    let target = std::env::var("LIGHTR_PUSH_TARGET")
+        .unwrap_or_else(|_| "localhost:5000/acc/test:latest".to_string());
+
+    // Build + snapshot a fixture tree.
+    let src = TempDir::new().unwrap();
+    fs::create_dir_all(src.path().join("bin")).unwrap();
+    fs::write(src.path().join("bin/tool"), b"#!/bin/sh\necho hi\n").unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(
+        src.path().join("bin/tool"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    lightr_cmd(home.path())
+        .args([
+            "snapshot",
+            "--dir",
+            src.path().to_str().unwrap(),
+            "--name",
+            "@t/pushreal",
+        ])
+        .assert()
+        .success();
+
+    let out = lightr_cmd(home.path())
+        .args(["--json", "oci", "push", "@t/pushreal", &target])
+        .output()
+        .expect("oci push must spawn");
+    assert_eq!(
+        out.status.code().unwrap_or(-1),
+        0,
+        "real push must exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Manifest digest must be a well-formed sha256:<64hex>.
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("push --json must emit valid JSON");
+    let digest = v["manifest_digest"]
+        .as_str()
+        .expect("manifest_digest must be a string");
+    let hex = digest
+        .strip_prefix("sha256:")
+        .expect("manifest_digest must start with sha256:");
+    assert_eq!(hex.len(), 64, "manifest digest must be 64 hex chars: {hex}");
+    assert!(
+        hex.chars().all(|c| c.is_ascii_hexdigit()),
+        "manifest digest must be hex: {hex}"
+    );
+    eprintln!("[A22 real-push] pushed {target} → {digest}");
+}
+
 fn a21_real_pull_lane() {
     let home = TempDir::new().unwrap();
 
