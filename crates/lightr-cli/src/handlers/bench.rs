@@ -12,10 +12,11 @@
 //!   B3′ hydrate:             5000 ms
 //!   B5a snapshot cold:       2500 ms
 //!   B5b snapshot warm:       500 ms
+//!   B12 microwave-floor:     10 000 ms (vz cold run; SKIP when vz unavailable)
 //!
 //! --check: exit 1 if any over budget.
 //! --vs-docker: compare docker version overhead (2s timeout); skip if absent.
-//! --json: array of {indicator,median_ms,budget_ms,pass}.
+//! --json: array of {indicator,median_ms,budget_ms,pass} or {indicator,skip,reason}.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use tar;
 
+use lightr_engine::{probe as engine_probe, EngineKind};
 use lightr_index::{hydrate, snapshot, status};
 use lightr_store::Store;
 use serde::Serialize;
@@ -48,6 +50,10 @@ const BUDGET_OCI_IMPORT_MS: u64 = 2_000;
 const BUDGET_BUILD_COLD_MS: u64 = 5_000;
 const BUDGET_BUILD_CACHED_MS: u64 = 2_000;
 const BUDGET_COMPOSE_UP_MS: u64 = 3_000;
+// F-603 microwave-floor: cold vz run budget. Generous: boot + guest exec + teardown.
+// This row only runs when vz + linux pack are available; when absent it is a SKIP
+// (never measured, never fails --check).
+const BUDGET_MICROWAVE_FLOOR_MS: u64 = 10_000;
 
 /// Spawn-measured indicators get ×3 margin in --check (debug/CI noise).
 const SPAWN_MARGIN: u64 = 3;
@@ -126,12 +132,46 @@ impl Row {
     }
 }
 
+/// A bench row that was deliberately skipped because a prerequisite was absent
+/// (e.g. vz engine + linux pack not available). A SKIP row:
+///   - never fails --check (absence of a prerequisite is not a budget overflow),
+///   - appears in --json as `{"indicator":…,"skip":true,"reason":…}`,
+///   - appears in the human table as "SKIP (<reason>)".
+struct SkipRow {
+    indicator: &'static str,
+    reason: String,
+}
+
+/// The union of a measured row and a skipped row, so both can live in one
+/// `Vec` and be iterated uniformly for output.
+enum BenchRow {
+    Measured(Row),
+    Skipped(SkipRow),
+}
+
+impl BenchRow {
+    /// True iff this is a measured row that exceeded its budget.
+    /// A SKIP row is never a failure.
+    fn is_fail(&self) -> bool {
+        match self {
+            BenchRow::Measured(r) => !r.pass,
+            BenchRow::Skipped(_) => false,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct RowJson {
     indicator: String,
-    median_ms: f64,
-    budget_ms: u64,
-    pass: bool,
+    skip: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    median_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pass: Option<bool>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -156,11 +196,16 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
     let store_root = lightr_home.join("store");
     let open_store = || Store::open(&store_root).expect("open store");
 
-    let mut rows: Vec<Row> = Vec::new();
+    let mut rows: Vec<BenchRow> = Vec::new();
 
     // ── B1: version overhead (spawn self --version) ────────────────────────
     let b1 = median_of(|| time_spawn(&["--version"]), 5);
-    rows.push(Row::new("B1 version", b1, BUDGET_VERSION_MS, true));
+    rows.push(BenchRow::Measured(Row::new(
+        "B1 version",
+        b1,
+        BUDGET_VERSION_MS,
+        true,
+    )));
 
     // ── B5a: snapshot cold ────────────────────────────────────────────────
     // Cold = fixture not yet in store, no warm index.
@@ -191,12 +236,12 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
         samples.sort();
         samples[2]
     };
-    rows.push(Row::new(
+    rows.push(BenchRow::Measured(Row::new(
         "B5a snapshot-cold",
         snap_cold_dur,
         BUDGET_SNAPSHOT_COLD_MS,
         false,
-    ));
+    )));
 
     // ── B5b: snapshot warm ────────────────────────────────────────────────
     // warm = index populated from previous snapshot above.
@@ -214,12 +259,12 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
             5,
         )
     };
-    rows.push(Row::new(
+    rows.push(BenchRow::Measured(Row::new(
         "B5b snapshot-warm",
         snap_warm_dur,
         BUDGET_SNAPSHOT_WARM_MS,
         false,
-    ));
+    )));
 
     // ── B6: status warm-index ─────────────────────────────────────────────
     let status_warm_dur = {
@@ -236,12 +281,12 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
             5,
         )
     };
-    rows.push(Row::new(
+    rows.push(BenchRow::Measured(Row::new(
         "B6 status-warm",
         status_warm_dur,
         BUDGET_STATUS_WARM_MS,
         false,
-    ));
+    )));
 
     // ── B3′: hydrate ──────────────────────────────────────────────────────
     // Ensure objects are in store first.
@@ -271,12 +316,12 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
         samples.sort();
         samples[2]
     };
-    rows.push(Row::new(
+    rows.push(BenchRow::Measured(Row::new(
         "B3' hydrate",
         hydrate_dur,
         BUDGET_HYDRATE_MS,
         false,
-    ));
+    )));
 
     // ── B2/B4: run memo MISS then HIT (echo fixture path) ─────────────────
     // We use spawn self to measure overhead; separately measure MISS vs HIT
@@ -305,7 +350,12 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
         },
         5,
     );
-    rows.push(Row::new("B4 replay/miss", miss_dur, BUDGET_REPLAY_MS, true));
+    rows.push(BenchRow::Measured(Row::new(
+        "B4 replay/miss",
+        miss_dur,
+        BUDGET_REPLAY_MS,
+        true,
+    )));
 
     // HIT (second run, AC populated).
     let hit_dur = median_of(
@@ -321,7 +371,12 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
         },
         5,
     );
-    rows.push(Row::new("B2 hit-run", hit_dur, BUDGET_HIT_RUN_MS, true));
+    rows.push(BenchRow::Measured(Row::new(
+        "B2 hit-run",
+        hit_dur,
+        BUDGET_HIT_RUN_MS,
+        true,
+    )));
 
     // ── B9: oci-import (tiny in-mem docker-save tar) ──────────────────────
     //
@@ -347,12 +402,12 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
             },
             5,
         );
-        rows.push(Row::new(
+        rows.push(BenchRow::Measured(Row::new(
             "B9 oci-import",
             b9_dur,
             BUDGET_OCI_IMPORT_MS,
             true,
-        ));
+        )));
     }
 
     // ── B10a/B10: build cold then build cached ────────────────────────────
@@ -377,12 +432,12 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
                 .expect("spawn build cold");
             t.elapsed()
         };
-        rows.push(Row::new(
+        rows.push(BenchRow::Measured(Row::new(
             "B10a build-cold",
             b10a_dur,
             BUDGET_BUILD_COLD_MS,
             true,
-        ));
+        )));
 
         // B10: cached build — reuse same home so AC is warm
         let b10_home = tempfile::tempdir().expect("b10 home tempdir");
@@ -408,12 +463,12 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
             },
             3,
         );
-        rows.push(Row::new(
+        rows.push(BenchRow::Measured(Row::new(
             "B10 build-cached",
             b10_dur,
             BUDGET_BUILD_CACHED_MS,
             true,
-        ));
+        )));
     }
 
     // ── B11: compose-up (1-service, high port) ────────────────────────────
@@ -447,28 +502,82 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
                 .ok();
         }
 
-        rows.push(Row::new(
+        rows.push(BenchRow::Measured(Row::new(
             "B11 compose-up",
             b11_dur,
             BUDGET_COMPOSE_UP_MS,
             true,
-        ));
+        )));
+    }
+
+    // ── B12: microwave-floor (cold vz container run) ──────────────────────
+    //
+    // Proves lightr runs on a constrained 1-core/512MB/POSIX-ish floor via the vz
+    // engine. The measurement is the wall-clock of a cold `lightr run --engine vz
+    // -- /bin/echo hi` (spawn-measured, generous 10 s budget).
+    //
+    // TENSE LAW: we NEVER fabricate a number. Vz requires macOS + the 'vz' build
+    // feature + a linux pack on disk. When ANY of those prerequisites is absent
+    // (the common case incl. all CI), B12 is a SKIP row — never a measured row with
+    // a made-up duration. A SKIP never trips --check.
+    {
+        let vz_caps = engine_probe(EngineKind::Vz);
+        if vz_caps.available {
+            // Probe confirmed: vz engine + linux pack are present. Measure one cold
+            // run (no warmup — we want the true cold wall-clock).
+            let exe = std::env::current_exe().expect("current_exe");
+            let b12_home = tempfile::tempdir().expect("b12 home tempdir");
+            let b12_dur = {
+                let t = Instant::now();
+                let _out = Command::new(&exe)
+                    .env("LIGHTR_HOME", b12_home.path())
+                    .args(["run", "--engine", "vz", "--", "/bin/echo", "hi"])
+                    .output()
+                    .expect("spawn b12 vz run");
+                t.elapsed()
+            };
+            rows.push(BenchRow::Measured(Row::new(
+                "B12 microwave-floor",
+                b12_dur,
+                BUDGET_MICROWAVE_FLOOR_MS,
+                true,
+            )));
+        } else {
+            // Vz not available (no macOS+feature+pack) — emit a SKIP row.
+            // This is the expected path in CI and on any non-vz-equipped machine.
+            rows.push(BenchRow::Skipped(SkipRow {
+                indicator: "B12 microwave-floor",
+                reason: vz_caps.detail,
+            }));
+        }
     }
 
     // ── --vs-docker ────────────────────────────────────────────────────────
     let docker_line: Option<String> = if vs_docker { check_docker() } else { None };
 
     // ── Output ─────────────────────────────────────────────────────────────
-    let any_fail = rows.iter().any(|r| !r.pass);
+    let any_fail = rows.iter().any(|r| r.is_fail());
 
     if json {
         let arr: Vec<RowJson> = rows
             .iter()
-            .map(|r| RowJson {
-                indicator: r.indicator.to_string(),
-                median_ms: r.median_ms,
-                budget_ms: r.budget_ms,
-                pass: r.pass,
+            .map(|row| match row {
+                BenchRow::Measured(r) => RowJson {
+                    indicator: r.indicator.to_string(),
+                    skip: false,
+                    reason: None,
+                    median_ms: Some(r.median_ms),
+                    budget_ms: Some(r.budget_ms),
+                    pass: Some(r.pass),
+                },
+                BenchRow::Skipped(s) => RowJson {
+                    indicator: s.indicator.to_string(),
+                    skip: true,
+                    reason: Some(s.reason.clone()),
+                    median_ms: None,
+                    budget_ms: None,
+                    pass: None,
+                },
             })
             .collect();
         println!("{}", serde_json::to_string(&arr).expect("serialize bench"));
@@ -478,14 +587,21 @@ pub fn run(vs_docker: bool, check: bool, json: bool) -> i32 {
             "indicator", "median", "budget"
         );
         println!("{}", "-".repeat(58));
-        for r in &rows {
-            println!(
-                "{:<22}  {:>9.1}ms  {:>9}ms  {}",
-                r.indicator,
-                r.median_ms,
-                r.check_budget_ms,
-                if r.pass { "PASS" } else { "FAIL" }
-            );
+        for row in &rows {
+            match row {
+                BenchRow::Measured(r) => {
+                    println!(
+                        "{:<22}  {:>9.1}ms  {:>9}ms  {}",
+                        r.indicator,
+                        r.median_ms,
+                        r.check_budget_ms,
+                        if r.pass { "PASS" } else { "FAIL" }
+                    );
+                }
+                BenchRow::Skipped(s) => {
+                    println!("{:<22}  SKIP  {}", s.indicator, s.reason);
+                }
+            }
         }
         if let Some(line) = &docker_line {
             println!("{line}");
@@ -673,4 +789,78 @@ fn which_docker() -> Option<PathBuf> {
             }
         })
     })
+}
+
+#[cfg(test)]
+mod bench_b12_tests {
+    use super::*;
+
+    // B12 always appears in --json output (as a measured row or a SKIP row),
+    // regardless of vz availability.
+    #[test]
+    fn b12_appears_in_json_output() {
+        // Build a minimal BenchRow list that mirrors what run() would produce
+        // when vz is absent (the common case incl. CI).
+        let rows: Vec<BenchRow> = vec![BenchRow::Skipped(SkipRow {
+            indicator: "B12 microwave-floor",
+            reason: "vz engine requires macOS + the 'vz' build feature + a linux pack".to_string(),
+        })];
+        let arr: Vec<RowJson> = rows
+            .iter()
+            .map(|row| match row {
+                BenchRow::Measured(r) => RowJson {
+                    indicator: r.indicator.to_string(),
+                    skip: false,
+                    reason: None,
+                    median_ms: Some(r.median_ms),
+                    budget_ms: Some(r.budget_ms),
+                    pass: Some(r.pass),
+                },
+                BenchRow::Skipped(s) => RowJson {
+                    indicator: s.indicator.to_string(),
+                    skip: true,
+                    reason: Some(s.reason.clone()),
+                    median_ms: None,
+                    budget_ms: None,
+                    pass: None,
+                },
+            })
+            .collect();
+        let json_str = serde_json::to_string(&arr).expect("serialize");
+        // B12 must appear in the JSON output.
+        assert!(
+            json_str.contains("B12 microwave-floor"),
+            "B12 must appear in --json output: {json_str}"
+        );
+        // A SKIP row must carry skip:true and a reason, never a fabricated number.
+        let v: serde_json::Value = serde_json::from_str(&json_str).expect("parse json");
+        let row0 = &v[0];
+        assert_eq!(row0["skip"], true, "SKIP row must have skip:true");
+        assert!(
+            row0["reason"].is_string(),
+            "SKIP row must carry a reason: {row0}"
+        );
+        assert!(
+            row0["median_ms"].is_null(),
+            "SKIP row must NOT carry a fabricated median_ms: {row0}"
+        );
+    }
+
+    // A SKIP row must never trip --check (is_fail() == false).
+    #[test]
+    fn b12_skip_does_not_trip_check() {
+        let skip_row = BenchRow::Skipped(SkipRow {
+            indicator: "B12 microwave-floor",
+            reason: "vz not available".to_string(),
+        });
+        assert!(
+            !skip_row.is_fail(),
+            "a SKIP row must never be a --check failure"
+        );
+
+        // Also verify: any_fail is false when the only non-passing row is a SKIP.
+        let rows: Vec<BenchRow> = vec![skip_row];
+        let any_fail = rows.iter().any(|r| r.is_fail());
+        assert!(!any_fail, "SKIP-only rows must not trigger --check exit 1");
+    }
 }
