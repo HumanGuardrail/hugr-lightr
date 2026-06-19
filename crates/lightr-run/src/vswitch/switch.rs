@@ -9,6 +9,7 @@
 //! adds unit tests (crafted Ethernet + ARP frames), and REMOVES the `#![allow]`.
 
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 
 /// A switch port == a member's socket index in the [`super::VSwitch`].
 pub type PortId = usize;
@@ -70,6 +71,53 @@ pub fn forward(frame: &[u8], from: PortId, table: &mut MacTable) -> ForwardDecis
     ForwardDecision::Flood
 }
 
+/// If `frame` is an ARP request for `gateway_ip`, synthesize the ARP reply the
+/// switch must answer with, sourced from `gateway_mac`. The embedded gateway is a
+/// pure software endpoint (DHCP router + DNS server) with NO member port, so the
+/// switch itself must answer ARP for it — otherwise a guest can never resolve the
+/// nameserver's MAC and DNS-by-name (and any gateway-routed traffic) silently
+/// fails. Returns `None` for any non-matching frame. Pure (no I/O).
+pub fn arp_gateway_reply(
+    frame: &[u8],
+    gateway_ip: Ipv4Addr,
+    gateway_mac: [u8; 6],
+) -> Option<Vec<u8>> {
+    // Ethernet header (14) + ARP IPv4-over-Ethernet packet (28) = 42 bytes.
+    if frame.len() < 42 {
+        return None;
+    }
+    // EtherType ARP (0x0806).
+    if frame[12..14] != [0x08, 0x06] {
+        return None;
+    }
+    // htype=Ethernet(1), ptype=IPv4(0x0800), hlen=6, plen=4, opcode=request(1).
+    if frame[14..22] != [0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01] {
+        return None;
+    }
+    // Target protocol address (frame 38..42) must be the gateway IP.
+    let tpa: [u8; 4] = frame[38..42].try_into().ok()?;
+    if Ipv4Addr::from(tpa) != gateway_ip {
+        return None;
+    }
+    // Requester == the ARP sender: HW at 22..28, proto IP at 28..32.
+    let req_mac: [u8; 6] = frame[22..28].try_into().ok()?;
+    let req_ip: [u8; 4] = frame[28..32].try_into().ok()?;
+    let g_ip = gateway_ip.octets();
+
+    let mut r = Vec::with_capacity(42);
+    // Ethernet: dst = requester, src = gateway, EtherType ARP.
+    r.extend_from_slice(&req_mac);
+    r.extend_from_slice(&gateway_mac);
+    r.extend_from_slice(&[0x08, 0x06]);
+    // ARP reply: htype, ptype, hlen, plen, opcode=reply(2).
+    r.extend_from_slice(&[0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x02]);
+    r.extend_from_slice(&gateway_mac); // sender HW
+    r.extend_from_slice(&g_ip); // sender proto
+    r.extend_from_slice(&req_mac); // target HW
+    r.extend_from_slice(&req_ip); // target proto
+    Some(r)
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -97,6 +145,34 @@ mod tests {
     const MCAST: [u8; 6] = [0x01, 0x00, 0x5e, 0x00, 0x00, 0x01];
     const IPV4: [u8; 2] = [0x08, 0x00];
     const ARP: [u8; 2] = [0x08, 0x06];
+
+    fn arp_request(target_ip: [u8; 4]) -> Vec<u8> {
+        let mut arp = vec![0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01];
+        arp.extend_from_slice(&MAC_A); // sender HW
+        arp.extend_from_slice(&[10, 69, 81, 2]); // sender proto
+        arp.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // target HW (unknown)
+        arp.extend_from_slice(&target_ip); // target proto
+        make_frame(BCAST, MAC_A, ARP, &arp)
+    }
+
+    // ARP request for the gateway IP → well-formed reply from the gateway MAC;
+    // a request for a non-gateway IP → None (falls through to L2 flood).
+    #[test]
+    fn arp_request_for_gateway_gets_reply() {
+        let gw_ip = Ipv4Addr::new(10, 69, 81, 1);
+        let gw_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let reply = arp_gateway_reply(&arp_request([10, 69, 81, 1]), gw_ip, gw_mac)
+            .expect("gateway ARP must be answered");
+        assert_eq!(&reply[0..6], &MAC_A, "reply dst = requester");
+        assert_eq!(&reply[6..12], &gw_mac, "reply src = gateway MAC");
+        assert_eq!(&reply[12..14], &[0x08, 0x06], "ethertype ARP");
+        assert_eq!(&reply[20..22], &[0x00, 0x02], "opcode = reply");
+        assert_eq!(&reply[22..28], &gw_mac, "sender HW = gateway MAC");
+        assert_eq!(&reply[28..32], &[10, 69, 81, 1], "sender proto = gateway IP");
+        assert_eq!(&reply[32..38], &MAC_A, "target HW = requester");
+        // Non-gateway target is ignored.
+        assert!(arp_gateway_reply(&arp_request([10, 69, 81, 9]), gw_ip, gw_mac).is_none());
+    }
 
     // Test 1: broadcast destination → Flood.
     #[test]
