@@ -110,7 +110,7 @@ pub(super) fn encapsulate(
 }
 
 /// One's-complement sum over a 20-byte IPv4 header (checksum field assumed 0).
-fn ipv4_checksum(header: &[u8]) -> u16 {
+pub(super) fn ipv4_checksum(header: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     let mut i = 0;
     while i + 1 < header.len() {
