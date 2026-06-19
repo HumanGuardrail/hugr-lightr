@@ -595,6 +595,16 @@ pub struct RunInfo {
     /// healthcheck was configured for this run. `None` ⇒ no healthcheck (the
     /// common case). NOT part of the memo key.
     pub health: Option<crate::healthcheck::Health>,
+    /// WP-PS-ENRICH: the engine that ran this detached job ("native" or "vz").
+    /// Sourced from `SpecOnDisk::engine`; defaults to "native" for old run dirs
+    /// whose spec.json pre-dates the engine field (back-compat via serde default).
+    pub engine: String,
+    /// WP-PS-ENRICH: published host→container TCP port mappings. Empty for
+    /// runs with no `-p` flags. Sourced from `SpecOnDisk::ports`.
+    pub ports: Vec<(u16, u16)>,
+    /// WP-PS-ENRICH: the rootfs ref the vz engine booted, if any. `None` for
+    /// native runs. Sourced from `SpecOnDisk::rootfs_ref`.
+    pub rootfs_ref: Option<String>,
 }
 
 pub enum LogStream {
@@ -1676,6 +1686,9 @@ pub fn ps(store_home: &std::path::Path) -> Result<Vec<RunInfo>> {
             command: spec.command,
             created_at_unix: spec.created_at_unix,
             health,
+            engine: spec.engine,
+            ports: spec.ports,
+            rootfs_ref: spec.rootfs_ref,
         });
     }
 
@@ -3209,6 +3222,85 @@ mod tests {
         // Clean up the sleeper + supervisor.
         let _ = stop(&run_dir, 2);
         let _ = t.join();
+    }
+
+    // -----------------------------------------------------------------------
+    // ps_enrich_fields: ps() surfaces engine, ports, and rootfs_ref from
+    // SpecOnDisk (WP-PS-ENRICH). Verifies defaults (native / empty / None)
+    // and explicit values without spinning up a real supervisor.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ps_enrich_fields() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let (home, _env_guard) = isolated_home();
+        let home_path = home.path().to_path_buf();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+
+        // --- Case A: native run, no ports, no rootfs_ref ---
+        let id_a = format!("{nanos}-enrich-a");
+        let run_dir_a = home_path.join("run").join(&id_a);
+        fs::create_dir_all(&run_dir_a).unwrap();
+        let spec_a = SpecOnDisk {
+            cwd: cwd.to_string_lossy().into_owned(),
+            command: vec!["true".to_string()],
+            env_keys: vec![],
+            mounts: vec![],
+            detached: true,
+            created_at_unix: nanos / 1_000_000_000,
+            ports: vec![],
+            engine: "native".to_string(),
+            rootfs_ref: None,
+            env: vec![],
+        };
+        write_spec_json(&run_dir_a, &spec_a).unwrap();
+        // Write exited status so ps picks it up without a real supervisor.
+        fs::write(run_dir_a.join("status"), "exited 0").unwrap();
+
+        // --- Case B: vz run, one port pair, with rootfs_ref ---
+        let id_b = format!("{nanos}-enrich-b");
+        let run_dir_b = home_path.join("run").join(&id_b);
+        fs::create_dir_all(&run_dir_b).unwrap();
+        let spec_b = SpecOnDisk {
+            cwd: cwd.to_string_lossy().into_owned(),
+            command: vec!["/bin/nginx".to_string()],
+            env_keys: vec![],
+            mounts: vec![],
+            detached: true,
+            created_at_unix: nanos / 1_000_000_000,
+            ports: vec![(8080, 80)],
+            engine: "vz".to_string(),
+            rootfs_ref: Some("my-rootfs".to_string()),
+            env: vec![],
+        };
+        write_spec_json(&run_dir_b, &spec_b).unwrap();
+        fs::write(run_dir_b.join("status"), "exited 0").unwrap();
+
+        let infos = ps(&home_path).expect("ps");
+
+        let info_a = infos.iter().find(|i| i.id == id_a).expect("run A in ps");
+        assert_eq!(info_a.engine, "native", "case A: engine must be native");
+        assert!(info_a.ports.is_empty(), "case A: ports must be empty");
+        assert_eq!(info_a.rootfs_ref, None, "case A: rootfs_ref must be None");
+
+        let info_b = infos.iter().find(|i| i.id == id_b).expect("run B in ps");
+        assert_eq!(info_b.engine, "vz", "case B: engine must be vz");
+        assert_eq!(
+            info_b.ports,
+            vec![(8080u16, 80u16)],
+            "case B: ports must match"
+        );
+        assert_eq!(
+            info_b.rootfs_ref,
+            Some("my-rootfs".to_string()),
+            "case B: rootfs_ref must match"
+        );
     }
 
     // =======================================================================
