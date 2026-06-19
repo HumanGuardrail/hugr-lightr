@@ -11,6 +11,7 @@ pub mod engine;
 pub mod exec;
 pub mod gc;
 pub mod hydrate;
+pub mod inspect;
 pub mod logs;
 pub mod mcp;
 pub mod oci;

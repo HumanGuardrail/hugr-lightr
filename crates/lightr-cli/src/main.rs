@@ -348,6 +348,11 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
+    /// Inspect a run instance (docker-inspect parity)
+    Inspect {
+        /// Run id to inspect
+        id: String,
+    },
     /// List running/exited run instances
     Ps {
         #[arg(long)]
@@ -506,6 +511,7 @@ fn main() {
             OciCmd::Push { .. } => "oci-push",
         },
         Cmd::Bench { .. } => "bench",
+        Cmd::Inspect { .. } => "inspect",
         Cmd::Ps { .. } => "ps",
         Cmd::Logs { .. } => "logs",
         Cmd::Stop { .. } => "stop",
@@ -603,6 +609,7 @@ fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd: Cmd) -> i3
             }
         },
         Cmd::Bench { vs_docker, check } => handlers::bench::run(vs_docker, check, json),
+        Cmd::Inspect { id } => handlers::inspect::run(&id, json),
         Cmd::Ps { json: ps_json } => handlers::ps::run(ps_json),
         Cmd::Logs {
             id,

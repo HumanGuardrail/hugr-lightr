@@ -111,6 +111,73 @@ fn schema_gc() -> Value {
     })
 }
 
+fn schema_inspect() -> Value {
+    // Single-element array containing one InspectJson object (docker wire shape).
+    // Fields sourced from SpecOnDisk + RunInfo; Image/WorkingDir/Env are honestly null/[].
+    json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "x-lightr-schema-version": 1,
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 1,
+        "items": {
+            "type": "object",
+            "properties": {
+                "Id":      { "type": "string", "description": "run id (unix_nanos-pid)" },
+                "Created": { "type": "integer", "minimum": 0, "description": "created_at_unix (seconds)" },
+                "State": {
+                    "type": "object",
+                    "properties": {
+                        "Status":   { "type": "string", "enum": ["running", "exited"] },
+                        "Running":  { "type": "boolean" },
+                        "ExitCode": { "type": "integer" }
+                    },
+                    "required": ["Status", "Running", "ExitCode"]
+                },
+                "Config": {
+                    "type": "object",
+                    "properties": {
+                        "Cmd":        { "type": "array", "items": { "type": "string" } },
+                        "Env":        { "type": "array", "items": { "type": "string" },
+                                        "description": "env key names only; values not persisted" },
+                        "WorkingDir": { "type": ["string", "null"],
+                                        "description": "null — not surfaced by RunInfo" }
+                    },
+                    "required": ["Cmd", "Env", "WorkingDir"]
+                },
+                "Image":     { "type": ["string", "null"],
+                               "description": "null — lightr does not store OCI image refs" },
+                "RootfsRef": { "type": ["string", "null"],
+                               "description": "vz rootfs ref; null for native runs" },
+                "HostConfig": {
+                    "type": "object",
+                    "properties": {
+                        "PortBindings": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "host":      { "type": "integer", "minimum": 0, "maximum": 65535 },
+                                    "container": { "type": "integer", "minimum": 0, "maximum": 65535 }
+                                },
+                                "required": ["host", "container"]
+                            }
+                        },
+                        "Mounts": { "type": "array" }
+                    },
+                    "required": ["PortBindings", "Mounts"]
+                },
+                "Engine": { "type": "string", "description": "engine kind: native or vz" },
+                "Health":  { "type": ["string", "null"],
+                             "enum": ["healthy", "unhealthy", null],
+                             "description": "null when no healthcheck configured" }
+            },
+            "required": ["Id", "Created", "State", "Config", "Image", "RootfsRef",
+                         "HostConfig", "Engine", "Health"]
+        }
+    })
+}
+
 fn schema_ps() -> Value {
     // mirrors Vec<RunInfoJson> where each element has:
     //   RunInfoJson { id, running, exit_code, command, created_at_unix,
@@ -156,7 +223,9 @@ fn schema_ps() -> Value {
 // Verb registry
 // ──────────────────────────────────────────────────────────────────────────────
 
-const KNOWN_VERBS: &[&str] = &["snapshot", "hydrate", "status", "run", "diff", "gc", "ps"];
+const KNOWN_VERBS: &[&str] = &[
+    "snapshot", "hydrate", "status", "run", "diff", "gc", "ps", "inspect",
+];
 
 fn schema_for(verb: &str) -> Option<Value> {
     match verb {
@@ -167,6 +236,7 @@ fn schema_for(verb: &str) -> Option<Value> {
         "diff" => Some(schema_diff()),
         "gc" => Some(schema_gc()),
         "ps" => Some(schema_ps()),
+        "inspect" => Some(schema_inspect()),
         _ => None,
     }
 }
