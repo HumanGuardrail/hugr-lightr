@@ -1,7 +1,9 @@
 use super::*;
 use crate::Store;
 use lightr_core::{Digest, LightrError};
-use std::fs::{self, Permissions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::Permissions;
 use tempfile::TempDir;
 
 fn tmp_store() -> (TempDir, Store) {
@@ -48,6 +50,10 @@ fn integrity_corruption() {
     #[cfg(windows)]
     {
         let mut perms = fs::metadata(&obj_path).unwrap().permissions();
+        // Clearing the read-only attribute is the only way to make a read-only CAS
+        // object writable on Windows (it cannot even be deleted while read-only).
+        // The clippy lint targets the unix 0o666 footgun, which does not apply here.
+        #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         fs::set_permissions(&obj_path, perms).unwrap();
     }
