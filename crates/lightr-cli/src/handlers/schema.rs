@@ -111,11 +111,52 @@ fn schema_gc() -> Value {
     })
 }
 
+fn schema_ps() -> Value {
+    // mirrors Vec<RunInfoJson> where each element has:
+    //   RunInfoJson { id, running, exit_code, command, created_at_unix,
+    //                 health, engine, ports, rootfs_ref }
+    // The top-level is an array of run-info objects.
+    json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "x-lightr-schema-version": 1,
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "id":              { "type": "string", "description": "run id (unix_nanos-pid)" },
+                "running":         { "type": "boolean" },
+                "exit_code":       { "type": ["integer", "null"] },
+                "command":         { "type": "array", "items": { "type": "string" } },
+                "created_at_unix": { "type": "integer", "minimum": 0 },
+                "health":          { "type": ["string", "null"],
+                                     "enum": ["healthy", "unhealthy", null],
+                                     "description": "null when no healthcheck configured" },
+                "engine":          { "type": "string", "description": "engine kind: native or vz" },
+                "ports": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "host":      { "type": "integer", "minimum": 0, "maximum": 65535 },
+                            "container": { "type": "integer", "minimum": 0, "maximum": 65535 }
+                        },
+                        "required": ["host", "container"]
+                    }
+                },
+                "rootfs_ref": { "type": ["string", "null"],
+                                "description": "vz rootfs ref, null for native runs" }
+            },
+            "required": ["id", "running", "exit_code", "command", "created_at_unix",
+                         "health", "engine", "ports", "rootfs_ref"]
+        }
+    })
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Verb registry
 // ──────────────────────────────────────────────────────────────────────────────
 
-const KNOWN_VERBS: &[&str] = &["snapshot", "hydrate", "status", "run", "diff", "gc"];
+const KNOWN_VERBS: &[&str] = &["snapshot", "hydrate", "status", "run", "diff", "gc", "ps"];
 
 fn schema_for(verb: &str) -> Option<Value> {
     match verb {
@@ -125,6 +166,7 @@ fn schema_for(verb: &str) -> Option<Value> {
         "run" => Some(schema_run()),
         "diff" => Some(schema_diff()),
         "gc" => Some(schema_gc()),
+        "ps" => Some(schema_ps()),
         _ => None,
     }
 }
@@ -401,6 +443,66 @@ mod tests {
             assert!(
                 struct_keys.contains(key),
                 "schema required key '{key}' not found in serialized GcJson"
+            );
+        }
+    }
+
+    // ps: array of RunInfoJson { id, running, exit_code, command, created_at_unix,
+    //     health, engine, ports, rootfs_ref }
+    // The schema is an array — we validate the items' required keys against a
+    // dummy serialized element (mirrors the pattern for the other verbs).
+    #[test]
+    fn ps_schema_required_keys_match_struct() {
+        use serde::Serialize;
+        use serde_json::Value;
+        #[derive(Serialize)]
+        struct PortMapJson {
+            host: u16,
+            container: u16,
+        }
+        #[derive(Serialize)]
+        struct RunInfoJson {
+            id: String,
+            running: bool,
+            exit_code: Option<i32>,
+            command: Vec<String>,
+            created_at_unix: u64,
+            health: Option<String>,
+            engine: String,
+            ports: Vec<PortMapJson>,
+            rootfs_ref: Option<String>,
+        }
+        let dummy = RunInfoJson {
+            id: "12345-99".to_string(),
+            running: false,
+            exit_code: Some(0),
+            command: vec!["/bin/echo".to_string()],
+            created_at_unix: 0,
+            health: None,
+            engine: "native".to_string(),
+            ports: vec![],
+            rootfs_ref: None,
+        };
+        let serialized: Value = serde_json::to_value(&dummy).unwrap();
+        let struct_keys: Vec<String> = serialized.as_object().unwrap().keys().cloned().collect();
+
+        // The ps schema is an array; item required keys live in items.required.
+        let schema = schema_for("ps").unwrap();
+        let item_required: Vec<String> = schema
+            .get("items")
+            .and_then(|items| items.get("required"))
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for key in &item_required {
+            assert!(
+                struct_keys.contains(key),
+                "ps schema required key '{key}' not found in serialized RunInfoJson"
             );
         }
     }
