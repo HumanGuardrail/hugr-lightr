@@ -137,7 +137,7 @@ always-on daemon VM. Measured on this Intel box (release binary, `--rootfs alpin
    {exit, stdout, stderr} from the Action Cache **with no VM boot at all**: 14 ms
    vs Docker re-doing the full ~1.3 s every time. The Lightr re-run is **flat**
    regardless of the work; Docker's grows with it — so the factor is **unbounded**
-   (93× on `echo`, ~10,000× on a 10-min build, → ∞ on a 1-hour job), and it
+   (93× on `echo`, extrapolated ~43,000× on a 10-min build [14 ms replay / ~600 s build], → ∞ on a 1-hour job), and it
    compounds across reuse + a shared CAS (the work happens once, globally). Docker
    has **no memory** — it structurally cannot do this.
 

@@ -274,7 +274,9 @@ pub fn run_memoized_with(
         }
     }
 
-    // F-309: hydrate secrets/configs (only on miss). A0 stub is Ok(()); WP-A3 fills it.
+    // F-309: hydrate secrets/configs into the run cwd (only on miss). Each ref
+    // is materialized from the store at mode 0600 (secret) or 0644 (config),
+    // content-verified against the sealed CAS before write.
     crate::secrets::hydrate(&spec.cwd, store, &spec.secrets, &spec.configs)?;
 
     if spec.command.is_empty() {
@@ -286,7 +288,9 @@ pub fn run_memoized_with(
 
     let mut cmd = std::process::Command::new(&spec.command[0]);
     cmd.args(&spec.command[1..]).current_dir(&spec.cwd);
-    // F-203: apply resource caps to the spawn. A0 stub is Ok(()); WP-A1 fills it.
+    // F-203: apply resource caps to the spawn. On Linux: RLIMIT_AS/RLIMIT_DATA
+    // via pre_exec hook; cpu_millis unsupported on native (honest Err). No-op
+    // when limits are unlimited.
     crate::limits::apply_native(&mut cmd, limits)?;
     let output = cmd.output().map_err(LightrError::Io)?;
 

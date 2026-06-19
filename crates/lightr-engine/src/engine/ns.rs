@@ -179,8 +179,9 @@ mod ns_impl {
             libc::chdir(cwd_c.as_ptr());
         }
 
-        // F-203: apply cgroup v2 caps before exec. A0 stub is Ok(()); WP-A1 fills
-        // it (honest Unsupported if cgroup v2 is unavailable / not delegated).
+        // F-203: apply cgroup v2 caps before exec. Writes memory.max / cpu.max
+        // into a transient delegated cgroup subtree; returns honest Err if cgroup
+        // v2 is unavailable or the caller lacks delegation / CAP_SYS_RESOURCE.
         if let Err(e) = crate::limits::apply_cgroup(limits) {
             eprintln!("lightr-engine ns: apply_cgroup failed: {e}");
             return 1;
