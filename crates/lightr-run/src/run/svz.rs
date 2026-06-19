@@ -4,6 +4,7 @@
 use lightr_core::{LightrError, Result};
 use lightr_store::Store;
 
+#[cfg(unix)]
 use super::ctl::ctl_sock_path;
 use super::types::SpecOnDisk;
 

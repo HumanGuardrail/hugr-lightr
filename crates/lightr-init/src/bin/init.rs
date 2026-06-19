@@ -88,7 +88,7 @@ mod linux {
             if unsafe { libc::chroot(root.as_ptr()) } != 0 {
                 return Err(io::Error::last_os_error());
             }
-            if unsafe { libc::chdir(b"/\0".as_ptr() as *const libc::c_char) } != 0 {
+            if unsafe { libc::chdir(c"/".as_ptr()) } != 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
