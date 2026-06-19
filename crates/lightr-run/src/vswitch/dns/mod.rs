@@ -23,7 +23,7 @@
 //!   resolver, which is worse than a silent miss for a best-effort embedded DNS.
 
 mod wire;
-use wire::{build_response, build_nodata};
+use wire::{build_nodata, build_response};
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
