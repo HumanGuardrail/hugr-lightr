@@ -6,8 +6,8 @@
 use std::net::Ipv4Addr;
 
 use super::{
-    ParsedQuery, ETH_HDR_LEN, ETH_TYPE_IPV4, IP_PROTO_UDP, IP_VERSION_4, DNS_PORT, ANSWER_TTL,
-    QTYPE_A, QCLASS_IN,
+    ParsedQuery, ANSWER_TTL, DNS_PORT, ETH_HDR_LEN, ETH_TYPE_IPV4, IP_PROTO_UDP, IP_VERSION_4,
+    QCLASS_IN, QTYPE_A,
 };
 
 /// Build the full reply frame (Ethernet/IPv4/UDP/DNS) answering `q` with `ip`.
