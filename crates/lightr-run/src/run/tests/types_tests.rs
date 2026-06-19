@@ -13,7 +13,10 @@ fn spec_on_disk_legacy_json_defaults_to_native() {
     let spec: SpecOnDisk = serde_json::from_str(legacy).expect("legacy spec parses");
     assert_eq!(spec.engine, "native", "missing engine ⇒ native branch");
     assert!(spec.rootfs_ref.is_none(), "missing rootfs_ref ⇒ None");
-    assert!(spec.ports.is_empty(), "missing ports ⇒ empty (existing default)");
+    assert!(
+        spec.ports.is_empty(),
+        "missing ports ⇒ empty (existing default)"
+    );
 }
 
 /// A vz container spec roundtrips through write/read with engine + rootfs_ref

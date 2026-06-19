@@ -130,8 +130,8 @@ fn run_minimal() {
 #[test]
 fn run_all_flags() {
     let cli = parse(&[
-        "run", "--dir", "/work", "--input", "/a", "--input", "/b", "--env", "FOO", "--env",
-        "BAR", "--", "make", "all",
+        "run", "--dir", "/work", "--input", "/a", "--input", "/b", "--env", "FOO", "--env", "BAR",
+        "--", "make", "all",
     ]);
     match &cli.cmd {
         Cmd::Run {

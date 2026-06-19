@@ -18,4 +18,3 @@ pub use index::timeaxis::{bisect, diff_manifests, parse_lrr1, undo, DiffReport};
 /// the same Mutex instance.
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-

@@ -12,15 +12,14 @@ use lightr_engine::{probe as engine_probe, EngineKind};
 use lightr_index::{hydrate, snapshot, status};
 use lightr_store::Store;
 
-use super::{
-    BenchRow, Row, SkipRow,
-    BUDGET_HYDRATE_MS, BUDGET_HIT_RUN_MS, BUDGET_MICROWAVE_FLOOR_MS,
-    BUDGET_OCI_IMPORT_MS, BUDGET_BUILD_COLD_MS, BUDGET_BUILD_CACHED_MS,
-    BUDGET_COMPOSE_UP_MS, BUDGET_REPLAY_MS, BUDGET_SNAPSHOT_COLD_MS,
-    BUDGET_SNAPSHOT_WARM_MS, BUDGET_STATUS_WARM_MS, BUDGET_VERSION_MS,
-};
 use super::fixture::{
     make_bench_compose, make_bench_dockerfile, make_tiny_oci_tar, median_of, time_spawn,
+};
+use super::{
+    BenchRow, Row, SkipRow, BUDGET_BUILD_CACHED_MS, BUDGET_BUILD_COLD_MS, BUDGET_COMPOSE_UP_MS,
+    BUDGET_HIT_RUN_MS, BUDGET_HYDRATE_MS, BUDGET_MICROWAVE_FLOOR_MS, BUDGET_OCI_IMPORT_MS,
+    BUDGET_REPLAY_MS, BUDGET_SNAPSHOT_COLD_MS, BUDGET_SNAPSHOT_WARM_MS, BUDGET_STATUS_WARM_MS,
+    BUDGET_VERSION_MS,
 };
 
 // ── B1: version overhead (spawn self --version) ────────────────────────────
@@ -197,18 +196,8 @@ pub(super) fn b2_b4_run_memo(fixture_root: &Path, store_root: &Path) -> Vec<Benc
     );
 
     vec![
-        BenchRow::Measured(Row::new(
-            "B4 replay/miss",
-            miss_dur,
-            BUDGET_REPLAY_MS,
-            true,
-        )),
-        BenchRow::Measured(Row::new(
-            "B2 hit-run",
-            hit_dur,
-            BUDGET_HIT_RUN_MS,
-            true,
-        )),
+        BenchRow::Measured(Row::new("B4 replay/miss", miss_dur, BUDGET_REPLAY_MS, true)),
+        BenchRow::Measured(Row::new("B2 hit-run", hit_dur, BUDGET_HIT_RUN_MS, true)),
     ]
 }
 

@@ -131,11 +131,7 @@ pub(crate) fn cold_image_ms(docker_bin: &Path, _scratch: &Path) -> Outcome {
 /// sending a 1 GB build context to the VM costs minutes (measured: ~7 min, blows
 /// the budget); the cp-in is the faster, fairer ingest and fits the budget.
 /// Returns the timed median (the cp-OUT) in ms.
-pub(crate) fn materialize_ms(
-    docker_bin: &Path,
-    scratch: &Path,
-    size: MaterializeSize,
-) -> Outcome {
+pub(crate) fn materialize_ms(docker_bin: &Path, scratch: &Path, size: MaterializeSize) -> Outcome {
     // SETUP (untimed, bounded by SETUP_TIMEOUT): base image + the SAME 1 GB tree.
     if let Err(reason) = ensure_tiny_image(docker_bin) {
         return Outcome::Skip(reason);

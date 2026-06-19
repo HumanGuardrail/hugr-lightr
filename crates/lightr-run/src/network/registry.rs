@@ -1,7 +1,7 @@
 //! On-disk, flock-guarded network registry under `$LIGHTR_HOME/net/<id>/`.
 
 use super::alloc::{mac_for, subnet_for};
-use super::fsutil::{FlockGuard, atomic_write};
+use super::fsutil::{atomic_write, FlockGuard};
 use super::types::{Member, MemberOnDisk, NetworkId, Subnet, SubnetOnDisk};
 use std::fs;
 use std::io;

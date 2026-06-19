@@ -111,8 +111,7 @@ pub(super) fn layer_timeout_secs() -> u64 {
 ///   After pass 2 — resolve hardlinks (FIX 5).
 pub(super) fn apply_layers(tempdir: &Path, blobs: &[LayerBlob]) -> Result<u64> {
     let timeout = layer_timeout_secs();
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
     let mut skipped: u64 = 0;
     let mut entry_count: u64 = 0;
 

@@ -271,8 +271,14 @@ mod tests {
             healthcheck: None,
         };
         let cwd = prepare_service_cwd(&svc, &store).unwrap();
-        assert!(cwd.join("marker.txt").exists(), "image_ref file must be hydrated");
-        assert_eq!(std::fs::read(cwd.join("marker.txt")).unwrap(), b"from-image");
+        assert!(
+            cwd.join("marker.txt").exists(),
+            "image_ref file must be hydrated"
+        );
+        assert_eq!(
+            std::fs::read(cwd.join("marker.txt")).unwrap(),
+            b"from-image"
+        );
         let _ = std::fs::remove_dir_all(&cwd);
     }
 

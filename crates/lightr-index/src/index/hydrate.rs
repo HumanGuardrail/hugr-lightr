@@ -62,8 +62,7 @@ pub(super) fn hydrate_impl(
                     if parent.as_os_str().is_empty() {
                         // top-level: parent is dest
                     } else {
-                        std::fs::create_dir_all(dest.join(parent))
-                            .map_err(LightrError::Io)?;
+                        std::fs::create_dir_all(dest.join(parent)).map_err(LightrError::Io)?;
                     }
                 }
             }

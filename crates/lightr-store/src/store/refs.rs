@@ -3,11 +3,11 @@
 //! Refs are keyed by a hash of the ref name, sharded 2/62.
 //! Each ref write also appends an immutable log entry and a name record (once).
 
+use super::cas::{atomic_write, shard_parts};
+use super::lock::write_guard;
+use lightr_core::{Digest, RefRecord, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use lightr_core::{Digest, RefRecord, Result};
-use super::cas::{shard_parts, atomic_write};
-use super::lock::write_guard;
 
 // ── path helpers ──────────────────────────────────────────────────────────────
 
@@ -195,9 +195,9 @@ pub fn list_refs(root: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use crate::Store;
     use lightr_core::LightrError;
+    use tempfile::TempDir;
 
     fn tmp_store() -> (TempDir, Store) {
         let dir = TempDir::new().unwrap();

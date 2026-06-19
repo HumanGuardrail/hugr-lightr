@@ -1,6 +1,6 @@
-use std::path::Path;
-use super::error::Result;
 use super::error::LightrError;
+use super::error::Result;
+use std::path::Path;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Digest(pub [u8; 32]);

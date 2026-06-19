@@ -1,7 +1,7 @@
 //! `mod tests` — index codec + entries_differ tests (tests 7–10).
 #![cfg(test)]
 
-use crate::index::codec::{Index, index_path_for};
+use crate::index::codec::{index_path_for, Index};
 use crate::index::scan::scan;
 use crate::index::status::entries_differ;
 use lightr_core::{Digest, Entry};
@@ -89,17 +89,49 @@ fn test_corrupt_index_treated_as_empty() {
 fn test_entries_differ() {
     let d1 = Digest([1u8; 32]);
     let d2 = Digest([2u8; 32]);
-    let f1 = Entry::File { path: "a".into(), mode: 0o644, size: 10, digest: d1 };
-    let f2 = Entry::File { path: "a".into(), mode: 0o644, size: 10, digest: d1 };
-    let f3 = Entry::File { path: "a".into(), mode: 0o755, size: 10, digest: d1 };
-    let f4 = Entry::File { path: "a".into(), mode: 0o644, size: 10, digest: d2 };
-    assert!(!entries_differ(&f1, &f2), "identical entries should not differ");
+    let f1 = Entry::File {
+        path: "a".into(),
+        mode: 0o644,
+        size: 10,
+        digest: d1,
+    };
+    let f2 = Entry::File {
+        path: "a".into(),
+        mode: 0o644,
+        size: 10,
+        digest: d1,
+    };
+    let f3 = Entry::File {
+        path: "a".into(),
+        mode: 0o755,
+        size: 10,
+        digest: d1,
+    };
+    let f4 = Entry::File {
+        path: "a".into(),
+        mode: 0o644,
+        size: 10,
+        digest: d2,
+    };
+    assert!(
+        !entries_differ(&f1, &f2),
+        "identical entries should not differ"
+    );
     assert!(entries_differ(&f1, &f3), "mode change should differ");
     assert!(entries_differ(&f1, &f4), "digest change should differ");
 
-    let s1 = Entry::Symlink { path: "s".into(), target: "t1".into() };
-    let s2 = Entry::Symlink { path: "s".into(), target: "t1".into() };
-    let s3 = Entry::Symlink { path: "s".into(), target: "t2".into() };
+    let s1 = Entry::Symlink {
+        path: "s".into(),
+        target: "t1".into(),
+    };
+    let s2 = Entry::Symlink {
+        path: "s".into(),
+        target: "t1".into(),
+    };
+    let s3 = Entry::Symlink {
+        path: "s".into(),
+        target: "t2".into(),
+    };
     assert!(!entries_differ(&s1, &s2));
     assert!(entries_differ(&s1, &s3));
 

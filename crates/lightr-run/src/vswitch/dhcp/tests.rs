@@ -1,7 +1,7 @@
 // Tests for the dhcp module. Included as `#[cfg(test)] mod tests;` from mod.rs.
-use super::*;
 use super::build::{ipv4_checksum, prefix_to_mask};
 use super::parse::{be16, be32};
+use super::*;
 use crate::network::Subnet;
 use std::net::Ipv4Addr;
 
@@ -138,8 +138,7 @@ fn decode_reply(frame: &[u8]) -> (u8, Ipv4Addr, Ipv4Addr, Ipv4Addr, Ipv4Addr, bo
     let msg_type = find_opt(opts, OPT_MESSAGE_TYPE).expect("type")[0];
     let server_id =
         Ipv4Addr::from(<[u8; 4]>::try_from(find_opt(opts, OPT_SERVER_ID).unwrap()).unwrap());
-    let router =
-        Ipv4Addr::from(<[u8; 4]>::try_from(find_opt(opts, OPT_ROUTER).unwrap()).unwrap());
+    let router = Ipv4Addr::from(<[u8; 4]>::try_from(find_opt(opts, OPT_ROUTER).unwrap()).unwrap());
     let dns = Ipv4Addr::from(<[u8; 4]>::try_from(find_opt(opts, OPT_DNS).unwrap()).unwrap());
     // Lease time + subnet mask must be present and correct.
     let lease = find_opt(opts, OPT_LEASE_TIME).expect("lease");
@@ -303,8 +302,8 @@ fn ipv4_checksum_known_vector() {
     // RFC-1071-style reference header (checksum field zeroed); the standard
     // worked example checksum is 0xb861.
     let hdr: [u8; 20] = [
-        0x45, 0x00, 0x00, 0x73, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0x00, 0x00, 0xc0, 0xa8,
-        0x00, 0x01, 0xc0, 0xa8, 0x00, 0xc7,
+        0x45, 0x00, 0x00, 0x73, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0x00, 0x00, 0xc0, 0xa8, 0x00,
+        0x01, 0xc0, 0xa8, 0x00, 0xc7,
     ];
     assert_eq!(ipv4_checksum(&hdr), 0xb861);
     // And a header carrying that checksum must sum to zero.

@@ -1,7 +1,8 @@
 //! OCI distribution v2 pull implementation.
 
-use super::http::{net_agent, read_creds_for_registry, read_response_bytes, retry_request,
-                  stream_blob_to_file};
+use super::http::{
+    net_agent, read_creds_for_registry, read_response_bytes, retry_request, stream_blob_to_file,
+};
 use super::layer::{apply_and_snapshot, LayerBlob};
 use super::model::{ImportReport, ManifestList, OciManifest};
 use super::reference::{fetch_docker_token, parse_image_ref, pick_from_manifest_list};
@@ -76,40 +77,39 @@ pub fn pull(image: &str, store: &Store, name: &str) -> Result<ImportReport> {
     // Handle manifest list / index — pick best linux arch. Capture the config
     // descriptor alongside the layers (push-fidelity: the config blob holds
     // entrypoint/cmd/env/os/arch, re-emitted by `oci push`).
-    let (layer_descs, config_desc) =
-        if content_type.contains("manifest.list") || content_type.contains("image.index") {
-            let list: ManifestList = serde_json::from_slice(&manifest_bytes).map_err(|e| {
-                LightrError::InvalidManifest(format!("manifest list parse error: {e}"))
-            })?;
+    let (layer_descs, config_desc) = if content_type.contains("manifest.list")
+        || content_type.contains("image.index")
+    {
+        let list: ManifestList = serde_json::from_slice(&manifest_bytes)
+            .map_err(|e| LightrError::InvalidManifest(format!("manifest list parse error: {e}")))?;
 
-            let chosen = pick_from_manifest_list(&list.manifests)?;
+        let chosen = pick_from_manifest_list(&list.manifests)?;
 
-            // Fetch the specific manifest (with retry).
-            let spec_url =
-                format!("https://{registry}/v2/{repo}/manifests/{}", chosen.digest);
-            let resp2 = retry_request(
-                || {
-                    let mut req2 = agent.get(&spec_url).set(
-                        "Accept",
-                        "application/vnd.oci.image.manifest.v1+json, \
+        // Fetch the specific manifest (with retry).
+        let spec_url = format!("https://{registry}/v2/{repo}/manifests/{}", chosen.digest);
+        let resp2 = retry_request(
+            || {
+                let mut req2 = agent.get(&spec_url).set(
+                    "Accept",
+                    "application/vnd.oci.image.manifest.v1+json, \
                      application/vnd.docker.distribution.manifest.v2+json",
-                    );
-                    if let Some(h) = auth_ref {
-                        req2 = req2.set("Authorization", h);
-                    }
-                    req2.call()
-                },
-                &format!("{registry}/{repo}"),
-            )?;
-            let bytes2 = read_response_bytes(resp2)?;
-            let m: OciManifest = serde_json::from_slice(&bytes2)
-                .map_err(|e| LightrError::InvalidManifest(format!("manifest parse error: {e}")))?;
-            (m.layers, m.config)
-        } else {
-            let m: OciManifest = serde_json::from_slice(&manifest_bytes)
-                .map_err(|e| LightrError::InvalidManifest(format!("manifest parse error: {e}")))?;
-            (m.layers, m.config)
-        };
+                );
+                if let Some(h) = auth_ref {
+                    req2 = req2.set("Authorization", h);
+                }
+                req2.call()
+            },
+            &format!("{registry}/{repo}"),
+        )?;
+        let bytes2 = read_response_bytes(resp2)?;
+        let m: OciManifest = serde_json::from_slice(&bytes2)
+            .map_err(|e| LightrError::InvalidManifest(format!("manifest parse error: {e}")))?;
+        (m.layers, m.config)
+    } else {
+        let m: OciManifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|e| LightrError::InvalidManifest(format!("manifest parse error: {e}")))?;
+        (m.layers, m.config)
+    };
 
     let layer_count = layer_descs.len() as u64;
 

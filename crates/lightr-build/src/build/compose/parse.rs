@@ -272,7 +272,11 @@ pub fn parse_compose(yaml: &str) -> Result<Compose> {
                         let cmd = if raw.starts_with('[') {
                             match serde_json::from_str::<Vec<String>>(raw) {
                                 Ok(mut parts) => {
-                                    if parts.first().map(|p| p == "CMD" || p == "CMD-SHELL").unwrap_or(false) {
+                                    if parts
+                                        .first()
+                                        .map(|p| p == "CMD" || p == "CMD-SHELL")
+                                        .unwrap_or(false)
+                                    {
                                         parts.remove(0);
                                     }
                                     parts.join(" ")
@@ -322,7 +326,6 @@ pub fn parse_compose(yaml: &str) -> Result<Compose> {
 
     Ok(Compose { services: ordered })
 }
-
 
 #[cfg(test)]
 #[path = "parse_tests.rs"]

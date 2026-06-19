@@ -9,8 +9,8 @@
 //! CONTRACT STUB (ADR-0018, WP-C3): signatures frozen; WP-C3 fills the bodies,
 //! adds unit tests, and REMOVES the `#![allow]`.
 
-mod parse;
 mod build;
+mod parse;
 #[cfg(test)]
 mod tests;
 

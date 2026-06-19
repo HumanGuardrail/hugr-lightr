@@ -2,9 +2,9 @@
 #![cfg(test)]
 
 use crate::index::codec::Index;
+use crate::index::hydrate::hydrate;
 use crate::index::scan::scan;
 use crate::index::snapshot::snapshot;
-use crate::index::hydrate::hydrate;
 use crate::index::status::status;
 use lightr_core::{Entry, LightrError};
 use lightr_store::Store;

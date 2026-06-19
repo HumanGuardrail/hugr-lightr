@@ -5,10 +5,10 @@
 //! A later `oci push` reads it back to re-emit a runnable image
 //! (entrypoint/cmd/env preserved) instead of a config-less single layer.
 
+use super::cas::{atomic_write, get_bytes, put_bytes, shard_parts};
+use lightr_core::{Digest, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use lightr_core::{Digest, Result};
-use super::cas::{shard_parts, atomic_write, put_bytes, get_bytes};
 
 // ── path helper ───────────────────────────────────────────────────────────────
 
@@ -68,8 +68,8 @@ pub fn image_config_get(root: &Path, name: &str) -> Result<Option<Vec<u8>>> {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::TempDir;
     use crate::Store;
+    use tempfile::TempDir;
 
     fn tmp_store() -> (TempDir, Store) {
         let dir = TempDir::new().unwrap();

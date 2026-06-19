@@ -324,4 +324,3 @@ fn a9d_detach_no_memo() {
         "plain run after detached run must be memo MISS; stderr: {run_stderr}"
     );
 }
-

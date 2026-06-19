@@ -9,7 +9,14 @@ fn parse_compose_two_services() {
     let web = &c.services[0];
     assert_eq!(web.name, "web");
     assert_eq!(web.image_ref, "myimage");
-    assert_eq!(web.command, Some(vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()]));
+    assert_eq!(
+        web.command,
+        Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo hi".to_string()
+        ])
+    );
     assert_eq!(web.ports, vec![(8080u16, 80u16)]);
     assert_eq!(web.env, vec![("FOO".to_string(), "bar".to_string())]);
     assert!(web.eager);
@@ -50,11 +57,17 @@ fn parse_compose_secrets_configs_healthcheck() {
     let c = parse_compose(yaml).unwrap();
     assert_eq!(c.services.len(), 1);
     let api = &c.services[0];
-    assert_eq!(api.secrets, vec![
-        ("db_password".to_string(), "secret/db-pass".to_string()),
-        ("api_key".to_string(), "secret/api-key".to_string()),
-    ]);
-    assert_eq!(api.configs, vec![("app_conf".to_string(), "config/app".to_string())]);
+    assert_eq!(
+        api.secrets,
+        vec![
+            ("db_password".to_string(), "secret/db-pass".to_string()),
+            ("api_key".to_string(), "secret/api-key".to_string()),
+        ]
+    );
+    assert_eq!(
+        api.configs,
+        vec![("app_conf".to_string(), "config/app".to_string())]
+    );
     let hc = api.healthcheck.as_ref().expect("healthcheck parsed");
     assert_eq!(hc.0, "curl -fsS localhost:8080/health");
     assert_eq!(hc.1, 15);
@@ -75,5 +88,8 @@ fn parse_compose_healthcheck_string_form() {
 fn parse_compose_healthcheck_without_cmd_dropped() {
     let yaml = "services:\n  svc:\n    image: i\n    healthcheck:\n      interval: 10s\n";
     let c = parse_compose(yaml).unwrap();
-    assert!(c.services[0].healthcheck.is_none(), "healthcheck without a command must be dropped");
+    assert!(
+        c.services[0].healthcheck.is_none(),
+        "healthcheck without a command must be dropped"
+    );
 }

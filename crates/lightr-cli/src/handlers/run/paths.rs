@@ -210,7 +210,7 @@ pub(super) fn run_engine(
         command,
         rootfs: rootfs_path.as_deref(),
         limits,
-        net: false, // synchronous CLI engine path; networked vz is detached (supervisor)
+        net: false,   // synchronous CLI engine path; networked vz is detached (supervisor)
         net_fd: None, // mesh NIC is wired by the supervisor path (ADR-0018), not here
         net_mac: None,
     };

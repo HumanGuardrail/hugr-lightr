@@ -122,6 +122,10 @@ mod tests {
         assert_eq!(parse_duration_secs(""), None);
         assert_eq!(parse_duration_secs("30x"), None);
         assert_eq!(parse_duration_secs("abc"), None);
-        assert_eq!(parse_duration_secs("10s5"), None, "trailing unit-less number");
+        assert_eq!(
+            parse_duration_secs("10s5"),
+            None,
+            "trailing unit-less number"
+        );
     }
 }

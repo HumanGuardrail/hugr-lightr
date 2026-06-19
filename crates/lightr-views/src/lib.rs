@@ -34,8 +34,8 @@
 
 mod views;
 
-pub use views::backend::{FakeBackend, Solidifier, ViewBackend, solidify_step};
-pub use views::plan::{EntryKind, PlanEntry, ViewPlan, plan_view};
+pub use views::backend::{solidify_step, FakeBackend, Solidifier, ViewBackend};
+pub use views::plan::{plan_view, EntryKind, PlanEntry, ViewPlan};
 
 #[cfg(target_os = "linux")]
 #[path = "views/composefs.rs"]
