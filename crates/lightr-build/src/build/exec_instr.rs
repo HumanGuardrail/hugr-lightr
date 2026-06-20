@@ -13,7 +13,7 @@ use lightr_store::Store;
 use std::path::Path;
 
 use super::args::{ArgOverrides, ArgState};
-use super::exec_fs::copy_dir_recursive;
+use super::exec_fs::{apply_meta, copy_dir_recursive_meta, expand_glob, CopyMeta};
 use super::memo::{load_meta, save_meta};
 use super::parse::{CmdForm, Instr};
 use super::vars::{interpolate, VarScope};
@@ -153,42 +153,94 @@ pub(super) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
     Ok(())
 }
 
-/// `COPY`: copy interpolated context sources into the work dir.
-pub(super) fn copy(ctx: &mut BuildCtx, src: &[String], dest: &str) -> Result<()> {
-    // Interpolate COPY paths (+ --chown/--chmod are flag fields not
-    // used by this executor yet; DF-04 wires them). Paths into the
-    // CONTEXT use the interpolated src; the key already hashed the
-    // interpolated text + the content of these resolved sources.
-    let src = &interp_vec(src, ctx.scope, ctx.escape)?;
+/// `COPY [--chown=u:g] [--chmod=NNNN] <src>... <dest>` (WP-DF-06).
+///
+/// - `--from` is OUT OF SCOPE (multi-stage = DF-03): an honest fail-closed error.
+/// - `--chown`/`--chmod` (parsed into [`CopyMeta`]) are applied to every copied
+///   entry. `--chown` honors NUMERIC ids; named users are best-effort no-ops.
+/// - Multiple sources / a trailing-slash dest ⇒ dest is a DIRECTORY (Docker).
+/// - Copying a directory copies its CONTENTS into the dest (Docker dir semantics).
+/// - `*`/`?` GLOBS in a src expand against the build context.
+///
+/// The memo key already folds chown/chmod + the resolved source content
+/// (build/memo.rs), so this executor only realizes the bytes + metadata.
+pub(super) fn copy(
+    ctx: &mut BuildCtx,
+    src: &[String],
+    dest: &str,
+    from: Option<&str>,
+    chown: Option<&str>,
+    chmod: Option<&str>,
+) -> Result<()> {
+    // --from needs multi-stage (DF-03). Fail closed honestly; do NOT half-copy.
+    if from.is_some() {
+        return Err(LightrError::InvalidManifest(
+            "COPY --from is unsupported until multi-stage builds (DF-03)".to_string(),
+        ));
+    }
+    let meta = CopyMeta::parse(chown, chmod)?;
+    // Interpolate the src tokens + dest, then glob-expand each src against the
+    // context. A glob with zero matches is an honest error (Docker: "no source
+    // files were specified"); a literal (non-glob) src is kept verbatim.
+    let raw_src = interp_vec(src, ctx.scope, ctx.escape)?;
     let dest = &interpolate(dest, ctx.scope, ctx.escape)?;
+    let mut sources: Vec<std::path::PathBuf> = Vec::new();
+    for token in &raw_src {
+        let matched = expand_glob(ctx.context_dir, token);
+        if token.contains('*') || token.contains('?') {
+            if matched.is_empty() {
+                return Err(LightrError::InvalidManifest(format!(
+                    "COPY: no source files match {token:?}"
+                )));
+            }
+            sources.extend(matched);
+        } else {
+            sources.extend(matched);
+        }
+    }
     let dest_path = if dest.starts_with('/') {
         ctx.work_dir.join(dest.trim_start_matches('/'))
     } else {
         ctx.work_dir.join(dest)
     };
-    let dest_is_dir = dest.ends_with('/') || src.len() > 1;
+    // dest is a directory when it ends in `/` OR there is >1 resolved source
+    // (Docker requires a dir dest when copying multiple sources).
+    let dest_is_dir = dest.ends_with('/') || sources.len() > 1;
     if dest_is_dir {
         std::fs::create_dir_all(&dest_path).map_err(LightrError::Io)?;
-        for s in src {
-            let src_path = ctx.context_dir.join(s);
-            if src_path.is_file() {
-                let file_name = src_path.file_name().unwrap();
-                std::fs::copy(&src_path, dest_path.join(file_name)).map_err(LightrError::Io)?;
-            } else if src_path.is_dir() {
-                copy_dir_recursive(&src_path, &dest_path)?;
-            }
+        for src_path in &sources {
+            copy_one_into_dir(src_path, &dest_path, &meta)?;
         }
     } else {
         if let Some(parent) = dest_path.parent() {
             std::fs::create_dir_all(parent).map_err(LightrError::Io)?;
         }
-        let src_path = ctx.context_dir.join(&src[0]);
+        let src_path = &sources[0];
         if src_path.is_file() {
-            std::fs::copy(&src_path, &dest_path).map_err(LightrError::Io)?;
+            std::fs::copy(src_path, &dest_path).map_err(LightrError::Io)?;
+            apply_meta(&dest_path, &meta)?;
         } else if src_path.is_dir() {
             std::fs::create_dir_all(&dest_path).map_err(LightrError::Io)?;
-            copy_dir_recursive(&src_path, &dest_path)?;
+            copy_dir_recursive_meta(src_path, &dest_path, &meta)?;
+            apply_meta(&dest_path, &meta)?;
         }
+    }
+    Ok(())
+}
+
+/// Copy one resolved source INTO an existing directory `dest_dir`. A file lands
+/// as `dest_dir/<name>`; a directory copies its CONTENTS into `dest_dir`
+/// (Docker's COPY dir semantics). `meta` (chown/chmod) is applied to each entry.
+fn copy_one_into_dir(src_path: &Path, dest_dir: &Path, meta: &CopyMeta) -> Result<()> {
+    if src_path.is_file() {
+        let file_name = src_path
+            .file_name()
+            .ok_or_else(|| LightrError::InvalidManifest("COPY: source has no file name".into()))?;
+        let target = dest_dir.join(file_name);
+        std::fs::copy(src_path, &target).map_err(LightrError::Io)?;
+        apply_meta(&target, meta)?;
+    } else if src_path.is_dir() {
+        copy_dir_recursive_meta(src_path, dest_dir, meta)?;
     }
     Ok(())
 }

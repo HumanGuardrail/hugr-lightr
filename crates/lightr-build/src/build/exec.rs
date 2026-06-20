@@ -143,7 +143,22 @@ pub fn build(
             // RUN consumes the structured `form` (WP-DF-09): shell form is wrapped
             // by the active SHELL at exec time, not the parse-baked `/bin/sh -c`.
             Instr::Run { form, .. } => exec_instr::run(&mut ctx, form)?,
-            Instr::Copy { src, dest, .. } => exec_instr::copy(&mut ctx, src, dest)?,
+            // WP-DF-06: COPY wires --from/--chown/--chmod through to the executor
+            // (--from is an honest "unsupported until DF-03" error there).
+            Instr::Copy {
+                src,
+                dest,
+                from,
+                chown,
+                chmod,
+            } => exec_instr::copy(
+                &mut ctx,
+                src,
+                dest,
+                from.as_deref(),
+                chown.as_deref(),
+                chmod.as_deref(),
+            )?,
             Instr::Env { pairs } => exec_instr::env(&mut ctx, pairs)?,
             Instr::Workdir { path } => exec_instr::workdir(&mut ctx, path)?,
             Instr::Cmd { argv, .. } => exec_instr::cmd(&mut ctx, argv)?,
@@ -187,3 +202,8 @@ mod df05_tests;
 #[cfg(test)]
 #[path = "exec_df09_tests.rs"]
 mod df09_tests;
+
+// WP-DF-06 COPY parity end-to-end tests (sibling file, godfile cap).
+#[cfg(test)]
+#[path = "exec_df06_tests.rs"]
+mod df06_tests;
