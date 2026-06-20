@@ -13,8 +13,9 @@ use lightr_store::Store;
 use std::path::Path;
 
 use super::args::{ArgOverrides, ArgState};
-use super::exec_fs::{expand_glob, place_sources, CopyMeta};
-use super::memo::{load_meta, save_meta};
+use super::exec::StageTable;
+use super::exec_fs::{expand_glob, materialize_from_digest, place_sources, CopyMeta};
+use super::memo::{load_meta, save_meta, TempDirGuard};
 use super::parse::{CmdForm, Instr};
 use super::vars::{interpolate, VarScope};
 
@@ -47,6 +48,10 @@ pub(super) struct BuildCtx<'a> {
     pub accumulated_env: &'a mut Vec<(String, String)>,
     pub current_workdir: &'a mut String,
     pub current_shell: &'a mut Vec<String>,
+    /// WP-DF-03: the output trees of every PRIOR stage, for `COPY --from=stage`.
+    /// Read-only within an instruction body; the loop in `exec.rs` records each
+    /// stage's output after it finishes. A single-stage build leaves it empty.
+    pub stages: &'a StageTable,
 }
 
 /// Interpolate every string in a slice against `scope`.
@@ -153,13 +158,23 @@ pub(super) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
     Ok(())
 }
 
-/// `COPY [--chown=u:g] [--chmod=NNNN] <src>... <dest>` (WP-DF-06).
+/// `COPY [--from=<stage>] [--chown=u:g] [--chmod=NNNN] <src>... <dest>`
+/// (WP-DF-06 + WP-DF-03 multi-stage).
 ///
-/// `--from` is OUT OF SCOPE (multi-stage = DF-03): an honest fail-closed error.
+/// `--from=<stage-name|stage-index>` (WP-DF-03) copies from a PRIOR stage's
+/// RESULTING filesystem instead of the build context: the stage's output tree is
+/// materialized from the CAS into a temp dir, and the sources are resolved
+/// against THAT dir. Unknown / self / forward stage refs are an honest error
+/// (resolved by [`StageTable::resolve`]); an external IMAGE `--from` is OUT OF
+/// SCOPE for this WP (also surfaced by `resolve` as "unknown stage / external
+/// image out of scope"). Without `--from`, behavior is byte-identical to before:
+/// sources resolve against the build context.
+///
 /// `--chown`/`--chmod` (parsed into [`CopyMeta`]), multi-src/glob/dir-contents
 /// placement, and the dir-vs-file dest rule all live in `place_sources`. The memo
-/// key already folds chown/chmod + the resolved source content (build/memo.rs),
-/// so this executor only realizes the bytes + metadata.
+/// key folds chown/chmod + the resolved source content AND (for `--from`) the
+/// upstream stage's output digest (build/memo.rs), so this executor only realizes
+/// the bytes + metadata.
 pub(super) fn copy(
     ctx: &mut BuildCtx,
     src: &[String],
@@ -168,14 +183,23 @@ pub(super) fn copy(
     chown: Option<&str>,
     chmod: Option<&str>,
 ) -> Result<()> {
-    // --from needs multi-stage (DF-03). Fail closed honestly; do NOT half-copy.
-    if from.is_some() {
-        return Err(LightrError::InvalidManifest(
-            "COPY --from is unsupported until multi-stage builds (DF-03)".to_string(),
-        ));
-    }
     let meta = CopyMeta::parse(chown, chmod)?;
     let dest = &interpolate(dest, ctx.scope, ctx.escape)?;
+    if let Some(from_ref) = from {
+        // WP-DF-03: COPY --from=<stage>. Resolve the prior stage's output tree,
+        // materialize it into an isolated temp dir, and copy from THERE (not the
+        // build context). The temp dir is dropped after placement (TempDirGuard).
+        let from_ref = interpolate(from_ref, ctx.scope, ctx.escape)?;
+        let digest = ctx.stages.resolve(&from_ref)?;
+        let stage_guard = TempDirGuard::new()?;
+        materialize_from_digest(&stage_guard.path, &digest, ctx.store)?;
+        // Stage sources are filesystem paths (typically ABSOLUTE, e.g.
+        // `/out/app`). They are resolved relative to the materialized stage TREE,
+        // so a leading `/` is stripped before joining (a `Path::join` of an
+        // absolute path would otherwise discard the stage root). `relative = true`.
+        let sources = resolve_sources_in(&stage_guard.path, ctx, src, "COPY --from", true)?;
+        return place_sources(ctx.work_dir, &sources, dest, &meta, false);
+    }
     let sources = resolve_sources(ctx, src, "COPY")?;
     // COPY never auto-extracts (a `.tar` is copied as a file) — `extract = false`.
     place_sources(ctx.work_dir, &sources, dest, &meta, false)
@@ -185,10 +209,32 @@ pub(super) fn copy(
 /// glob with zero matches is an honest error (Docker: "no source files"); a
 /// literal token is kept verbatim. Shared by COPY+ADD (DF-07 reuses DF-06).
 fn resolve_sources(ctx: &BuildCtx, src: &[String], verb: &str) -> Result<Vec<std::path::PathBuf>> {
+    // Context sources are context-RELATIVE; `relative = false` preserves the
+    // exact pre-WP join behavior (`context_dir.join(token)` verbatim).
+    resolve_sources_in(ctx.context_dir, ctx, src, verb, false)
+}
+
+/// Like [`resolve_sources`] but resolves against an arbitrary `root` (WP-DF-03:
+/// the build context for a plain COPY, or a materialized PRIOR-stage tree for
+/// `COPY --from=stage`). Identical glob/honest-error semantics. When `relative`,
+/// a leading `/` is stripped from each (interpolated) token so an ABSOLUTE stage
+/// path resolves UNDER `root` instead of escaping it via `Path::join`.
+fn resolve_sources_in(
+    root: &Path,
+    ctx: &BuildCtx,
+    src: &[String],
+    verb: &str,
+    relative: bool,
+) -> Result<Vec<std::path::PathBuf>> {
     let raw_src = interp_vec(src, ctx.scope, ctx.escape)?;
     let mut sources: Vec<std::path::PathBuf> = Vec::new();
     for token in &raw_src {
-        let matched = expand_glob(ctx.context_dir, token);
+        let token = if relative {
+            token.trim_start_matches('/')
+        } else {
+            token.as_str()
+        };
+        let matched = expand_glob(root, token);
         if (token.contains('*') || token.contains('?')) && matched.is_empty() {
             return Err(LightrError::InvalidManifest(format!(
                 "{verb}: no source files match {token:?}"

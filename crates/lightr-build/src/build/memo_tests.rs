@@ -67,11 +67,11 @@ fn step_key_dir_copy_changes_when_contained_file_changes() {
     };
     let s = VarScope::default();
 
-    let k1 = step_key(None, &step, ctx.path(), &s, true, &dsh()).unwrap();
+    let k1 = step_key(None, &step, ctx.path(), &s, true, &dsh(), None).unwrap();
 
     // change a NESTED file
     std::fs::write(ctx.path().join("src/nested/b.txt"), b"deep-two").unwrap();
-    let k2 = step_key(None, &step, ctx.path(), &s, true, &dsh()).unwrap();
+    let k2 = step_key(None, &step, ctx.path(), &s, true, &dsh(), None).unwrap();
     assert_ne!(
         k1.0, k2.0,
         "nested file change must change the COPY step key"
@@ -79,13 +79,13 @@ fn step_key_dir_copy_changes_when_contained_file_changes() {
 
     // adding a file changes the key too
     std::fs::write(ctx.path().join("src/c.txt"), b"new").unwrap();
-    let k3 = step_key(None, &step, ctx.path(), &s, true, &dsh()).unwrap();
+    let k3 = step_key(None, &step, ctx.path(), &s, true, &dsh(), None).unwrap();
     assert_ne!(k2.0, k3.0, "adding a file must change the COPY step key");
 
     // identical content => identical key (determinism)
     std::fs::remove_file(ctx.path().join("src/c.txt")).unwrap();
     std::fs::write(ctx.path().join("src/nested/b.txt"), b"deep-one").unwrap();
-    let k4 = step_key(None, &step, ctx.path(), &s, true, &dsh()).unwrap();
+    let k4 = step_key(None, &step, ctx.path(), &s, true, &dsh(), None).unwrap();
     assert_eq!(k1.0, k4.0, "restoring content must restore the key");
 }
 
@@ -102,8 +102,8 @@ fn interp_var_value_change_changes_key_no_false_hit() {
     let sa = scope(&[], &[("X", "alpha")]);
     let sb = scope(&[], &[("X", "beta")]);
 
-    let ka = step_key(None, &step, ctx.path(), &sa, true, &dsh()).unwrap();
-    let kb = step_key(None, &step, ctx.path(), &sb, true, &dsh()).unwrap();
+    let ka = step_key(None, &step, ctx.path(), &sa, true, &dsh(), None).unwrap();
+    let kb = step_key(None, &step, ctx.path(), &sb, true, &dsh(), None).unwrap();
     assert_ne!(
         ka.0, kb.0,
         "differing ${{X}} values must yield differing keys (no false memo hit)"
@@ -117,8 +117,8 @@ fn interp_same_inputs_same_key_memo_hit() {
     let step = run_step("RUN echo ${X}-${Y}");
     let s = scope(&[("Y", "two")], &[("X", "one")]);
 
-    let k1 = step_key(None, &step, ctx.path(), &s, true, &dsh()).unwrap();
-    let k2 = step_key(None, &step, ctx.path(), &s, true, &dsh()).unwrap();
+    let k1 = step_key(None, &step, ctx.path(), &s, true, &dsh(), None).unwrap();
+    let k2 = step_key(None, &step, ctx.path(), &s, true, &dsh(), None).unwrap();
     assert_eq!(k1.0, k2.0, "identical inputs must yield an identical key");
 }
 
@@ -131,9 +131,9 @@ fn no_var_dockerfile_key_is_stable() {
     let empty = VarScope::default();
     let populated = scope(&[("X", "v")], &[("Y", "w")]);
 
-    let k1 = step_key(None, &step, ctx.path(), &empty, true, &dsh()).unwrap();
-    let k2 = step_key(None, &step, ctx.path(), &empty, true, &dsh()).unwrap();
-    let k3 = step_key(None, &step, ctx.path(), &populated, true, &dsh()).unwrap();
+    let k1 = step_key(None, &step, ctx.path(), &empty, true, &dsh(), None).unwrap();
+    let k2 = step_key(None, &step, ctx.path(), &empty, true, &dsh(), None).unwrap();
+    let k3 = step_key(None, &step, ctx.path(), &populated, true, &dsh(), None).unwrap();
     assert_eq!(k1.0, k2.0, "no-var key must be stable across runs");
     assert_eq!(k1.0, k3.0, "no-var key must not depend on scope contents");
 }
@@ -158,8 +158,8 @@ fn shell_form_run_different_shell_differs_key_no_false_hit() {
     let sh = vec!["/bin/sh".to_string(), "-c".to_string()];
     let bash = vec!["/bin/bash".to_string(), "-c".to_string()];
 
-    let k_sh = step_key(None, &step, ctx.path(), &s, true, &sh).unwrap();
-    let k_bash = step_key(None, &step, ctx.path(), &s, true, &bash).unwrap();
+    let k_sh = step_key(None, &step, ctx.path(), &s, true, &sh, None).unwrap();
+    let k_bash = step_key(None, &step, ctx.path(), &s, true, &bash, None).unwrap();
     assert_ne!(
         k_sh.0, k_bash.0,
         "different active SHELL must yield a different shell-form RUN key (no false hit)"
@@ -174,8 +174,8 @@ fn shell_form_run_same_shell_same_key_memo_hit() {
     let s = VarScope::default();
     let bash = vec!["/bin/bash".to_string(), "-c".to_string()];
 
-    let k1 = step_key(None, &step, ctx.path(), &s, true, &bash).unwrap();
-    let k2 = step_key(None, &step, ctx.path(), &s, true, &bash).unwrap();
+    let k1 = step_key(None, &step, ctx.path(), &s, true, &bash, None).unwrap();
+    let k2 = step_key(None, &step, ctx.path(), &s, true, &bash, None).unwrap();
     assert_eq!(k1.0, k2.0, "same SHELL + same RUN must be a memo hit");
 }
 
@@ -190,8 +190,8 @@ fn exec_form_run_ignores_active_shell_in_key() {
     let sh = vec!["/bin/sh".to_string(), "-c".to_string()];
     let bash = vec!["/bin/bash".to_string(), "-c".to_string()];
 
-    let k_sh = step_key(None, &step, ctx.path(), &s, true, &sh).unwrap();
-    let k_bash = step_key(None, &step, ctx.path(), &s, true, &bash).unwrap();
+    let k_sh = step_key(None, &step, ctx.path(), &s, true, &sh, None).unwrap();
+    let k_bash = step_key(None, &step, ctx.path(), &s, true, &bash, None).unwrap();
     assert_eq!(
         k_sh.0, k_bash.0,
         "exec-form RUN key must NOT depend on the active SHELL"
@@ -219,8 +219,8 @@ fn non_run_instruction_key_is_unchanged_by_shell() {
     let sh = vec!["/bin/sh".to_string(), "-c".to_string()];
     let bash = vec!["/bin/bash".to_string(), "-c".to_string()];
 
-    let k_sh = step_key(None, &step, ctx.path(), &s, true, &sh).unwrap();
-    let k_bash = step_key(None, &step, ctx.path(), &s, true, &bash).unwrap();
+    let k_sh = step_key(None, &step, ctx.path(), &s, true, &sh, None).unwrap();
+    let k_bash = step_key(None, &step, ctx.path(), &s, true, &bash, None).unwrap();
     assert_eq!(
         k_sh.0, k_bash.0,
         "non-RUN instruction key must not depend on the active SHELL"
@@ -267,6 +267,7 @@ fn copy_different_chmod_differs_key_no_false_hit() {
         &s,
         true,
         &dsh,
+        None,
     )
     .unwrap();
     let k600 = step_key(
@@ -276,6 +277,7 @@ fn copy_different_chmod_differs_key_no_false_hit() {
         &s,
         true,
         &dsh,
+        None,
     )
     .unwrap();
     assert_ne!(
@@ -299,6 +301,7 @@ fn copy_different_chown_differs_key_no_false_hit() {
         &s,
         true,
         &dsh,
+        None,
     )
     .unwrap();
     let k_user = step_key(
@@ -308,6 +311,7 @@ fn copy_different_chown_differs_key_no_false_hit() {
         &s,
         true,
         &dsh,
+        None,
     )
     .unwrap();
     assert_ne!(
@@ -330,6 +334,7 @@ fn copy_same_flags_same_key_memo_hit() {
         &s,
         true,
         &dsh,
+        None,
     )
     .unwrap();
     let k2 = step_key(
@@ -339,6 +344,7 @@ fn copy_same_flags_same_key_memo_hit() {
         &s,
         true,
         &dsh,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -355,7 +361,16 @@ fn copy_adding_chmod_differs_from_flagless() {
     std::fs::write(ctx.path().join("f.txt"), b"data").unwrap();
     let s = VarScope::default();
     let dsh = dsh();
-    let k_plain = step_key(None, &copy_step(None, None), ctx.path(), &s, true, &dsh).unwrap();
+    let k_plain = step_key(
+        None,
+        &copy_step(None, None),
+        ctx.path(),
+        &s,
+        true,
+        &dsh,
+        None,
+    )
+    .unwrap();
     let k_mode = step_key(
         None,
         &copy_step(None, Some("0644")),
@@ -363,6 +378,7 @@ fn copy_adding_chmod_differs_from_flagless() {
         &s,
         true,
         &dsh,
+        None,
     )
     .unwrap();
     assert_ne!(

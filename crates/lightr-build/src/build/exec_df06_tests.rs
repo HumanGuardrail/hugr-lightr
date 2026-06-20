@@ -223,8 +223,11 @@ fn copy_glob_no_match_is_honest_error() {
 }
 
 #[test]
-fn copy_from_is_unsupported_until_df03() {
-    // --from needs multi-stage (DF-03): honest fail-closed error, NOT a half-copy.
+fn copy_from_unknown_stage_is_honest_error() {
+    // WP-DF-03 landed multi-stage: `COPY --from=<stage>` now RESOLVES against the
+    // stage table. A ref to a NON-EXISTENT stage (here `builder`, never declared)
+    // is an honest fail-closed error, NOT a half-copy. (DF-03 supersedes DF-06's
+    // prior "unsupported until DF-03" placeholder for this single-stage case.)
     let f = fix();
     let msg = build_err(
         &f,
@@ -232,8 +235,8 @@ fn copy_from_is_unsupported_until_df03() {
         "FROM scratch\nCOPY --from=builder /src /dst\n",
     );
     assert!(
-        msg.contains("--from") && msg.contains("DF-03"),
-        "--from must be an honest 'unsupported until DF-03' error, got: {msg}"
+        msg.contains("--from") && msg.to_lowercase().contains("unknown stage"),
+        "--from to an unknown stage must be an honest error, got: {msg}"
     );
 }
 

@@ -92,6 +92,16 @@ pub(crate) fn canonical_step_text(
 /// the key for **shell-form RUN only** (exec-form RUN ignores SHELL, matching
 /// Docker — so it is NOT folded there, avoiding needless cache busts). Non-RUN
 /// instructions never fold it, so their keys are byte-identical to before.
+///
+/// `from_stage_digest` (WP-DF-03) is the resolved output digest of the SOURCE
+/// STAGE for a `COPY --from=<stage>` step. A multi-stage COPY's bytes come from a
+/// PRIOR stage's filesystem, not the build context, so the source content is NOT
+/// captured by the context-relative `hash_copy_source` loop below. Two builds
+/// whose upstream stage produced DIFFERENT output would otherwise collide on the
+/// same key (a FALSE memo hit). The upstream stage's output digest is therefore
+/// folded into the key whenever it is `Some` — i.e. ONLY for `COPY --from=stage`.
+/// A flagless COPY (or any non-`--from=stage` step) passes `None`, so its key is
+/// BYTE-IDENTICAL to before this WP (no cache bust, single-stage preserved).
 pub(crate) fn step_key(
     prev_layer_root: Option<Digest>,
     step: &BuildStep,
@@ -99,6 +109,7 @@ pub(crate) fn step_key(
     scope: &VarScope,
     escape: bool,
     current_shell: &[String],
+    from_stage_digest: Option<Digest>,
 ) -> Result<Digest> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(BUILD_KEY_DOMAIN);
@@ -169,6 +180,16 @@ pub(crate) fn step_key(
             hasher.update(b"\x00chmod\x00");
             hasher.update(interpolate(c, scope, escape)?.as_bytes());
         }
+    }
+    // WP-DF-03: a `COPY --from=<stage>` step's bytes come from a PRIOR stage's
+    // resolved output tree, NOT the build context — so the loop above (which only
+    // hashes context-relative sources) does NOT capture them. Fold the upstream
+    // stage's output digest so that a CHANGE to the source stage busts this step
+    // (no false hit). Only `Some` for `COPY --from=stage`; `None` everywhere else
+    // (flagless COPY, ADD, all other instructions) keeps the key byte-identical.
+    if let Some(d) = from_stage_digest {
+        hasher.update(b"\x00from-stage\x00");
+        hasher.update(&d.0);
     }
     Ok(Digest(*hasher.finalize().as_bytes()))
 }
@@ -251,3 +272,10 @@ impl Drop for TempDirGuard {
 #[cfg(test)]
 #[path = "memo_tests.rs"]
 mod tests;
+
+// WP-DF-03 key-layer tests: the upstream stage digest folds into a
+// `COPY --from=stage` key (no false hit) and is absent for a flagless COPY
+// (byte-identical). Sibling file (godfile cap).
+#[cfg(test)]
+#[path = "memo_df03_tests.rs"]
+mod df03_tests;
