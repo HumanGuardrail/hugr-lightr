@@ -49,6 +49,7 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             entrypoint,
             hostname,
             restart,
+            stop_signal,
             network,
             network_alias,
             add_host,
@@ -76,6 +77,16 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             if let Some(ref p) = restart {
                 if let Err(e) = lightr_run::restart::RestartPolicy::parse(p) {
                     eprintln!("lightr: {e}");
+                    return 2;
+                }
+            }
+            // WP-RC-STOPSIGNAL: validate `--stop-signal` up-front against the same
+            // portable-name/numeric contract as `kill -s` (fail-closed: a bad
+            // signal is an honest exit 2, never silently ignored). The validated
+            // string threads to RunSpec.stop_signal; `None` ⇒ SIGTERM, as before.
+            if let Some(ref s) = stop_signal {
+                if handlers::kill::parse_signal(s).is_none() {
+                    eprintln!("lightr: invalid signal: {s}");
                     return 2;
                 }
             }
@@ -131,6 +142,10 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                     // detached supervisor's re-spawn loop). `None` ⇒ `no` (run
                     // once + exit, as before). Already validated above.
                     restart.as_deref(),
+                    // WP-RC-STOPSIGNAL: `--stop-signal` → RunSpec.stop_signal
+                    // (honored by `lightr stop`/restart-stop). `None` ⇒ SIGTERM,
+                    // as before. Already validated above.
+                    stop_signal.as_deref(),
                     &health,
                 )
             }

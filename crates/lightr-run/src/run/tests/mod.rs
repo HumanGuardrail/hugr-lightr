@@ -13,6 +13,7 @@ pub(super) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod deepmemo;
 mod memo;
 mod memo_key;
+mod memo_key_runtime_excl;
 mod mount;
 mod secrets_tests;
 mod spawn_ps;
