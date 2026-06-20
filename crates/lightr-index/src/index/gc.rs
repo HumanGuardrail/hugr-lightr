@@ -62,6 +62,18 @@ pub fn gc(store: &Store, dry_run: bool, min_age_secs: u64) -> Result<GcReport> {
         }
     }
 
+    // --- Mark phase: retained image blobs (WP-IMG-09 / R-IMGREC) ---
+    // IMG-01 retains the original config + layer blobs in the CAS, referenced
+    // ONLY by the `imgmanifest`/`imgmeta` sidecars — which the manifest/file/AC
+    // walks above do NOT traverse. Mark every CAS digest those sidecars keep
+    // alive (record blob + config + each layer + captured config blob) so gc
+    // never reaps a blob a future faithful `oci push` needs. Over-approximate
+    // by design (mark, never sweep retained — fail safe); the enumeration is
+    // itself fail-soft (corrupt sidecars skipped, never fatal).
+    for digest in store.list_image_reachable_blobs()? {
+        mark.insert(digest);
+    }
+
     // --- Count objects + find sweep candidates ---
     let objects_root = store.root().join("objects");
     let mut objects_total: u64 = 0;
