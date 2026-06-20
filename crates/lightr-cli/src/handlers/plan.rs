@@ -174,6 +174,9 @@ fn plan_run(
         // WP-RC-STOPSIGNAL (NON-OWNED site, set None): `plan` doesn't take
         // `--stop-signal`, and it is RUNTIME (not keyed) → `None` (prediction unchanged).
         stop_signal: None,
+        // RC-SEAM-FREEZE (NON-OWNED site): `plan` takes none of the new RC flags →
+        // their no-op defaults (RUNTIME-ONLY, never keyed; prediction unchanged).
+        ..Default::default()
     };
 
     match predict(&spec, &store) {

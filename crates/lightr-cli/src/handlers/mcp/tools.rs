@@ -186,6 +186,9 @@ pub(super) fn handle_tools_call(id: Value, params: &Value) -> Value {
                 // WP-RC-STOPSIGNAL (NON-OWNED site, set None): the MCP run tool has
                 // no `--stop-signal` → `None` (SIGTERM; it is RUNTIME, not keyed).
                 stop_signal: None,
+                // RC-SEAM-FREEZE (NON-OWNED site): the MCP run tool takes none of
+                // the new RC flags → no-op defaults (RUNTIME-ONLY, never keyed).
+                ..Default::default()
             };
             match run_memoized(&spec, &store) {
                 Ok(outcome) => {
