@@ -133,7 +133,7 @@ pub fn build(
         }
 
         match &step.instr {
-            Instr::From { image_ref } => {
+            Instr::From { image_ref, .. } => {
                 for entry in std::fs::read_dir(work_dir).map_err(LightrError::Io)? {
                     let entry = entry.map_err(LightrError::Io)?;
                     let p = entry.path();
@@ -147,7 +147,7 @@ pub fn build(
                     lightr_index::hydrate(work_dir, store, image_ref)?;
                 }
             }
-            Instr::Run { argv } => {
+            Instr::Run { argv, .. } => {
                 let cwd = if current_workdir == "/" || current_workdir.is_empty() {
                     work_dir.to_path_buf()
                 } else {
@@ -189,7 +189,7 @@ pub fn build(
                     )));
                 }
             }
-            Instr::Copy { src, dest } => {
+            Instr::Copy { src, dest, .. } => {
                 let dest_path = if dest.starts_with('/') {
                     work_dir.join(dest.trim_start_matches('/'))
                 } else {
@@ -237,7 +237,7 @@ pub fn build(
                 };
                 std::fs::create_dir_all(&abs).map_err(LightrError::Io)?;
             }
-            Instr::Cmd { argv } => {
+            Instr::Cmd { argv, .. } => {
                 let mut meta = load_meta(work_dir);
                 meta.cmd = Some(argv.clone());
                 save_meta(work_dir, &meta)?;
@@ -247,6 +247,15 @@ pub fn build(
                 meta.labels.retain(|(k, _)| k != key);
                 meta.labels.push((key.clone(), val.clone()));
                 save_meta(work_dir, &meta)?;
+            }
+            // WP-DF-01 parses these into the AST; execution is DF-02..15. Until
+            // then they route to the SAME "unsupported instruction" error path
+            // as before (fail-closed, behavior-preserving — these never built).
+            other => {
+                return Err(LightrError::InvalidManifest(format!(
+                    "unsupported instruction: {}",
+                    instr_verb(other)
+                )));
             }
         }
 
@@ -265,6 +274,30 @@ pub fn build(
         steps: total,
         cached_steps,
     })
+}
+
+/// Verb name for an `Instr`, used only to report not-yet-implemented
+/// instructions through the existing "unsupported instruction" error path.
+fn instr_verb(instr: &Instr) -> &'static str {
+    match instr {
+        Instr::From { .. } => "FROM",
+        Instr::Run { .. } => "RUN",
+        Instr::Cmd { .. } => "CMD",
+        Instr::Entrypoint { .. } => "ENTRYPOINT",
+        Instr::Label { .. } => "LABEL",
+        Instr::Expose { .. } => "EXPOSE",
+        Instr::Env { .. } => "ENV",
+        Instr::Add { .. } => "ADD",
+        Instr::Copy { .. } => "COPY",
+        Instr::Volume { .. } => "VOLUME",
+        Instr::User { .. } => "USER",
+        Instr::Workdir { .. } => "WORKDIR",
+        Instr::Arg { .. } => "ARG",
+        Instr::Onbuild { .. } => "ONBUILD",
+        Instr::Stopsignal { .. } => "STOPSIGNAL",
+        Instr::Healthcheck { .. } => "HEALTHCHECK",
+        Instr::Shell { .. } => "SHELL",
+    }
 }
 
 pub(crate) fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {

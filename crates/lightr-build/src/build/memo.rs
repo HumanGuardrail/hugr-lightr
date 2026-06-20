@@ -171,6 +171,9 @@ mod tests {
             instr: Instr::Copy {
                 src: vec!["src".to_string()],
                 dest: "/app".to_string(),
+                from: None,
+                chown: None,
+                chmod: None,
             },
             raw: "COPY src /app".to_string(),
         };
