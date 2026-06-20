@@ -327,6 +327,11 @@ pub(crate) enum Cmd {
         /// Engine to use: native (default), ns, vz
         #[arg(long, default_value = "native", value_name = "ENGINE")]
         engine: String,
+        /// Set a build-time ARG value (docker --build-arg, repeatable): NAME=VALUE.
+        /// Overrides the ARG's default; an override with no matching ARG line is
+        /// ignored (Docker behavior).
+        #[arg(long = "build-arg", value_name = "NAME=VALUE")]
+        build_arg: Vec<String>,
     },
     /// Manage a compose stack (lazy services)
     Compose {
