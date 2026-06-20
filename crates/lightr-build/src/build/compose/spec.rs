@@ -44,8 +44,11 @@ pub struct ServiceDef {
     pub environment: Option<Environment>,
     #[serde(default)]
     pub env_file: Option<StringOrList>,
+    /// CMP-P0-PORTS-FULL: the full compose `ports` grammar — each entry is a
+    /// short scalar (`"8080:80"`, `"80"`, `"127.0.0.1:8080:80/udp"`, ranges) or
+    /// the long mapping form. Parsed/lowered by `ports.rs`/`lower.rs`.
     #[serde(default)]
-    pub ports: Vec<Value>,
+    pub ports: Vec<PortSpec>,
     #[serde(default)]
     pub expose: Vec<Value>,
     #[serde(default)]
@@ -83,6 +86,44 @@ pub struct ServiceDef {
     /// configs as `name=ref` strings.
     #[serde(default)]
     pub configs: Vec<String>,
+}
+
+/// A single compose `ports` entry: Docker accepts BOTH the short scalar form
+/// (a string `"8080:80"` or a bare port number) AND the long mapping form. The
+/// untagged enum tries the long map first (a YAML mapping never matches the
+/// scalar arm), then falls back to the short scalar (kept as a raw `Value` so
+/// `ports.rs` owns the string grammar). Fail-closed parsing lives in `ports.rs`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum PortSpec {
+    /// Long mapping form: `{ target, published, protocol, host_ip, mode }`.
+    Long(PortLong),
+    /// Short scalar form: a string (`"8080:80"`, `"80"`, `".../udp"`, ranges)
+    /// or a bare YAML number (`8080`).
+    Short(Value),
+}
+
+/// The long compose `ports` mapping form. Only the fields Lightr lowers are
+/// modeled; unknown keys (e.g. `app_protocol`) are ignored (house leniency).
+/// `mode` is accepted but not yet acted on (Lightr publishes on loopback).
+#[derive(Debug, Default, Deserialize)]
+pub struct PortLong {
+    /// Container port. REQUIRED by the compose spec; absence is fail-closed at
+    /// lowering time.
+    #[serde(default)]
+    pub target: Option<u16>,
+    /// Published host port. Absent ⇒ host auto-assigned.
+    #[serde(default)]
+    pub published: Option<u16>,
+    /// `tcp` (default) or `udp`.
+    #[serde(default)]
+    pub protocol: Option<String>,
+    /// Host bind address. Defaults to loopback (Lightr's publish model).
+    #[serde(default)]
+    pub host_ip: Option<String>,
+    /// `host` | `ingress`. Accepted for spec-faithful parsing; not yet acted on.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 /// A field Docker accepts as either a bare string or a list of strings
