@@ -10,3 +10,5 @@ mod mod_tests_ops;
 mod r1_tests_diff;
 #[cfg(test)]
 mod r1_tests_gc;
+#[cfg(test)]
+mod wp_img_09_tests;

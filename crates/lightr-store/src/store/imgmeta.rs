@@ -254,80 +254,109 @@ pub fn image_manifest_get(root: &Path, name: &str) -> Result<Option<ImageManifes
     Ok(Some(decode_manifest_record(&encoded)?))
 }
 
+// ── WP-IMG-09 (R-IMGREC): gc reachability enumeration ───────────────────────
+//
+// IMG-01 retains the original config + layer blobs in the CAS, referenced ONLY
+// by these `imgmanifest` (and `imgmeta` config) sidecars — surfaces the gc
+// mark-walk does NOT otherwise traverse. Without this enumeration gc would reap
+// the retained blobs and a later faithful `oci push` would lose layers.
+//
+// This accessor over-approximates by design (mark, never sweep retained — fail
+// safe): it walks BOTH sidecar families and returns EVERY CAS digest they keep
+// alive, so the caller (gc) can mark them reachable:
+//   • the record blob itself (the encoded `ImageManifestRecord`, stored via
+//     `put_bytes` and pointed at by the `imgmanifest` sidecar),
+//   • each descriptor digest in the record (config + every layer blob),
+//   • the config blob pointed at by each `imgmeta` config sidecar.
+// `manifest_bytes` is carried INLINE in the record (not a separate CAS object),
+// so it needs no digest of its own.
+//
+// Fail-soft per-entry (matching `list_ac`): a corrupt sidecar or a record that
+// fails to decode is SKIPPED, never fatal — gc must not abort because one
+// sidecar is garbage. Skipping at worst under-marks that single record (which
+// is itself unreadable, hence unusable for push anyway); it never causes a live
+// retained blob of a *valid* record to be reaped.
+
+/// Walk one sidecar shard family (`<root>/<dir>/<2hex>/<62hex>`) and pass each
+/// stored 32-byte CAS digest pointer to `f`. Skips `.tmp-` in-flight writes and
+/// any file that is not exactly 32 bytes (corrupt sidecar ⇒ fail-soft).
+fn for_each_sidecar_pointer(root: &Path, dir: &str, mut f: impl FnMut(Digest)) {
+    let base = root.join(dir);
+    let shards = match fs::read_dir(&base) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    for shard_entry in shards.filter_map(|e| e.ok()) {
+        let shard_path = shard_entry.path();
+        if !shard_path.is_dir() {
+            continue;
+        }
+        let files = match fs::read_dir(&shard_path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        for file_entry in files.filter_map(|e| e.ok()) {
+            let file_path = file_entry.path();
+            if file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.starts_with(".tmp-"))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if !file_path.is_file() {
+                continue;
+            }
+            let dbytes = match fs::read(&file_path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            if dbytes.len() != 32 {
+                continue;
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&dbytes);
+            f(Digest(arr));
+        }
+    }
+}
+
+/// WP-IMG-09: enumerate EVERY CAS digest kept alive by the image sidecars, so
+/// the gc mark-walk can mark them reachable (else gc reaps faithful-push blobs).
+///
+/// Returns: every `imgmanifest` record-blob digest + each of its descriptor
+/// digests (config + layers) + every `imgmeta` config-blob digest. Order is
+/// unspecified; duplicates are possible (the caller dedups via its mark set).
+/// Fail-soft: corrupt/undecodable sidecars are skipped, never fatal.
+pub fn list_image_reachable_blobs(root: &Path) -> Result<Vec<Digest>> {
+    let mut out: Vec<Digest> = Vec::new();
+
+    // imgmanifest sidecars: mark the record blob AND every descriptor blob.
+    for_each_sidecar_pointer(root, "imgmanifest", |record_digest| {
+        out.push(record_digest);
+        // Decode the record to reach its config + layer descriptors. A blob we
+        // cannot read/decode is skipped (fail-soft) — the record-blob pointer
+        // itself is already marked above, so we never lose a readable record.
+        if let Ok(encoded) = get_bytes(root, &record_digest) {
+            if let Ok(rec) = decode_manifest_record(&encoded) {
+                for d in &rec.descriptors {
+                    out.push(d.digest);
+                }
+            }
+        }
+    });
+
+    // imgmeta config sidecars: mark the original OCI config blob.
+    for_each_sidecar_pointer(root, "imgmeta", |config_digest| {
+        out.push(config_digest);
+    });
+
+    Ok(out)
+}
+
 // ─────────────────────────────────── tests ──────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use crate::Store;
-    use tempfile::TempDir;
-
-    fn tmp_store() -> (TempDir, Store) {
-        let dir = TempDir::new().unwrap();
-        let store = Store::open(dir.path().join("store")).unwrap();
-        (dir, store)
-    }
-
-    // ── image_config sidecar (push-fidelity) ──────────────────────────────────
-
-    #[test]
-    fn image_config_roundtrip_and_absent_is_none() {
-        let (_dir, store) = tmp_store();
-        // A ref with no captured config ⇒ None (push then synthesizes minimal).
-        assert!(store.image_config_get("noconfig").unwrap().is_none());
-        // Put + get roundtrips the exact bytes (content-addressed in the CAS).
-        let cfg = br#"{"architecture":"amd64","os":"linux","config":{"Cmd":["sh"]}}"#;
-        store.image_config_put("img", cfg).unwrap();
-        assert_eq!(
-            store.image_config_get("img").unwrap().as_deref(),
-            Some(&cfg[..])
-        );
-        // Last-write-wins: a second put replaces the sidecar.
-        let cfg2 = br#"{"os":"linux"}"#;
-        store.image_config_put("img", cfg2).unwrap();
-        assert_eq!(
-            store.image_config_get("img").unwrap().as_deref(),
-            Some(&cfg2[..])
-        );
-    }
-
-    // ── R-IMGREC: image manifest record codec roundtrip ───────────────────────
-
-    #[test]
-    fn image_manifest_record_roundtrip_and_absent_is_none() {
-        use crate::store::imgmeta::{ImageDescriptor, ImageManifestRecord};
-        use lightr_core::Digest;
-
-        let (_dir, store) = tmp_store();
-        // Absent ⇒ None.
-        assert!(store.image_manifest_get("nomani").unwrap().is_none());
-
-        let rec = ImageManifestRecord {
-            manifest_bytes: br#"{"schemaVersion":2,"layers":[]}"#.to_vec(),
-            descriptors: vec![
-                ImageDescriptor {
-                    media_type: "application/vnd.oci.image.config.v1+json".to_string(),
-                    digest: Digest([1u8; 32]),
-                    size: 123,
-                },
-                ImageDescriptor {
-                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".to_string(),
-                    digest: Digest([2u8; 32]),
-                    size: 456789,
-                },
-            ],
-            platform: "linux/amd64".to_string(),
-        };
-        store.image_manifest_put("mani", &rec).unwrap();
-        let got = store.image_manifest_get("mani").unwrap().unwrap();
-        assert_eq!(got, rec, "record must survive the length-prefixed codec");
-
-        // Last-write-wins: a second put replaces the sidecar.
-        let rec2 = ImageManifestRecord {
-            manifest_bytes: b"{}".to_vec(),
-            descriptors: vec![],
-            platform: String::new(),
-        };
-        store.image_manifest_put("mani", &rec2).unwrap();
-        assert_eq!(store.image_manifest_get("mani").unwrap().unwrap(), rec2);
-    }
-}
+#[path = "imgmeta_tests.rs"]
+mod tests;

@@ -177,6 +177,15 @@ impl Store {
         store::imgmeta::image_manifest_get(&self.root, name)
     }
 
+    /// WP-IMG-09 (R-IMGREC): every CAS digest kept alive by the image sidecars
+    /// (`imgmanifest` record blobs + their config/layer descriptors + `imgmeta`
+    /// config blobs). The gc mark-walk marks these reachable so it never reaps
+    /// blobs retained for a faithful `oci push`. Fail-soft: corrupt/undecodable
+    /// sidecars are skipped, never fatal. Order unspecified; may contain dups.
+    pub fn list_image_reachable_blobs(&self) -> Result<Vec<Digest>> {
+        store::imgmeta::list_image_reachable_blobs(&self.root)
+    }
+
     // ── AC ───────────────────────────────────────────────────────────────────
 
     /// Read an AC entry.  Absent → Ok(None).
