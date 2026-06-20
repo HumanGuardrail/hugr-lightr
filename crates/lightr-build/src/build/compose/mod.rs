@@ -4,6 +4,9 @@ pub mod interp;
 pub(crate) mod lower;
 pub mod model;
 pub mod parse;
+/// CMP-P0-PORTS-FULL: the full compose `ports` grammar parser (short + long,
+/// ranges, proto, host_ip). Consumed by `lower.rs`.
+pub(crate) mod ports;
 pub mod spec;
 pub mod supervise;
 pub mod up;
