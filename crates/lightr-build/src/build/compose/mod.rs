@@ -25,6 +25,10 @@ pub use merge::{deep_merge, parse_compose_merged, OVERRIDE_FILENAMES};
 pub use model::{Compose, ComposeHandle, Service, ServiceSpec, StackSpec};
 pub use parse::{parse_compose, parse_compose_project_name, parse_compose_with_scope};
 pub use project::{dir_basename, resolve_project_name, sanitize_project_name, DEFAULT_PROJECT};
-pub use spec::{ComposeSpec, EnvScalar, Environment, Healthcheck, ServiceDef, StringOrList};
+pub use spec::{
+    ComposeSpec, DependsOn, DependsOnEntry, Deploy, DeployResources, EnvScalar, Environment,
+    Healthcheck, NetworkAttachment, ResourceSpec, RestartPolicy, ServiceDef, ServiceNetworks,
+    StringOrList,
+};
 pub use supervise::compose_supervise;
 pub use up::compose_up;

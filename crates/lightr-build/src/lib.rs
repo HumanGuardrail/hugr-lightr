@@ -59,7 +59,8 @@ pub use build::{
     parse_compose_project_name, parse_compose_with_scope, parse_dockerfile, parse_dockerfile_full,
     resolve_project_name, sanitize_project_name, scope_from_project_dir, step_reads_clock_or_net,
     BuildReport, BuildStep, CmdForm, Compose, ComposeHandle, ComposeServiceHealthcheck,
-    ComposeSpec, Directives, EnvScalar, Environment, Healthcheck, HealthcheckOpts, ImageConfig,
-    Instr, Service, ServiceDef, ServiceSpec, StackSpec, StringOrList, VarScope, DEFAULT_PROJECT,
-    OVERRIDE_FILENAMES,
+    ComposeSpec, DependsOn, DependsOnEntry, Deploy, DeployResources, Directives, EnvScalar,
+    Environment, Healthcheck, HealthcheckOpts, ImageConfig, Instr, NetworkAttachment, ResourceSpec,
+    RestartPolicy, Service, ServiceDef, ServiceNetworks, ServiceSpec, StackSpec, StringOrList,
+    VarScope, DEFAULT_PROJECT, OVERRIDE_FILENAMES,
 };
