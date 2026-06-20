@@ -123,13 +123,23 @@ pub(crate) fn step_key(
             hasher.update(b"\x00");
         }
     }
-    // For COPY, hash each source's content into the key. Files contribute
+    // For COPY and ADD, hash each source's content into the key. Files contribute
     // their digest; DIRECTORIES contribute every contained file's
     // (relative-path | digest), sorted -- so editing any file inside a copied
     // dir (e.g. `COPY src/ /app`) invalidates the cache. Symlinks contribute
     // their target. Missing sources contribute a sentinel (so add/remove of a
     // source also changes the key).
+    //
+    // WP-DF-07: ADD keys IDENTICALLY to COPY — it hashes the same source content
+    // and folds the same --chown/--chmod. ADD's auto-extraction is a DETERMINISTIC
+    // function of the keyed archive bytes (the .tar's content digest already enters
+    // via `hash_copy_source`), so no extra extraction input is needed: same archive
+    // + same flags ⇒ same key ⇒ same extracted layer. The two variants share this
+    // block by destructuring the common `(src, chown, chmod)` fields.
     if let Instr::Copy {
+        src, chown, chmod, ..
+    }
+    | Instr::Add {
         src, chown, chmod, ..
     } = &step.instr
     {
@@ -137,8 +147,8 @@ pub(crate) fn step_key(
             let src_path = context_dir.join(s);
             hash_copy_source(&mut hasher, &src_path)?;
         }
-        // WP-DF-06: --chown/--chmod change the COPY OUTPUT (file mode/owner) but
-        // are NOT part of the source content the loop above hashes. Two COPYs of
+        // WP-DF-06: --chown/--chmod change the COPY/ADD OUTPUT (file mode/owner)
+        // but are NOT part of the source content the loop above hashes. Two of
         // the same bytes with different --chmod/--chown produce different layers,
         // so the flags MUST enter the key — else the second would FALSELY hit the
         // first's cached layer (wrong mode/owner).
