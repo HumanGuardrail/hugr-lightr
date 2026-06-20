@@ -60,7 +60,7 @@ pub use build::{
     resolve_project_name, sanitize_project_name, scope_from_project_dir, step_reads_clock_or_net,
     BuildReport, BuildStep, CmdForm, Compose, ComposeHandle, ComposeServiceHealthcheck,
     ComposeSpec, DependsOn, DependsOnEntry, Deploy, DeployResources, Directives, EnvScalar,
-    Environment, Healthcheck, HealthcheckOpts, ImageConfig, Instr, NetworkAttachment, ResourceSpec,
-    RestartPolicy, Service, ServiceDef, ServiceNetworks, ServiceSpec, StackSpec, StringOrList,
-    VarScope, DEFAULT_PROJECT, OVERRIDE_FILENAMES,
+    Environment, Healthcheck, HealthcheckOpts, ImageConfig, ImageHealthcheck, Instr,
+    NetworkAttachment, ResourceSpec, RestartPolicy, Service, ServiceDef, ServiceNetworks,
+    ServiceSpec, StackSpec, StringOrList, VarScope, DEFAULT_PROJECT, OVERRIDE_FILENAMES,
 };

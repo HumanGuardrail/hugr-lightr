@@ -28,6 +28,20 @@ pub struct BuildReport {
     pub cached_steps: u64,
 }
 
+/// Strip the leading `ONBUILD` keyword from an ONBUILD step's raw
+/// (continuation-joined) source text, returning the trigger instruction
+/// VERBATIM (WP-DF-HEALTHCHECK-ONBUILD). The parser already proved the keyword
+/// is present and the trigger is a valid, allowed instruction; this keeps the
+/// trigger byte-faithful (no re-serialization) for recording into the config.
+fn onbuild_trigger(raw: &str) -> &str {
+    let t = raw.trim_start();
+    // The first whitespace-delimited token is the `ONBUILD` keyword (any case).
+    match t.split_once(|c: char| c.is_ascii_whitespace()) {
+        Some((kw, rest)) if kw.eq_ignore_ascii_case("ONBUILD") => rest.trim_start(),
+        _ => t.trim_end(),
+    }
+}
+
 /// The multi-stage stage table (WP-DF-03): the resolved output of every stage
 /// that has already finished building, in build order. A `FROM <base> [AS name]`
 /// starts a stage; when it completes, its result tree's manifest [`Digest`] is
@@ -293,6 +307,15 @@ pub fn build(
             Instr::Label { pairs } => exec_instr::label(&mut ctx, pairs)?,
             Instr::Arg { .. } => exec_instr::arg(&mut ctx, &step.instr)?,
             Instr::Shell { shell } => exec_instr::shell(&mut ctx, shell)?,
+            // WP-DF-HEALTHCHECK-ONBUILD: record the OCI healthcheck shape into the
+            // image config (incl `NONE` → disabled). Was the "unsupported" path.
+            Instr::Healthcheck { check } => exec_instr::healthcheck(&mut ctx, check)?,
+            // WP-DF-HEALTHCHECK-ONBUILD: record the ONBUILD trigger VERBATIM (the
+            // trigger fires on a DERIVED build that uses this image as a base —
+            // trigger-execution is a flagged follow-up; recording is the scope).
+            // The trigger text is `step.raw` with the leading `ONBUILD` keyword
+            // stripped (the continuation-joined source the parser preserved).
+            Instr::Onbuild { .. } => exec_instr::onbuild(&mut ctx, onbuild_trigger(&step.raw))?,
             // WP-DF-01 parses these into the AST; execution is DF-02..15. Until
             // then they route to the SAME "unsupported instruction" error path
             // as before (fail-closed, behavior-preserving — these never built).
