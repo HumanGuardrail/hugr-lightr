@@ -58,6 +58,49 @@ fn src_is_path(src: &str) -> bool {
     src.contains('/') || src.starts_with('.') || src.starts_with('~')
 }
 
+/// Lightr-only prefix marking a source as a content-addressed ref (CasRef).
+///
+/// Lightr is imageless/CAS-native (CLAUDE.md principle 2): a mount source may
+/// name a CAS ref instead of a host path / volume. A leading `@` selects this
+/// 4th kind. Disambiguation in `parse_v`: `@`-prefix (CasRef) > path
+/// (HostBind) > name (NamedVolume) — the `@` is checked FIRST, so a CAS ref
+/// wins even over a name that would otherwise be a valid volume name.
+const CAS_REF_PREFIX: char = '@';
+
+/// Resolve a raw mount source string into its [`MountKind`], stripping the
+/// `@` marker when the source is a CAS ref. Shared by `parse_v` and
+/// `parse_mount_long` so both syntaxes apply the SAME precedence:
+/// `@`-prefix (CasRef) > path (HostBind) > name (NamedVolume).
+///
+/// Returns the kind plus the source to store (sans `@` for a CasRef). Fail-
+/// closed on a bare `@` (empty ref) and on an invalid CasRef/volume name —
+/// both reuse the existing [`name_validate`] charset.
+fn classify_source(value: &str, src: &str) -> Result<(MountKind, String)> {
+    if let Some(refname) = src.strip_prefix(CAS_REF_PREFIX) {
+        if refname.is_empty() {
+            return Err(LightrError::InvalidRef(format!(
+                "malformed mount value '{value}': empty CAS ref after '@'"
+            )));
+        }
+        name_validate(refname).map_err(|_| {
+            LightrError::InvalidRef(format!(
+                "malformed mount value '{value}': invalid CAS ref '{refname}'"
+            ))
+        })?;
+        return Ok((MountKind::CasRef, refname.to_string()));
+    }
+    if src_is_path(src) {
+        return Ok((MountKind::HostBind, src.to_string()));
+    }
+    // Volume name — validate the Docker charset (reused from registry).
+    name_validate(src).map_err(|_| {
+        LightrError::InvalidRef(format!(
+            "malformed mount value '{value}': invalid volume name '{src}'"
+        ))
+    })?;
+    Ok((MountKind::NamedVolume, src.to_string()))
+}
+
 /// Fold one short-form / tmpfs option token into the spec. `ro`/`rw` set the
 /// readonly flag; everything else passes through into `opts` verbatim.
 fn fold_opt(opt: &str, readonly: &mut bool, opts: &mut Vec<String>) {
@@ -109,17 +152,13 @@ pub fn parse_v(value: &str) -> Result<MountSpec> {
         )));
     }
 
-    let kind = match &source {
-        None => MountKind::AnonVolume,
-        Some(src) if src_is_path(src) => MountKind::HostBind,
+    // Disambiguate SRC: `@`-prefix (CasRef) > path (HostBind) > name
+    // (NamedVolume). `classify_source` strips the `@` for a CasRef.
+    let (kind, source) = match source {
+        None => (MountKind::AnonVolume, None),
         Some(src) => {
-            // Volume name — validate the Docker charset (reused from registry).
-            name_validate(src).map_err(|_| {
-                LightrError::InvalidRef(format!(
-                    "malformed -v value '{value}': invalid volume name '{src}'"
-                ))
-            })?;
-            MountKind::NamedVolume
+            let (k, s) = classify_source(value, &src)?;
+            (k, Some(s))
         }
     };
 
@@ -192,12 +231,21 @@ pub fn parse_mount_long(value: &str) -> Result<MountSpec> {
         )));
     }
 
-    // `type=` defaults to `volume` in Docker; with a source it is a named
-    // volume, without one it is anonymous. type=bind/tmpfs override.
-    let kind = match kind {
-        Some(k) => k,
-        None if source.is_some() => MountKind::NamedVolume,
-        None => MountKind::AnonVolume,
+    // A `@`-prefixed source is a CAS ref (the imageless 4th kind) — it wins
+    // over `type=`, mirroring `parse_v`'s `@` > path > name precedence and
+    // strips the marker. Otherwise: `type=` defaults to `volume` in Docker;
+    // with a source it is a named volume, without one it is anonymous;
+    // type=bind/tmpfs override.
+    let (kind, source) = match source {
+        Some(src) if src.starts_with(CAS_REF_PREFIX) => {
+            let (k, s) = classify_source(value, &src)?;
+            (k, Some(s))
+        }
+        Some(src) => {
+            let k = kind.unwrap_or(MountKind::NamedVolume);
+            (k, Some(src))
+        }
+        None => (kind.unwrap_or(MountKind::AnonVolume), None),
     };
 
     Ok(MountSpec {

@@ -96,6 +96,48 @@ fn v_invalid_volume_name_errors() {
     assert!(parse_v("bad name:/dst").is_err());
 }
 
+// ── parse_v: CAS-ref source (WP-VOL-2) ──────────────────────────────────────
+
+#[test]
+fn v_cas_ref() {
+    // `@ref:/dst` → the imageless 4th kind; `@` stripped from the source.
+    let m = parse_v("@myref:/data").unwrap();
+    assert_eq!(m.kind, MountKind::CasRef);
+    assert_eq!(m.source.as_deref(), Some("myref"));
+    assert_eq!(m.target, "/data");
+    assert!(!m.readonly);
+}
+
+#[test]
+fn v_cas_ref_with_opts() {
+    let m = parse_v("@myref:/data:ro,z").unwrap();
+    assert_eq!(m.kind, MountKind::CasRef);
+    assert_eq!(m.source.as_deref(), Some("myref"));
+    assert!(m.readonly);
+    assert_eq!(m.opts, vec!["z".to_string()]);
+}
+
+#[test]
+fn v_cas_ref_empty_errors() {
+    // A bare `@` (empty ref) is fail-closed.
+    assert!(parse_v("@:/data").is_err());
+}
+
+#[test]
+fn v_cas_ref_invalid_name_errors() {
+    // `@bad name` reuses the name validator → rejected.
+    assert!(parse_v("@bad name:/data").is_err());
+}
+
+#[test]
+fn v_cas_ref_beats_name() {
+    // Precedence: `@` wins even when the rest would be a valid volume name
+    // (no slash, no leading `.`/`~`). `@` > path > name.
+    let m = parse_v("@plainname:/data").unwrap();
+    assert_eq!(m.kind, MountKind::CasRef);
+    assert_eq!(m.source.as_deref(), Some("plainname"));
+}
+
 // ── parse_mount_long ────────────────────────────────────────────────────────
 
 #[test]
@@ -201,6 +243,28 @@ fn mount_readonly_non_bool_errors() {
 #[test]
 fn mount_empty_value_errors() {
     assert!(parse_mount_long("").is_err());
+}
+
+#[test]
+fn mount_cas_ref_source() {
+    // `source=@ref` → CasRef (imageless 4th kind); `@` stripped.
+    let m = parse_mount_long("source=@myref,target=/data").unwrap();
+    assert_eq!(m.kind, MountKind::CasRef);
+    assert_eq!(m.source.as_deref(), Some("myref"));
+    assert_eq!(m.target, "/data");
+}
+
+#[test]
+fn mount_cas_ref_beats_type() {
+    // A `@`-source wins over `type=` — the imageless ref is the intent.
+    let m = parse_mount_long("type=volume,source=@myref,target=/data").unwrap();
+    assert_eq!(m.kind, MountKind::CasRef);
+    assert_eq!(m.source.as_deref(), Some("myref"));
+}
+
+#[test]
+fn mount_cas_ref_empty_errors() {
+    assert!(parse_mount_long("source=@,target=/data").is_err());
 }
 
 // ── parse_tmpfs ─────────────────────────────────────────────────────────────
