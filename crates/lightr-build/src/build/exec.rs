@@ -159,6 +159,14 @@ pub fn build(
                 chown.as_deref(),
                 chmod.as_deref(),
             )?,
+            // WP-DF-07: ADD = COPY local semantics + tar auto-extract; a URL src
+            // is an honest "non-hermetic, unsupported" error in the executor.
+            Instr::Add {
+                src,
+                dest,
+                chown,
+                chmod,
+            } => exec_instr::add(&mut ctx, src, dest, chown.as_deref(), chmod.as_deref())?,
             Instr::Env { pairs } => exec_instr::env(&mut ctx, pairs)?,
             Instr::Workdir { path } => exec_instr::workdir(&mut ctx, path)?,
             Instr::Cmd { argv, .. } => exec_instr::cmd(&mut ctx, argv)?,
@@ -207,3 +215,9 @@ mod df09_tests;
 #[cfg(test)]
 #[path = "exec_df06_tests.rs"]
 mod df06_tests;
+
+// WP-DF-07 ADD end-to-end tests: local copy (reuses DF-06) + tar auto-extract +
+// URL honest-unsupported + memo no-false-hit (sibling file, godfile cap).
+#[cfg(test)]
+#[path = "exec_df07_tests.rs"]
+mod df07_tests;

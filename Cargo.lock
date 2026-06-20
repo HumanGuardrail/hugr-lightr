@@ -639,6 +639,7 @@ name = "lightr-build"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "flate2",
  "indexmap",
  "libc",
  "lightr-core",
@@ -650,6 +651,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tar",
  "tempfile",
 ]
 

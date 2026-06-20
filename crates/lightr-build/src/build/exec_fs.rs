@@ -5,6 +5,13 @@ use lightr_core::{Digest, LightrError, Manifest, Result};
 use lightr_store::Store;
 use std::path::Path;
 
+// ADD tar auto-extract (WP-DF-07) lives in a sibling file, declared as a
+// `#[path]` submodule of `exec_fs` (godfile cap). `place_*` below call into it;
+// `ArchiveKind` stays reachable as `tar_extract::ArchiveKind` if ever needed.
+#[path = "exec_fs_tar.rs"]
+pub(crate) mod tar_extract;
+use tar_extract::{archive_kind, extract_archive};
+
 /// Materialize a snapshot (identified by its manifest digest) into `dest`.
 /// Clears `dest` first so we get a clean layer.
 pub(crate) fn materialize_from_digest(
@@ -227,6 +234,78 @@ pub(crate) fn glob_match(pat: &str, name: &str) -> bool {
         pi += 1;
     }
     pi == p.len()
+}
+
+/// Place resolved `sources` at `dest` (under `work_dir`) by the COPY/ADD
+/// directory rules, shared by both instructions (DF-07 reuses DF-06's placement).
+/// When `extract` (ADD), a source that is a recognized archive FILE is
+/// auto-extracted into the dir-dest; COPY passes `false`. `dest` is a DIRECTORY
+/// when it ends in `/`, there is >1 source, or (ADD only) any source auto-extracts.
+pub(crate) fn place_sources(
+    work_dir: &Path,
+    sources: &[std::path::PathBuf],
+    dest: &str,
+    meta: &CopyMeta,
+    extract: bool,
+) -> Result<()> {
+    let dest_path = if dest.starts_with('/') {
+        work_dir.join(dest.trim_start_matches('/'))
+    } else {
+        work_dir.join(dest)
+    };
+    let any_archive = extract
+        && sources
+            .iter()
+            .any(|s| s.is_file() && archive_kind(s).is_some());
+    let dest_is_dir = dest.ends_with('/') || sources.len() > 1 || any_archive;
+    if dest_is_dir {
+        std::fs::create_dir_all(&dest_path).map_err(LightrError::Io)?;
+        for src_path in sources {
+            place_one_into_dir(src_path, &dest_path, meta, extract)?;
+        }
+    } else {
+        // Single non-archive source, file-or-dir dest (COPY semantics exactly).
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent).map_err(LightrError::Io)?;
+        }
+        let src_path = &sources[0];
+        if src_path.is_file() {
+            std::fs::copy(src_path, &dest_path).map_err(LightrError::Io)?;
+            apply_meta(&dest_path, meta)?;
+        } else if src_path.is_dir() {
+            std::fs::create_dir_all(&dest_path).map_err(LightrError::Io)?;
+            copy_dir_recursive_meta(src_path, &dest_path, meta)?;
+            apply_meta(&dest_path, meta)?;
+        }
+    }
+    Ok(())
+}
+
+/// Place one resolved source INTO `dest_dir`. When `extract` (ADD) and the source
+/// is a recognized archive FILE, EXTRACT it (Docker auto-extract); otherwise a
+/// file lands as `dest_dir/<name>` and a dir copies its CONTENTS into `dest_dir`.
+fn place_one_into_dir(
+    src_path: &Path,
+    dest_dir: &Path,
+    meta: &CopyMeta,
+    extract: bool,
+) -> Result<()> {
+    if extract && src_path.is_file() {
+        if let Some(kind) = archive_kind(src_path) {
+            return extract_archive(src_path, dest_dir, kind, meta);
+        }
+    }
+    if src_path.is_file() {
+        let file_name = src_path.file_name().ok_or_else(|| {
+            LightrError::InvalidManifest("COPY/ADD: source has no file name".into())
+        })?;
+        let target = dest_dir.join(file_name);
+        std::fs::copy(src_path, &target).map_err(LightrError::Io)?;
+        apply_meta(&target, meta)?;
+    } else if src_path.is_dir() {
+        copy_dir_recursive_meta(src_path, dest_dir, meta)?;
+    }
+    Ok(())
 }
 
 /// Heuristic: does this argv likely read the clock or network?
