@@ -1,5 +1,8 @@
 //! Compose submodule -- re-exports the public compose API.
 pub mod down;
+/// CMP-P0-ENVFILE-SVC: per-service `env_file` loader (KEY=VAL fold, lower
+/// precedence than the inline `environment` block). Consumed by `lower.rs`.
+pub(crate) mod envfile;
 pub mod interp;
 pub(crate) mod lower;
 /// CMP-P0-MERGE: compose override deep-merge engine + merged parse entry point.
