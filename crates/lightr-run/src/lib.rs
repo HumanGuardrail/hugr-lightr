@@ -43,6 +43,10 @@ pub use run::types::{
 // used by SpecOnDisk — not re-exported, exactly like MountOnDisk.)
 pub use run::mount::{parse_mount_long, parse_tmpfs, parse_v, MountKind, MountSpec, ResolvedMount};
 
+// registry (WP-LIFE-01) — name→id registry API; consumed by the CLI-lifecycle
+// wiring WPs (LIFE-02/03 --name + verb name-resolution).
+pub use run::registry::{claim, name_validate, release, resolve};
+
 // memo
 pub use run::memo::{predict, run_memoized, run_memoized_with};
 

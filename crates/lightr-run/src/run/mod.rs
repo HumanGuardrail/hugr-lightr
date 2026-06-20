@@ -10,6 +10,7 @@ pub mod memo;
 pub mod mount;
 pub mod paths;
 pub mod ps;
+pub mod registry;
 pub mod spawn;
 pub mod stop;
 pub mod supervise;
