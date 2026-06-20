@@ -10,7 +10,7 @@ use std::path::Path;
 use lightr_core::{LightrError, Result};
 
 use super::envfile::read_env_file;
-use super::model::{empty_service, parse_duration_secs, Compose, Service};
+use super::model::{empty_service, parse_duration_secs, Compose, LoweredHealthcheck, Service};
 use super::ports::{parse_ports, ParsedPort};
 use super::spec::{ComposeSpec, Environment, Healthcheck, ServiceDef, StringOrList};
 
@@ -194,47 +194,79 @@ fn lower_pairs(items: &[String]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// `healthcheck`: defaults interval=30s, retries=3 (legacy). The `test`/`cmd`
-/// command is required — a healthcheck with no command is DROPPED (returns
-/// `None`), matching the legacy parser.
-fn lower_healthcheck(hc: Option<Healthcheck>) -> Result<Option<(String, u64, u32)>> {
+/// `healthcheck` (CMP-P1-HEALTH-FULL): lower the full compose form to the
+/// runtime tuple `(cmd, interval_s, timeout_s, start_period_s, retries)`.
+///
+/// Docker-faithful defaults are applied per missing field: interval 30s,
+/// timeout 30s, start_period 0s, retries 3 (matching the runtime
+/// `Healthcheck::new` defaults). A healthcheck is DROPPED (returns `None`) when:
+///  * `disable: true` (the explicit compose toggle), or
+///  * `test`/`cmd` is `NONE` (`["NONE"]` or the string `"NONE"`), or
+///  * no command is present at all (back-compat with the legacy parser).
+fn lower_healthcheck(hc: Option<Healthcheck>) -> Result<Option<LoweredHealthcheck>> {
     let Some(hc) = hc else {
         return Ok(None);
     };
+    // `disable: true` ⇒ no healthcheck, regardless of any other field.
+    if hc.disable == Some(true) {
+        return Ok(None);
+    }
     let cmd = match hc.test.or(hc.cmd) {
-        Some(t) => lower_test(t),
+        // `test: NONE` disables the healthcheck.
+        Some(t) => match lower_test(t) {
+            None => return Ok(None),
+            Some(c) => c,
+        },
         None => String::new(),
     };
     if cmd.is_empty() {
         return Ok(None);
     }
-    let interval = match hc.interval {
-        Some(v) => {
-            let s = value_to_str(&v);
-            parse_duration_secs(&s).ok_or_else(|| {
-                LightrError::InvalidManifest(format!("bad healthcheck interval: {s}"))
-            })?
-        }
-        None => 30,
-    };
+    let interval = duration_field(hc.interval, 30, "interval")?;
+    let timeout = duration_field(hc.timeout, 30, "timeout")?;
+    let start_period = duration_field(hc.start_period, 0, "start_period")?;
     let retries = hc.retries.unwrap_or(3);
-    Ok(Some((cmd, interval, retries)))
+    Ok(Some((cmd, interval, timeout, start_period, retries)))
 }
 
-/// `healthcheck.test`: a list strips a leading `CMD`/`CMD-SHELL` and joins the
-/// rest with a space; a string is taken verbatim (quote-trimmed).
-fn lower_test(t: StringOrList) -> String {
+/// Parse an optional compose duration field, falling back to `default` when
+/// absent. A present-but-unparseable value is a fail-closed error.
+fn duration_field(v: Option<serde_yaml::Value>, default: u64, name: &str) -> Result<u64> {
+    match v {
+        Some(v) => {
+            let s = value_to_str(&v);
+            parse_duration_secs(&s)
+                .ok_or_else(|| LightrError::InvalidManifest(format!("bad healthcheck {name}: {s}")))
+        }
+        None => Ok(default),
+    }
+}
+
+/// `healthcheck.test`: returns `None` when the test DISABLES the healthcheck
+/// (`NONE` in either string or `["NONE"]` list form). Otherwise a list strips a
+/// leading `CMD`/`CMD-SHELL` and joins the rest with a space; a string is taken
+/// verbatim (quote-trimmed).
+fn lower_test(t: StringOrList) -> Option<String> {
     match t {
-        StringOrList::String(s) => s.trim().trim_matches('"').to_string(),
-        StringOrList::List(mut parts) => {
-            if parts
-                .first()
-                .map(|p| p == "CMD" || p == "CMD-SHELL")
-                .unwrap_or(false)
-            {
-                parts.remove(0);
+        StringOrList::String(s) => {
+            let s = s.trim().trim_matches('"').to_string();
+            if s == "NONE" {
+                None
+            } else {
+                Some(s)
             }
-            parts.join(" ")
+        }
+        StringOrList::List(mut parts) => {
+            match parts.first().map(String::as_str) {
+                // `["NONE"]` disables the healthcheck.
+                Some("NONE") => return None,
+                // exec/shell forms strip the leading directive.
+                Some("CMD") | Some("CMD-SHELL") => {
+                    parts.remove(0);
+                }
+                _ => {}
+            }
+            Some(parts.join(" "))
         }
     }
 }

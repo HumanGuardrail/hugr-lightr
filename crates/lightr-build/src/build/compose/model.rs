@@ -3,6 +3,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// CMP-P1-HEALTH-FULL: a lowered compose healthcheck —
+/// `(cmd, interval_s, timeout_s, start_period_s, retries)`. These are exactly
+/// the fields the runtime `lightr_run::healthcheck::Healthcheck` carries (RC-4
+/// added timeout/start_period); the supervisor maps this tuple field-for-field.
+pub type LoweredHealthcheck = (String, u64, u64, u64, u32);
+
 pub struct Service {
     pub name: String,
     pub image_ref: String,
@@ -14,8 +20,8 @@ pub struct Service {
     pub secrets: Vec<(String, String)>,
     /// F-309: store-backed configs, each `(name, ref)`.
     pub configs: Vec<(String, String)>,
-    /// F-309: optional healthcheck `(cmd, interval_s, retries)`.
-    pub healthcheck: Option<(String, u64, u32)>,
+    /// CMP-P1-HEALTH-FULL: optional healthcheck — see [`LoweredHealthcheck`].
+    pub healthcheck: Option<LoweredHealthcheck>,
 }
 
 pub struct Compose {
@@ -48,9 +54,11 @@ pub struct ServiceSpec {
     /// F-309: store-backed configs `(name, ref)`.
     #[serde(default)]
     pub configs: Vec<(String, String)>,
-    /// F-309: optional healthcheck `(cmd, interval_s, retries)`.
+    /// CMP-P1-HEALTH-FULL: optional healthcheck — see [`LoweredHealthcheck`].
+    /// `#[serde(default)]` keeps pre-existing stack specs (no healthcheck field)
+    /// loading as `None`.
     #[serde(default)]
-    pub healthcheck: Option<(String, u64, u32)>,
+    pub healthcheck: Option<LoweredHealthcheck>,
 }
 
 pub struct ComposeHandle {
