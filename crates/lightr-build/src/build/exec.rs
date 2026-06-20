@@ -26,6 +26,62 @@ pub struct BuildReport {
     pub steps: u64,
     pub cached_steps: u64,
 }
+
+/// The multi-stage stage table (WP-DF-03): the resolved output of every stage
+/// that has already finished building, in build order. A `FROM <base> [AS name]`
+/// starts a stage; when it completes, its result tree's manifest [`Digest`] is
+/// recorded here under its 0-based index AND (when named) its lowercased name.
+/// `COPY --from=<name|index>` resolves against this table — so a stage can only
+/// reference a PRIOR stage (forward/self refs are absent ⇒ honest error).
+#[derive(Default)]
+pub(super) struct StageTable {
+    /// Each finished stage's output digest, in build order (index = position).
+    by_index: Vec<Digest>,
+    /// `name → output digest` for `FROM ... AS <name>` stages (lowercased;
+    /// Docker matches stage names case-insensitively).
+    by_name: std::collections::HashMap<String, Digest>,
+}
+
+impl StageTable {
+    /// Record a finished stage's output digest at its build-order index, and
+    /// (if the stage was named `AS <name>`) under its lowercased name.
+    pub(super) fn record(&mut self, name: Option<&str>, digest: Digest) {
+        self.by_index.push(digest);
+        if let Some(n) = name {
+            self.by_name.insert(n.to_ascii_lowercase(), digest);
+        }
+    }
+
+    /// Resolve a `COPY --from=<ref>` to a PRIOR stage's output digest. `ref` is a
+    /// stage NAME (case-insensitive) or a 0-based INDEX (a purely-numeric ref is
+    /// an index; otherwise a name). Unknown name, out-of-range / self / forward
+    /// index → honest fail-closed error (no silent half-copy). The external-IMAGE
+    /// `--from=<image>` form is OUT OF SCOPE for this WP: such a ref is neither a
+    /// known stage name nor a valid prior index, so it surfaces the same honest
+    /// "unknown stage / external image out of scope" error.
+    pub(super) fn resolve(&self, from: &str) -> Result<Digest> {
+        if !from.is_empty() && from.chars().all(|c| c.is_ascii_digit()) {
+            let idx: usize = from.parse().map_err(|_| {
+                LightrError::InvalidManifest(format!("COPY --from: invalid stage index {from:?}"))
+            })?;
+            return self.by_index.get(idx).copied().ok_or_else(|| {
+                LightrError::InvalidManifest(format!(
+                    "COPY --from={from}: no such prior stage (index out of range — \
+                     forward/self references are not allowed)"
+                ))
+            });
+        }
+        self.by_name
+            .get(&from.to_ascii_lowercase())
+            .copied()
+            .ok_or_else(|| {
+                LightrError::InvalidManifest(format!(
+                    "COPY --from={from}: unknown stage name (only PRIOR named stages are \
+                     valid; copying --from an external image is out of scope)"
+                ))
+            })
+    }
+}
 /// Execute a Dockerfile build.
 ///
 /// - RUN steps use the **native engine** (`rootfs: None`); no filesystem
@@ -37,6 +93,20 @@ pub struct BuildReport {
 ///   (DF-08, `build_args` = `--build-arg`). The memo key hashes the
 ///   POST-INTERPOLATION text (v2) — differing ENV/ARG never collide on a stale
 ///   layer; an UNUSED ARG changes no text, so it never busts the cache.
+/// - **Multi-stage (WP-DF-03):** `FROM <base> [AS <name>]` starts a new STAGE; a
+///   Dockerfile has 1..N stages. Each stage builds in order with its OWN reset
+///   filesystem/scope/shell/workdir/ENV (per-stage at FROM; global pre-FROM ARGs
+///   carry through `arg_state`) and is keyed INDEPENDENTLY (lineage resets at the
+///   stage boundary). The build OUTPUT is the LAST stage. `COPY --from=<name|
+///   index>` copies from a PRIOR stage's resolved output tree (folded into that
+///   step's key — a changed upstream stage busts the copy, no false hit).
+///   A single-FROM Dockerfile builds BYTE-IDENTICALLY to the pre-WP loop.
+///   **Ambiguity / out-of-scope (transcribe, don't design):** (1) `--target
+///   <stage>` is NOT wired — the `lightr build` CLI exposes no such flag and the
+///   handler is outside this WP's owned files, so the output stays the LAST stage;
+///   the stage table is ready for `--target` the moment the CLI grows the flag.
+///   (2) `COPY --from=<external image>` is OUT OF SCOPE — only STAGE refs resolve;
+///   an external-image `--from` is an honest "unknown stage / out of scope" error.
 pub fn build(
     context_dir: &Path,
     dockerfile: &Path,
@@ -75,7 +145,45 @@ pub fn build(
     // seeded from the base after FROM + updated by ENV (ENV wins over ARG).
     let mut scope = VarScope::default();
 
+    // WP-DF-03 multi-stage state. `stages` accumulates each finished stage's
+    // output (index + name) for `COPY --from`; `current_stage_name` is the
+    // in-progress stage's `AS <name>` (None until the first FROM, or an
+    // un-named stage). At each FROM AFTER the first, the in-progress stage is
+    // recorded into `stages` and `prev_layer_root` is RESET to None — a new
+    // stage keys INDEPENDENTLY of prior stages (Docker: stages share nothing
+    // but the explicit `COPY --from`). A single-FROM build records exactly one
+    // stage at the end and is byte-identical to the pre-WP single-stage loop.
+    let mut stages = StageTable::default();
+    let mut current_stage_name: Option<String> = None;
+    let mut stage_in_progress = false;
+
     for step in &steps {
+        // Stage boundary: a FROM that is NOT the first finalizes the prior stage
+        // (record its output for `COPY --from`) and resets the per-build-key
+        // lineage so the new stage is keyed independently.
+        if let Instr::From { stage, .. } = &step.instr {
+            if stage_in_progress {
+                if let Some(root) = prev_layer_root {
+                    stages.record(current_stage_name.as_deref(), root);
+                }
+                prev_layer_root = None;
+            }
+            current_stage_name = stage.clone();
+            stage_in_progress = true;
+        }
+
+        // WP-DF-03: a `COPY --from=<stage>` folds the SOURCE stage's resolved
+        // output digest into its key (no false hit when the upstream changes).
+        // Resolved here (fail-closed on unknown/forward/self/external-image) so
+        // the AC lookup below already reflects the upstream identity. Non-`--from`
+        // steps resolve to None ⇒ key byte-identical to before this WP.
+        let from_stage_digest = match &step.instr {
+            Instr::Copy {
+                from: Some(from), ..
+            } => Some(stages.resolve(&interpolate(from, &scope, escape)?)?),
+            _ => None,
+        };
+
         let key = step_key(
             prev_layer_root,
             step,
@@ -83,6 +191,7 @@ pub fn build(
             &scope,
             escape,
             &current_shell,
+            from_stage_digest,
         )?;
 
         // AC lookup
@@ -137,6 +246,7 @@ pub fn build(
             accumulated_env: &mut accumulated_env,
             current_workdir: &mut current_workdir,
             current_shell: &mut current_shell,
+            stages: &stages,
         };
         match &step.instr {
             Instr::From { image_ref, .. } => exec_instr::from(&mut ctx, &step.instr, image_ref)?,
@@ -185,8 +295,15 @@ pub fn build(
         prev_layer_root = Some(new_root);
     }
 
+    // The LAST stage's output is the build result (WP-DF-03; `--target` would
+    // select a different stage — see the note below: no CLI flag exists yet).
+    // Record it too so the table is complete (and a `COPY --from=<last>` from a
+    // hypothetical later step would resolve — though none can follow the end).
     let final_root = prev_layer_root
         .ok_or_else(|| LightrError::InvalidManifest("empty Dockerfile".to_string()))?;
+    if stage_in_progress {
+        stages.record(current_stage_name.as_deref(), final_root);
+    }
 
     Ok(BuildReport {
         name: name.to_string(),
@@ -221,3 +338,10 @@ mod df06_tests;
 #[cfg(test)]
 #[path = "exec_df07_tests.rs"]
 mod df07_tests;
+
+// WP-DF-03 multi-stage end-to-end tests: 2-stage build + COPY --from=name/index +
+// unknown/forward/external honest errors + memo no-false-hit + single-stage
+// byte-identical (sibling file, godfile cap).
+#[cfg(test)]
+#[path = "exec_df03_tests.rs"]
+mod df03_tests;
