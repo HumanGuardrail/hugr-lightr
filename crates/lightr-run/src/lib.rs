@@ -38,6 +38,11 @@ pub use run::types::{
     VzMemoKey,
 };
 
+// R-MOUNT (parity-contract.md §0): frozen volume TYPES. PARSING is WP-VOL-1.
+// (MountOnDisk2 / PortOnDisk are pub(super) serde-mirror types in run::types,
+// used by SpecOnDisk — not re-exported, exactly like MountOnDisk.)
+pub use run::mount::{parse_mount_long, parse_tmpfs, parse_v, MountKind, MountSpec, ResolvedMount};
+
 // memo
 pub use run::memo::{predict, run_memoized, run_memoized_with};
 

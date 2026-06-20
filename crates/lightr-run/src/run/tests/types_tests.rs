@@ -35,6 +35,7 @@ fn spec_on_disk_vz_roundtrip_preserves_engine_and_rootfs() {
         engine: "vz".to_string(),
         rootfs_ref: Some("alpine".to_string()),
         env: vec![],
+        ..Default::default()
     };
     write_spec_json(dir.path(), &spec).expect("write");
     let back = read_spec_on_disk(dir.path()).expect("read");

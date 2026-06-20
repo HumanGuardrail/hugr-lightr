@@ -113,6 +113,14 @@ fn boot_vm(
         // (matching the switch's DHCP lease / MAC-table key) instead of a
         // hardcoded one. This is the seam under validation.
         net_mac: Some(mesh_mac),
+        mounts: &[],
+        env: &[],
+        workdir: None,
+        user: None,
+        hostname: None,
+        add_host: &[],
+        dns: &[],
+        mesh_ip: None,
     };
     let code = engine
         .run(&spec)

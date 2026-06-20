@@ -87,6 +87,14 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         // None keeps today's single-NAT-NIC behavior unchanged.
                         net_fd: None,
                         net_mac: None,
+                        mounts: &[],
+                        env: &[],
+                        workdir: None,
+                        user: None,
+                        hostname: None,
+                        add_host: &[],
+                        dns: &[],
+                        mesh_ip: None,
                     };
                     engine.run(&spec).unwrap_or(255)
                 }

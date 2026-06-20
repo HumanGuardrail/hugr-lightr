@@ -165,6 +165,14 @@ pub fn build(
                     net: false,
                     net_fd: None,
                     net_mac: None,
+                    mounts: &[],
+                    env: &[],
+                    workdir: None,
+                    user: None,
+                    hostname: None,
+                    add_host: &[],
+                    dns: &[],
+                    mesh_ip: None,
                 };
                 let mut cmd_builder = std::process::Command::new(&argv[0]);
                 if argv.len() > 1 {
