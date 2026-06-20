@@ -156,6 +156,35 @@ fn copy_one_sidecar(root: &Path, dir: &str, src: &str, dst: &str) -> Result<()> 
     Ok(())
 }
 
+// ── WP-IMG-07: remove image sidecars (oci rmi — untag) ───────────────────────
+//
+// `oci rmi <ref>` removes the ref's image sidecars (config + manifest record)
+// so the image record disappears with the tag. Only the 32-byte sidecar
+// POINTERS are deleted — the CAS blobs they referenced are left untouched
+// (they become gc candidates, reclaimed by `lightr gc`, never swept here).
+
+/// Remove both image sidecars (config + manifest) for `name`. Each family is
+/// removed only if present (no-op otherwise — idempotent/fail-soft). Deletes
+/// only the sidecar pointer file; the CAS blob it pointed at is NOT touched
+/// (becomes a gc candidate). Used by `oci rmi`.
+pub fn remove_image_sidecars(root: &Path, name: &str) -> Result<()> {
+    lightr_core::validate_ref_name(name)?;
+    remove_one_sidecar(root, "imgmeta", name)?;
+    remove_one_sidecar(root, "imgmanifest", name)?;
+    Ok(())
+}
+
+/// Remove a single sidecar family's pointer for `name` under `<root>/<dir>/`.
+/// No-op if absent (idempotent). Only the pointer file is deleted.
+fn remove_one_sidecar(root: &Path, dir: &str, name: &str) -> Result<()> {
+    let key = lightr_core::ref_key(name);
+    let path = sidecar_path(root, dir, &key);
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
 /// Sidecar pointer path for a family dir: `<root>/<dir>/<2hex>/<62hex of key>`.
 fn sidecar_path(root: &Path, dir: &str, key: &Digest) -> PathBuf {
     let hex = key.to_hex();

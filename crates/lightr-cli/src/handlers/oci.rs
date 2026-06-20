@@ -144,11 +144,7 @@ pub fn push_image(store_ref: &str, target: &str, json: bool) -> i32 {
     0
 }
 
-// ── image ops (CLI-surface freeze — honest fail-closed stubs) ──────────────────
-//
-// `docker tag/save/load/images/rmi/history` map to `oci <verb>` (the shim does
-// the translation, untouched here). Behavior lands in WP-IMG-*.
-
+// ── image ops ─ `docker tag/save/load/images/rmi/history` → `oci <verb>` ───────
 use crate::handlers::stub::stub;
 
 /// `oci tag <src> <target>` — alias an existing store ref to a new name,
@@ -375,9 +371,20 @@ fn human_size(bytes: u64) -> String {
     format!("{size:.1}{}", UNITS[unit])
 }
 
-/// `oci rmi <targets...>` — remove one or more images (docker rmi).
-pub fn rmi(_targets: &[String], _force: bool) -> i32 {
-    stub("oci rmi", "WP-IMG-03")
+/// `oci rmi <targets...>` — remove image ref(s), docker-faithful (WP-IMG-07).
+/// Thin wiring (logic/render/exit-code live in `lightr_oci`; CAS objects left as
+/// gc candidates). In-use = rootfs refs of running instances; `-f` bypasses.
+pub fn rmi(targets: &[String], force: bool) -> i32 {
+    let store = match Store::open(Store::default_root()) {
+        Ok(s) => s,
+        Err(e) => return die_lightr(&e),
+    };
+    let in_use: Vec<String> = lightr_run::ps(&crate::lightr_home())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| r.running.then_some(r.rootfs_ref).flatten())
+        .collect();
+    lightr_oci::render_rmi_results(&lightr_oci::rmi_many(&store, targets, &in_use, force))
 }
 
 /// `oci history <target>` — show the layer history of an image (docker history).

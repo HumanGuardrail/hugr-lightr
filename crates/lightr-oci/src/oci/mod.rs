@@ -11,6 +11,7 @@ pub(crate) mod pull;
 pub(crate) mod push;
 pub(crate) mod reference;
 pub(crate) mod retain;
+pub(crate) mod rmi;
 pub(crate) mod save;
 pub(crate) mod util;
 
