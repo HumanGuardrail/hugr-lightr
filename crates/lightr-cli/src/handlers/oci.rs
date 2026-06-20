@@ -151,9 +151,67 @@ pub fn push_image(store_ref: &str, target: &str, json: bool) -> i32 {
 
 use crate::handlers::stub::stub;
 
-/// `oci tag <src> <target>` — add a ref alias to an image (docker tag).
-pub fn tag(_src: &str, _target: &str) -> i32 {
-    stub("oci tag", "WP-IMG-03")
+/// `oci tag <src> <target>` — alias an existing store ref to a new name,
+/// Docker-faithful, with ZERO data copy (WP-IMG-03).
+///
+/// Resolves `src` → its root digest, then creates/repoints `target` at the same
+/// root (last-write-wins on `target`). Fail-closed: an absent `src` is an error
+/// (exit 2, RefNotFound) — never a silent empty alias. The image sidecars
+/// (config + manifest, IMG-01) are copied to `target` so a later faithful
+/// `oci push` of the alias reproduces the original image; no CAS object is
+/// duplicated (only the ref pointer + the 32-byte sidecar pointers).
+pub fn tag(src: &str, target: &str) -> i32 {
+    // Validate both names first — exit 2 on invalid (matches push_image).
+    if let Err(e) = validate_ref_name(src) {
+        return die_lightr(&e);
+    }
+    if let Err(e) = validate_ref_name(target) {
+        return die_lightr(&e);
+    }
+
+    let store = match Store::open(Store::default_root()) {
+        Ok(s) => s,
+        Err(e) => return die_lightr(&e),
+    };
+
+    match tag_in_store(&store, src, target) {
+        Ok(()) => 0,
+        Err(e) => die_lightr(&e),
+    }
+}
+
+/// Core of `oci tag`, store injected (parallel-safe — no process-global env).
+/// Returns `RefNotFound(src)` if `src` is absent (fail-closed). On success the
+/// alias is written and the image sidecars are copied.
+fn tag_in_store(store: &Store, src: &str, target: &str) -> lightr_core::Result<()> {
+    use lightr_core::{LightrError, RefRecord};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Resolve src → its record. Absent ⇒ fail-closed (no silent empty alias).
+    let src_rec = store
+        .ref_get(src)?
+        .ok_or_else(|| LightrError::RefNotFound(src.to_string()))?;
+
+    // Repoint target at the SAME root (zero data copy). The alias derives from
+    // src, so record src's root as the parent and preserve the original
+    // tool_version (the image was built by that version — faithful fidelity).
+    let created_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dst_rec = RefRecord {
+        name: target.to_string(),
+        root: src_rec.root,
+        parent: Some(src_rec.root),
+        created_at_unix,
+        tool_version: src_rec.tool_version.clone(),
+    };
+    store.ref_put(&dst_rec)?;
+
+    // Copy the image sidecars so the alias stays faithfully pushable. No-op if
+    // src has no sidecar (tag still works). Shares CAS blobs — no duplication.
+    store.copy_image_sidecars(src, target)?;
+    Ok(())
 }
 
 /// `oci save <store-ref> [--output]` — export an image to a tar (docker save).
@@ -184,58 +242,5 @@ pub fn history(_target: &str, _json: bool) -> i32 {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    // Handler-level unit checks — no network; clap parse tests are in main.rs.
-
-    #[test]
-    fn import_bad_ref_exits_2() {
-        // Uppercase name is invalid ref
-        let code = super::import("/some/path", "INVALID", false);
-        assert_eq!(code, 2, "bad ref name must exit 2");
-    }
-
-    #[test]
-    fn import_empty_ref_exits_2() {
-        let code = super::import("/some/path", "", false);
-        assert_eq!(code, 2, "empty ref name must exit 2");
-    }
-
-    #[test]
-    fn pull_bad_ref_exits_2() {
-        let code = super::pull_image("alpine", "INVALID", false);
-        assert_eq!(code, 2, "bad ref name must exit 2");
-    }
-
-    #[test]
-    fn pull_empty_ref_exits_2() {
-        let code = super::pull_image("alpine", "", false);
-        assert_eq!(code, 2, "empty ref name must exit 2");
-    }
-
-    #[test]
-    fn push_bad_ref_exits_2() {
-        // Uppercase store-ref is an invalid ref name → exit 2.
-        let code = super::push_image("INVALID", "localhost:5000/x:latest", false);
-        assert_eq!(code, 2, "bad store-ref name must exit 2");
-    }
-
-    #[test]
-    fn push_empty_ref_exits_2() {
-        let code = super::push_image("", "localhost:5000/x:latest", false);
-        assert_eq!(code, 2, "empty store-ref name must exit 2");
-    }
-
-    #[test]
-    fn push_unknown_ref_exits_2() {
-        // Valid name but absent ref → RefNotFound → exit 2 (no network touched).
-        // Uses an isolated LIGHTR_HOME so it never hits the user's real store.
-        let _guard = crate::test_lock::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("LIGHTR_HOME", tmp.path());
-        let code = super::push_image("@t/never-pushed", "localhost:5000/x:latest", false);
-        std::env::remove_var("LIGHTR_HOME");
-        assert_eq!(code, 2, "unknown ref must exit 2 (RefNotFound)");
-    }
-}
+#[path = "oci_tests.rs"]
+mod tests;
