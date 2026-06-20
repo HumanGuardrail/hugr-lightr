@@ -4,6 +4,7 @@
 pub(crate) mod http;
 pub(crate) mod import;
 pub(crate) mod layer;
+pub(crate) mod load;
 pub(crate) mod model;
 pub(crate) mod pull;
 pub(crate) mod push;

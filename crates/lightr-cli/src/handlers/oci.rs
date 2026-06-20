@@ -249,9 +249,40 @@ pub fn save(store_ref: &str, output: Option<&str>) -> i32 {
     0
 }
 
-/// `oci load [--input]` — import an image from a tar (docker load).
-pub fn load(_input: Option<&str>) -> i32 {
-    stub("oci load", "WP-IMG-03")
+/// `oci load [-i in.tar]` — import an image from a tar (docker load, WP-IMG-05).
+///
+/// The verb-level inverse of `oci save`: read a `docker save`/OCI-layout tar from
+/// `-i <file>` or stdin (Docker's default), import it via the RETAINING path
+/// (IMG-01 — original blobs + manifest retained, so the loaded image is
+/// faithfully re-pushable and `load(save(x))` reproduces `x`), and tag it under
+/// the ref embedded in the tar's `RepoTags` (or a deterministic content fallback
+/// when the save carried no tag). The resolved ref + root go to STDERR (stdout
+/// stays clean). Fail-closed: a malformed/absent tar → exit 1; an unsanitizable
+/// tag → exit 2.
+pub fn load(input: Option<&str>) -> i32 {
+    let store = match Store::open(Store::default_root()) {
+        Ok(s) => s,
+        Err(e) => return die_lightr(&e),
+    };
+
+    let in_path = input.map(std::path::Path::new);
+    let report = match lightr_oci::load(in_path, &store) {
+        Ok(r) => r,
+        Err(e) => return die_lightr(&e),
+    };
+
+    let hex = report.root.to_hex();
+    let short = &hex[..16];
+    let origin = if report.tagged_from_tar {
+        "from RepoTags"
+    } else {
+        "untagged save (content fallback)"
+    };
+    eprintln!(
+        "loaded name={} root={} layers={} files={} ({origin})",
+        report.name, short, report.layers, report.files
+    );
+    0
 }
 
 /// `oci images` — list stored images (docker images).
