@@ -34,7 +34,10 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             config,
             health_cmd,
             health_interval,
+            health_timeout,
+            health_start_period,
             health_retries,
+            no_healthcheck,
             // ── Docker-parity run flags (CLI-surface freeze) ──────────────────
             name,
             rm,
@@ -76,6 +79,15 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             if new_flag_set {
                 stub("run (docker-parity flags)", "WP-RUNFLAGS")
             } else {
+                // WP-RC-4: bundle the wired --health-* flags.
+                let health = handlers::run::HealthFlags {
+                    cmd: health_cmd,
+                    interval: health_interval,
+                    timeout: health_timeout,
+                    start_period: health_start_period,
+                    retries: health_retries,
+                    no_healthcheck,
+                };
                 handlers::run::run(
                     &dir,
                     &input,
@@ -93,9 +105,7 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                     cpus.as_deref(),
                     &secret,
                     &config,
-                    health_cmd.as_deref(),
-                    health_interval,
-                    health_retries,
+                    &health,
                 )
             }
         }
