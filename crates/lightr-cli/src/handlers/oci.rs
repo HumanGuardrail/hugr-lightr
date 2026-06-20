@@ -285,9 +285,94 @@ pub fn load(input: Option<&str>) -> i32 {
     0
 }
 
-/// `oci images` — list stored images (docker images).
-pub fn images(_json: bool) -> i32 {
-    stub("oci images", "WP-IMG-03")
+/// `oci images` — list stored images (docker `docker images`), WP-IMG-06.
+///
+/// Columns: REPOSITORY, TAG, IMAGE ID, SIZE. Each stored ref is parsed into
+/// `repo:tag` (a ref with no `:` → TAG `<none>`, as docker prints); IMAGE ID is
+/// the 12-char short hex of the ref's root digest; SIZE is the total bytes of
+/// the UNIQUE CAS objects reachable from that ref (each object counted once).
+/// `--json` emits the rows as a JSON array. Fail-closed on any store error;
+/// an empty store prints just the header (nothing for JSON: `[]`).
+///
+/// Surface note: the frozen `Images` subcommand exposes ONLY `--json`. Docker's
+/// `-q/--quiet` and `--digests` are NOT on the surface, so they are deferred
+/// here (the core `list_images` already returns the short id + full digest, so
+/// adding them is a pure CLI-surface change when the enum is unfrozen).
+pub fn images(json: bool) -> i32 {
+    let store = match Store::open(Store::default_root()) {
+        Ok(s) => s,
+        Err(e) => return die_lightr(&e),
+    };
+
+    let rows = match lightr_oci::list_images(&store) {
+        Ok(r) => r,
+        Err(e) => return die_lightr(&e),
+    };
+
+    if json {
+        print_images_json(&rows);
+    } else {
+        print_images_table(&rows);
+    }
+    0
+}
+
+#[derive(Serialize)]
+struct ImageJson {
+    repository: String,
+    tag: String,
+    id: String,
+    digest: String,
+    size: u64,
+}
+
+/// Emit the rows as a JSON array (empty store → `[]`).
+fn print_images_json(rows: &[lightr_oci::ImageRow]) {
+    let out: Vec<ImageJson> = rows
+        .iter()
+        .map(|r| ImageJson {
+            repository: r.repository.clone(),
+            tag: r.tag.clone(),
+            id: r.image_id.clone(),
+            digest: r.digest.clone(),
+            size: r.size,
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::to_string(&out).expect("serialize images list")
+    );
+}
+
+/// Emit the docker-`images`-shaped table: header always, one tab-aligned row
+/// per image. Empty store → just the header.
+fn print_images_table(rows: &[lightr_oci::ImageRow]) {
+    println!("REPOSITORY\tTAG\tIMAGE ID\tSIZE");
+    for r in rows {
+        println!(
+            "{}\t{}\t{}\t{}",
+            r.repository,
+            r.tag,
+            r.image_id,
+            human_size(r.size)
+        );
+    }
+}
+
+/// Render a byte count the way docker does (B/KB/MB/GB, base-1000, one decimal
+/// above bytes). Keeps the SIZE column docker-faithful at a glance.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes}B");
+    }
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1000.0 && unit < UNITS.len() - 1 {
+        size /= 1000.0;
+        unit += 1;
+    }
+    format!("{size:.1}{}", UNITS[unit])
 }
 
 /// `oci rmi <targets...>` — remove one or more images (docker rmi).
