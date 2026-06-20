@@ -27,6 +27,7 @@ pub mod rename;
 pub mod restart;
 pub mod rm;
 pub mod run;
+pub mod runproc;
 pub mod schema;
 pub mod snapshot;
 pub mod start;
