@@ -28,11 +28,24 @@ pub struct Compose {
     pub services: Vec<Service>,
 }
 
+/// The project name a pre-CMP-P1-PROJECT `spec.json` is read back as (it had
+/// no `project` field). Matches Docker's "default" fallback so old stacks
+/// behave as before under project-aware `compose down`.
+fn default_project() -> String {
+    "default".to_string()
+}
+
 /// On-disk spec written by `compose_up` for the supervisor process.
 #[derive(Serialize, Deserialize)]
 pub struct StackSpec {
     pub ttl_secs: u64,
     pub created_at_unix: u64,
+    /// CMP-P1-PROJECT: the project name namespacing this stack
+    /// (precedence cli>env>`name:`>basename, resolved at `compose up`).
+    /// `#[serde(default = ...)]` keeps pre-existing stack specs (no `project`
+    /// field) loading as `"default"`.
+    #[serde(default = "default_project")]
+    pub project: String,
     /// pid of the supervisor process (written after fork)
     pub supervisor_pid: Option<u32>,
     pub services: Vec<ServiceSpec>,

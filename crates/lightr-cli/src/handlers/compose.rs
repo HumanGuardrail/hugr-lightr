@@ -1,8 +1,8 @@
 //! `lightr compose up/down` handlers — build-spec-r3 §5.
 //!
 //! Sub-verbs:
-//!   compose up [-f compose.yml] [--eager] [--ttl <secs=3600>]
-//!   compose down [-f compose.yml]
+//!   compose up [-f compose.yml] [-p <project>] [--eager] [--ttl <secs=3600>]
+//!   compose down [-f compose.yml] [-p <project>]
 //!
 //! Exit codes:
 //!   0  — success (listeners bound / stack torn down)
@@ -14,14 +14,46 @@
 //!
 //! `up` --json: `{"services":[...],"stack_dir":"<path>"}`
 //!
-//! `down` reads the most-recent compose stack under $LIGHTR_HOME/compose/
-//! unless a specific stack dir is resolved from the compose file's presence.
+//! `down` reads the most-recent compose stack under $LIGHTR_HOME/compose/.
+//! CMP-P1-PROJECT: when a project is resolved (flag/env/`name:`/basename), the
+//! teardown is scoped to stacks recorded under that project name.
 
-use lightr_build::{compose_down, compose_up, parse_compose};
+use lightr_build::{
+    compose_down, compose_up, dir_basename, parse_compose, parse_compose_project_name,
+    resolve_project_name, StackSpec,
+};
 use lightr_store::Store;
 use serde::Serialize;
 
 use crate::exit::die_lightr;
+
+/// CMP-P1-PROJECT: resolve the effective project name for a compose file.
+///
+/// Precedence (Docker): `-p`/`--project-name` flag > `COMPOSE_PROJECT_NAME`
+/// env > the compose file's top-level `name:` field > the sanitized basename of
+/// the compose file's directory. Reading the env here (not in the resolver)
+/// keeps the resolver pure + tests parallel-safe. Fail-closed: an explicit
+/// (flag/env/`name:`) value that sanitizes to nothing is an honest error.
+fn resolve_project(
+    project: Option<&str>,
+    compose_file: &str,
+    text: &str,
+) -> lightr_core::Result<String> {
+    let env = std::env::var("COMPOSE_PROJECT_NAME").ok();
+    let env_ref = env.as_deref().filter(|s| !s.is_empty());
+    let file_name = parse_compose_project_name(text)?;
+    let path = std::path::Path::new(compose_file);
+    // The project directory is the compose file's parent; an absolute file with
+    // no parent (or a bare filename) falls back to the current dir's basename.
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    let basename = dir_basename(&dir);
+    resolve_project_name(project, env_ref, file_name.as_deref(), &basename)
+}
 
 // ── JSON output for `compose up` ──────────────────────────────────────────────
 
@@ -41,7 +73,7 @@ struct ComposeServiceJson {
 
 // ── `compose up` handler ──────────────────────────────────────────────────────
 
-pub fn up(compose_file: &str, eager_all: bool, ttl: u64, json: bool) -> i32 {
+pub fn up(compose_file: &str, project: Option<&str>, eager_all: bool, ttl: u64, json: bool) -> i32 {
     // Read and parse the compose file
     let text = match std::fs::read_to_string(compose_file) {
         Ok(t) => t,
@@ -49,6 +81,13 @@ pub fn up(compose_file: &str, eager_all: bool, ttl: u64, json: bool) -> i32 {
             eprintln!("lightr: compose up: cannot read {compose_file}: {e}");
             return 1;
         }
+    };
+
+    // CMP-P1-PROJECT: resolve the project name (cli>env>name>basename) BEFORE
+    // any provisioning — a rejected explicit name fails closed here.
+    let project_name = match resolve_project(project, compose_file, &text) {
+        Ok(p) => p,
+        Err(e) => return die_lightr(&e),
     };
 
     let mut compose = match parse_compose(&text) {
@@ -68,7 +107,7 @@ pub fn up(compose_file: &str, eager_all: bool, ttl: u64, json: bool) -> i32 {
         Err(e) => return die_lightr(&e),
     };
 
-    let handle = match compose_up(&compose, &store, ttl) {
+    let handle = match compose_up(&compose, &store, ttl, &project_name) {
         Ok(h) => h,
         Err(e) => return die_lightr(&e),
     };
@@ -107,12 +146,26 @@ pub fn up(compose_file: &str, eager_all: bool, ttl: u64, json: bool) -> i32 {
 
 // ── `compose down` handler ────────────────────────────────────────────────────
 
+/// The project name recorded in a stack dir's `spec.json`, if readable.
+/// Pre-CMP-P1-PROJECT specs (no `project` field) read back as `"default"` via
+/// the model's serde default.
+fn stack_project(stack_dir: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(stack_dir.join("spec.json")).ok()?;
+    let spec: StackSpec = serde_json::from_slice(&bytes).ok()?;
+    Some(spec.project)
+}
+
 /// Resolve the stack directory for `compose down`.
 ///
 /// Strategy: walk `$LIGHTR_HOME/compose/` and return the most-recently
 /// created subdirectory (name is `<nanos>-<pid>` so lexicographic sort
-/// gives newest-last). If none found, return an error.
-fn resolve_latest_stack() -> Option<std::path::PathBuf> {
+/// gives newest-last). If none found, return `None`.
+///
+/// CMP-P1-PROJECT: when `project` is `Some`, only stacks whose recorded
+/// `project` matches are considered, so `compose down -p A` never tears down
+/// project B (the projects-don't-collide invariant). When `None`, behavior is
+/// preserved exactly: the newest stack regardless of project.
+fn resolve_latest_stack(project: Option<&str>) -> Option<std::path::PathBuf> {
     let home = crate::lightr_home();
     let compose_dir = home.join("compose");
     if !compose_dir.is_dir() {
@@ -123,21 +176,57 @@ fn resolve_latest_stack() -> Option<std::path::PathBuf> {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
         .map(|e| e.path())
+        .filter(|p| match project {
+            Some(name) => stack_project(p).as_deref() == Some(name),
+            None => true,
+        })
         .collect();
     // Sort ascending by name (nanos prefix) ⇒ last = newest
     entries.sort();
     entries.into_iter().last()
 }
 
-pub fn down(compose_file: Option<&str>) -> i32 {
-    // We don't currently use compose_file to locate the stack (no reverse mapping)
-    // — we pick the most-recent stack dir from $LIGHTR_HOME/compose/.
-    let _ = compose_file;
+/// `down` resolves the project name (cli>env>`name:`>basename) only when it
+/// has a compose file to read for the `name:`/basename rungs; otherwise it
+/// honors just the flag/env and falls through to the un-filtered newest stack
+/// (today's behavior) when neither is given.
+fn down_project(
+    project: Option<&str>,
+    compose_file: Option<&str>,
+) -> lightr_core::Result<Option<String>> {
+    // An explicit flag always selects a project.
+    if let Some(p) = project {
+        return resolve_project(Some(p), compose_file.unwrap_or("compose.yml"), "").map(Some);
+    }
+    // COMPOSE_PROJECT_NAME alone also scopes the teardown.
+    if let Ok(env) = std::env::var("COMPOSE_PROJECT_NAME") {
+        if !env.is_empty() {
+            return resolve_project(None, compose_file.unwrap_or("compose.yml"), "").map(Some);
+        }
+    }
+    // A compose file lets us derive the project from `name:`/basename.
+    if let Some(cf) = compose_file {
+        if let Ok(text) = std::fs::read_to_string(cf) {
+            return resolve_project(None, cf, &text).map(Some);
+        }
+    }
+    // No flag, env, or readable file ⇒ preserve today's "newest stack" behavior.
+    Ok(None)
+}
 
-    let stack_dir = match resolve_latest_stack() {
+pub fn down(compose_file: Option<&str>, project: Option<&str>) -> i32 {
+    let scope = match down_project(project, compose_file) {
+        Ok(s) => s,
+        Err(e) => return die_lightr(&e),
+    };
+
+    let stack_dir = match resolve_latest_stack(scope.as_deref()) {
         Some(d) => d,
         None => {
-            eprintln!("lightr: compose down: no active compose stack found");
+            match &scope {
+                Some(p) => eprintln!("lightr: compose down: no active stack for project '{p}'"),
+                None => eprintln!("lightr: compose down: no active compose stack found"),
+            }
             return 1;
         }
     };
@@ -157,7 +246,7 @@ mod tests {
     /// `compose up` with a missing file ⇒ exit 1
     #[test]
     fn compose_up_missing_file_exits_1() {
-        let code = super::up("/no/such/file.yml", false, 3600, false);
+        let code = super::up("/no/such/file.yml", None, false, 3600, false);
         assert_eq!(code, 1, "missing compose file must exit 1");
     }
 
@@ -171,7 +260,7 @@ mod tests {
         std::env::set_var("LIGHTR_HOME", tmp.path());
         let f = tmp.path().join("compose.yml");
         std::fs::write(&f, "services:\n").unwrap();
-        let code = super::up(f.to_str().unwrap(), false, 3600, false);
+        let code = super::up(f.to_str().unwrap(), None, false, 3600, false);
         std::env::remove_var("LIGHTR_HOME");
         assert_eq!(code, 0);
     }
@@ -184,7 +273,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().unwrap();
         std::env::set_var("LIGHTR_HOME", tmp.path());
-        let code = super::down(None);
+        let code = super::down(None, None);
         std::env::remove_var("LIGHTR_HOME");
         assert_eq!(code, 1, "no active stack must exit 1");
     }
@@ -197,7 +286,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().unwrap();
         std::env::set_var("LIGHTR_HOME", tmp.path());
-        let result = super::resolve_latest_stack();
+        let result = super::resolve_latest_stack(None);
         std::env::remove_var("LIGHTR_HOME");
         assert!(result.is_none());
     }

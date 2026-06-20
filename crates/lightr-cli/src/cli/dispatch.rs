@@ -199,8 +199,15 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             explain,
         ),
         Cmd::Compose { subcmd } => match subcmd {
-            ComposeCmd::Up { file, eager, ttl } => handlers::compose::up(&file, eager, ttl, json),
-            ComposeCmd::Down { file } => handlers::compose::down(file.as_deref()),
+            ComposeCmd::Up {
+                file,
+                project_name,
+                eager,
+                ttl,
+            } => handlers::compose::up(&file, project_name.as_deref(), eager, ttl, json),
+            ComposeCmd::Down { file, project_name } => {
+                handlers::compose::down(file.as_deref(), project_name.as_deref())
+            }
         },
         Cmd::Docker { args } => handlers::docker::run(&args, json, explain),
         Cmd::Completions { shell } => generate_completions(shell),

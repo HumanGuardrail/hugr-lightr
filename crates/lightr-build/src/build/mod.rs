@@ -14,10 +14,11 @@ pub(crate) mod parse;
 pub mod vars;
 
 pub use compose::{
-    compose_down, compose_supervise, compose_up, deep_merge, interpolate_compose, parse_compose,
-    parse_compose_merged, parse_compose_with_scope, scope_from_project_dir, Compose, ComposeHandle,
+    compose_down, compose_supervise, compose_up, deep_merge, dir_basename, interpolate_compose,
+    parse_compose, parse_compose_merged, parse_compose_project_name, parse_compose_with_scope,
+    resolve_project_name, sanitize_project_name, scope_from_project_dir, Compose, ComposeHandle,
     ComposeSpec, EnvScalar, Environment, Healthcheck as ComposeServiceHealthcheck, Service,
-    ServiceDef, ServiceSpec, StackSpec, StringOrList, OVERRIDE_FILENAMES,
+    ServiceDef, ServiceSpec, StackSpec, StringOrList, DEFAULT_PROJECT, OVERRIDE_FILENAMES,
 };
 pub use exec::{build, BuildReport};
 pub use exec_fs::step_reads_clock_or_net;
