@@ -93,6 +93,28 @@ pub struct Service {
     /// means the service is always active (the default / today's behavior). The
     /// activation filter lives at the `compose up` call site (`up.rs`), not here.
     pub profiles: Vec<String>,
+    /// WP-CMP-CONFIG-LOWER: compose `init`, lowered into `RunSpec.init` (PID-1
+    /// reaper). `false` (the absent default) ⇒ no init process (today's behavior).
+    pub init: bool,
+    /// WP-CMP-CONFIG-LOWER: compose `tty`, lowered into `RunSpec.tty`. `false`
+    /// (absent) ⇒ no TTY (today's behavior).
+    pub tty: bool,
+    /// WP-CMP-CONFIG-LOWER: compose `privileged`, lowered into
+    /// `RunSpec.privileged`. `false` (absent) ⇒ unprivileged (today's behavior).
+    pub privileged: bool,
+    /// WP-CMP-CONFIG-LOWER: compose `cap_add`, lowered into `RunSpec.cap_add`
+    /// (Linux capabilities to add). Empty (absent) ⇒ default cap set (today's
+    /// behavior).
+    pub cap_add: Vec<String>,
+    /// WP-CMP-CONFIG-LOWER: compose `cap_drop`, lowered into `RunSpec.cap_drop`
+    /// (Linux capabilities to drop). Empty (absent) ⇒ default cap set (today's
+    /// behavior).
+    pub cap_drop: Vec<String>,
+    /// WP-CMP-CONFIG-LOWER: compose `container_name`, the explicit run-name
+    /// override. `None` (absent) ⇒ Lightr derives the run name from the service
+    /// name (today's behavior). Only the materialized run dir name is affected;
+    /// the compose service name (depends_on edges, discovery keys) is unchanged.
+    pub container_name: Option<String>,
 }
 
 pub struct Compose {
@@ -175,6 +197,30 @@ pub struct ServiceSpec {
     /// OUT OF SCOPE — carried only for the honest "not yet honored" note.
     #[serde(default)]
     pub replicas: Option<u32>,
+    /// WP-CMP-CONFIG-LOWER: compose `init` → `RunSpec.init`. `#[serde(default)]`
+    /// keeps pre-existing stack specs (no field) loading as `false`.
+    #[serde(default)]
+    pub init: bool,
+    /// WP-CMP-CONFIG-LOWER: compose `tty` → `RunSpec.tty`. serde-default = false.
+    #[serde(default)]
+    pub tty: bool,
+    /// WP-CMP-CONFIG-LOWER: compose `privileged` → `RunSpec.privileged`.
+    /// serde-default = false.
+    #[serde(default)]
+    pub privileged: bool,
+    /// WP-CMP-CONFIG-LOWER: compose `cap_add` → `RunSpec.cap_add`. serde-default
+    /// = empty.
+    #[serde(default)]
+    pub cap_add: Vec<String>,
+    /// WP-CMP-CONFIG-LOWER: compose `cap_drop` → `RunSpec.cap_drop`. serde-default
+    /// = empty.
+    #[serde(default)]
+    pub cap_drop: Vec<String>,
+    /// WP-CMP-CONFIG-LOWER: compose `container_name` → the run-dir name override
+    /// at the spawn site. serde-default = None (run name derived from the service
+    /// name, today's behavior).
+    #[serde(default)]
+    pub container_name: Option<String>,
 }
 
 pub struct ComposeHandle {
@@ -202,6 +248,12 @@ pub(crate) fn empty_service(name: String) -> Service {
         cpu_limit_millis: None,
         replicas: None,
         profiles: Vec::new(),
+        init: false,
+        tty: false,
+        privileged: false,
+        cap_add: Vec::new(),
+        cap_drop: Vec::new(),
+        container_name: None,
     }
 }
 

@@ -97,18 +97,29 @@ pub(super) fn lower_deploy(def: &ServiceDef, svc: &mut Service) {
     svc.replicas = deploy.replicas;
 }
 
-/// `cap_add`: Linux capabilities to add. Stub — capability set not modeled yet.
-pub(super) fn lower_cap_add(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.cap_add;
+/// `cap_add`: Linux capabilities to add.
+///
+/// WP-CMP-CONFIG-LOWER: copies the compose `cap_add:` list verbatim onto
+/// `svc.cap_add`; the supervisor threads it into `RunSpec.cap_add` (RC-SEAM).
+/// Empty (absent) ⇒ empty list ⇒ default cap set (today's behavior).
+pub(super) fn lower_cap_add(def: &ServiceDef, svc: &mut Service) {
+    svc.cap_add = def.cap_add.clone();
 }
 
-/// `cap_drop`: Linux capabilities to drop. Stub — counterpart of
-/// [`lower_cap_add`].
-pub(super) fn lower_cap_drop(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.cap_drop;
+/// `cap_drop`: Linux capabilities to drop. Counterpart of [`lower_cap_add`].
+///
+/// WP-CMP-CONFIG-LOWER: copies the compose `cap_drop:` list verbatim onto
+/// `svc.cap_drop`; the supervisor threads it into `RunSpec.cap_drop` (RC-SEAM).
+/// Empty (absent) ⇒ empty list ⇒ default cap set (today's behavior).
+pub(super) fn lower_cap_drop(def: &ServiceDef, svc: &mut Service) {
+    svc.cap_drop = def.cap_drop.clone();
 }
 
-/// `privileged`: run the container in privileged mode. Stub — not honored yet.
-pub(super) fn lower_privileged(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.privileged;
+/// `privileged`: run the container in privileged mode.
+///
+/// WP-CMP-CONFIG-LOWER: copies the compose `privileged:` bool onto
+/// `svc.privileged`; the supervisor threads it into `RunSpec.privileged`
+/// (RC-SEAM). Absent ⇒ `false` ⇒ unprivileged (today's behavior).
+pub(super) fn lower_privileged(def: &ServiceDef, svc: &mut Service) {
+    svc.privileged = def.privileged.unwrap_or(false);
 }

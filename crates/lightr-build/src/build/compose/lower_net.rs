@@ -53,7 +53,15 @@ pub(super) fn lower_networks(def: &ServiceDef, _svc: &mut Service) {
     let _ = &def.networks;
 }
 
-/// `extra_hosts`: additional `/etc/hosts` entries. Stub — not injected yet.
+/// `extra_hosts`: additional `/etc/hosts` entries (`["host:ip", ...]`).
+///
+/// WP-CMP-CONFIG-LOWER: HONEST-DEFER. The RC-SEAM RunSpec carries `hostname`
+/// (the container's OWN name) but NO host→ip entry-map field for injecting extra
+/// `/etc/hosts` lines, and the runtime `Service`/`ServiceSpec` have no slot for
+/// it either — so there is nothing to lower onto without widening a non-owned
+/// surface (RunSpec lives in `lightr-run`). Kept a no-op (no `/etc/hosts`
+/// injection today, behavior-preserving) until a RunSpec extra-hosts field
+/// exists; the `_` binding documents the intentionally-unconsumed source field.
 pub(super) fn lower_extra_hosts(def: &ServiceDef, _svc: &mut Service) {
     let _ = &def.extra_hosts;
 }
