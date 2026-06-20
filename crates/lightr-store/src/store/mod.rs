@@ -9,3 +9,4 @@ pub mod cow;
 pub mod imgmeta;
 pub mod lock;
 pub mod refs;
+pub mod volume;
