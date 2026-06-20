@@ -10,8 +10,9 @@ pub(crate) mod parse;
 pub mod vars;
 
 pub use compose::{
-    compose_down, compose_supervise, compose_up, parse_compose, Compose, ComposeHandle, Service,
-    ServiceSpec, StackSpec,
+    compose_down, compose_supervise, compose_up, parse_compose, Compose, ComposeHandle,
+    ComposeSpec, EnvScalar, Environment, Healthcheck as ComposeServiceHealthcheck, Service,
+    ServiceDef, ServiceSpec, StackSpec, StringOrList,
 };
 pub use exec::{build, step_reads_clock_or_net, BuildReport};
 pub use imgcfg::{effective_argv, ImageConfig};
