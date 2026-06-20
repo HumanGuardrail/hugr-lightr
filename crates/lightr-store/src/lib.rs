@@ -137,6 +137,16 @@ impl Store {
         store::refs::list_refs(&self.root)
     }
 
+    /// WP-IMG-07 (`oci rmi`): remove a ref (untag). Deletes the current ref
+    /// file and the name record so the ref vanishes from [`Store::ref_get`] and
+    /// [`Store::list_refs`]; the append-only `refs-log/` history is preserved.
+    /// The underlying CAS objects are NOT deleted — they become gc candidates,
+    /// reclaimed by `lightr gc`. Idempotent: `Ok(false)` if already absent,
+    /// `Ok(true)` if it existed and was removed.
+    pub fn ref_remove(&self, name: &str) -> Result<bool> {
+        store::refs::ref_remove(&self.root, name)
+    }
+
     // ── imgmeta ──────────────────────────────────────────────────────────────
 
     /// Store the original OCI image config JSON for `name` (push-fidelity).
@@ -184,6 +194,14 @@ impl Store {
     /// later faithful `oci push` of the alias reproduce the original image.
     pub fn copy_image_sidecars(&self, src: &str, dst: &str) -> Result<()> {
         store::imgmeta::copy_image_sidecars(&self.root, src, dst)
+    }
+
+    /// WP-IMG-07 (`oci rmi`): remove a ref's image sidecars (config + manifest
+    /// record). Each family is removed only if present (idempotent). Only the
+    /// 32-byte sidecar pointers are deleted — the CAS blobs they referenced
+    /// become gc candidates, never swept here.
+    pub fn remove_image_sidecars(&self, name: &str) -> Result<()> {
+        store::imgmeta::remove_image_sidecars(&self.root, name)
     }
 
     /// WP-IMG-09 (R-IMGREC): every CAS digest kept alive by the image sidecars

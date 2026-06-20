@@ -46,4 +46,5 @@ pub use oci::load::load;
 pub use oci::model::{ImportReport, LoadReport, PushReport, SaveReport};
 pub use oci::pull::pull;
 pub use oci::push::push;
+pub use oci::rmi::{render_rmi_results, rmi_many, rmi_one, RmiReport, RmiResult};
 pub use oci::save::save;

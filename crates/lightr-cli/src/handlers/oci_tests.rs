@@ -215,3 +215,23 @@ fn images_empty_store_exits_0() {
     assert_eq!(code_table, 0, "empty store table → exit 0 (header only)");
     assert_eq!(code_json, 0, "empty store json → exit 0 ([])");
 }
+
+// ── WP-IMG-07: oci rmi ──────────────────────────────────────────────────────
+//
+// Substantive behaviour (untag + sidecars, in-use guard, multi continue-on-
+// error) is covered parallel-safely in lightr-oci's rmi_tests against an
+// injected store. Here we only smoke the handler's default-root wiring + exit
+// code on an empty store (absent ref ⇒ No such image ⇒ 2), which requires
+// LIGHTR_HOME ⇒ ENV_LOCK serialization.
+
+#[test]
+fn rmi_absent_ref_exits_2() {
+    let _guard = crate::test_lock::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::env::set_var("LIGHTR_HOME", tmp.path());
+    let code = super::rmi(&["@t/never".to_string()], false);
+    std::env::remove_var("LIGHTR_HOME");
+    assert_eq!(code, 2, "absent ref → No such image → exit 2");
+}
