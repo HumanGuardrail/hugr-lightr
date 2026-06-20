@@ -37,6 +37,20 @@ pub struct SaveReport {
     pub faithful: bool,
 }
 
+/// Result of a `load` (WP-IMG-05): the underlying [`ImportReport`] (root digest,
+/// layer/file counts) plus the resolved local ref `name` the image was tagged
+/// under (from the tar's `RepoTags`, or a deterministic fallback) and whether
+/// that name came FROM the tar (`tagged_from_tar = true`) or was synthesized
+/// because the save carried no tag (`false` — Docker-faithful tag-less load).
+#[derive(Debug)]
+pub struct LoadReport {
+    pub name: String,
+    pub root: Digest,
+    pub layers: u64,
+    pub files: u64,
+    pub tagged_from_tar: bool,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // JSON shapes for OCI index / manifest
 // ─────────────────────────────────────────────────────────────────────────────
@@ -89,6 +103,13 @@ pub(super) struct DockerSaveItem {
     /// (entrypoint/cmd/env). `#[serde(default)]`: absent ⇒ push falls back.
     #[serde(rename = "Config", default)]
     pub(super) config: String,
+    /// Repo:tag names this image was saved under (`docker save`'s `RepoTags`).
+    /// `oci load` uses the first entry to name the loaded ref (Docker-faithful —
+    /// `docker load` re-tags from RepoTags). `#[serde(default)]`: a tag-less save
+    /// (`docker save <id>`) yields an empty list ⇒ `oci load` falls back to a
+    /// deterministic name (see `load.rs`).
+    #[serde(rename = "RepoTags", default)]
+    pub(super) repo_tags: Vec<String>,
 }
 
 // OCI distribution API responses
