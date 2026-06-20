@@ -57,15 +57,16 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             tmpfs,
             command,
         } => {
-            // Fail-closed: if ANY new docker-parity run flag is set, honest
-            // error naming WP-RUNFLAGS — NEVER silently ignore a flag. With no
-            // new flag set, `run` behaves exactly as before (behavior-preserving).
+            // Fail-closed: if ANY still-stubbed docker-parity run flag is set,
+            // honest error naming WP-RUNFLAGS — NEVER silently ignore a flag.
+            // WP-RC-1 REMOVED `-e`/`--env`/`--env-file` (env_set/env_file) from
+            // this guard: they are now WIRED into the keyed env_explicit channel
+            // and pass through to the handler. With no still-stubbed flag set,
+            // `run` behaves exactly as before (behavior-preserving).
             let new_flag_set = name.is_some()
                 || rm
                 || workdir.is_some()
                 || user.is_some()
-                || !env_set.is_empty()
-                || env_file.is_some()
                 || !label.is_empty()
                 || entrypoint.is_some()
                 || hostname.is_some()
@@ -105,6 +106,8 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                     cpus.as_deref(),
                     &secret,
                     &config,
+                    &env_set,
+                    env_file.as_deref(),
                     &health,
                 )
             }

@@ -87,6 +87,10 @@ pub fn spawn_detached_engine(
         engine: engine.as_str().to_string(),
         rootfs_ref: rootfs_ref.map(|s| s.to_string()),
         env: env.to_vec(),
+        // WP-RC-1 (R-KEY): persist the KEYED user `-e`/`--env-file` env to
+        // spec.json so a restart re-applies it (distinct from the UNKEYED
+        // discovery `env` above). Empty for runs with no `-e`/`--env-file`.
+        env_explicit: spec.env_explicit.clone(),
         // R-SPECDISK freeze-gate fields: defaults until the Wave-A/B WPs
         // populate them (no behaviour change here).
         ..Default::default()

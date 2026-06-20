@@ -18,6 +18,7 @@ pub struct PortMap {
     pub container: u16,
 }
 
+#[derive(Default)]
 pub struct RunSpec {
     pub cwd: PathBuf,
     pub inputs: Vec<PathBuf>,
@@ -36,6 +37,13 @@ pub struct RunSpec {
     // detached supervisor publishes each entry by forwarding 127.0.0.1:host →
     // 127.0.0.1:container for the run's lifetime.
     pub ports: Vec<PortMap>,
+    /// WP-RC-1 (R-KEY): user `-e`/`--env-file` env, as RESOLVED `(KEY, VALUE)`
+    /// pairs. UNLIKE `env_keys` (var NAMES read from the process env at key
+    /// time — the discovery channel), these are explicit literal values and are
+    /// the ONLY env that enters the run memo key — folded `KEY=VALUE\0` in
+    /// `assemble_key`/`build_key`. Empty ⇒ no contribution, so a run with no
+    /// `-e`/`--env-file` keys byte-identically to before (behavior-preserving).
+    pub env_explicit: Vec<(String, String)>,
 }
 
 pub struct Mount {

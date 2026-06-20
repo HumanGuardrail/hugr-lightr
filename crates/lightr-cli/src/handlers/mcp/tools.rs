@@ -171,6 +171,9 @@ pub(super) fn handle_tools_call(id: Value, params: &Value) -> Value {
                 secrets: vec![],
                 configs: vec![],
                 ports: vec![],
+                // WP-RC-1: the MCP run tool has no `-e`/`--env-file` → no
+                // explicit env (key unchanged for this surface).
+                env_explicit: vec![],
             };
             match run_memoized(&spec, &store) {
                 Ok(outcome) => {

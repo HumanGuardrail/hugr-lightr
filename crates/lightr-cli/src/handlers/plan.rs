@@ -160,6 +160,8 @@ fn plan_run(
         secrets: vec![],
         configs: vec![],
         ports: vec![],
+        // WP-RC-1: `plan` doesn't take `-e`/`--env-file` yet → no explicit env.
+        env_explicit: vec![],
     };
 
     match predict(&spec, &store) {

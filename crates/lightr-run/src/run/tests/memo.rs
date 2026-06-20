@@ -53,6 +53,7 @@ fn miss_then_hit() {
         secrets: vec![],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     };
 
     let out1 = run_memoized(&spec, &store).expect("run1");
@@ -106,6 +107,7 @@ fn exit_nonzero_never_memoized() {
         secrets: vec![],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     };
 
     let out1 = run_memoized(&spec, &store).expect("run1");
@@ -161,6 +163,7 @@ fn output_cap_not_memoized() {
         secrets: vec![],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     };
 
     let out1 = run_memoized(&spec, &store).expect("run1");
@@ -212,6 +215,7 @@ fn corrupt_ac_record_treated_as_miss() {
         secrets: vec![],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     };
 
     let out1 = run_memoized(&spec, &store).expect("run1");
@@ -299,6 +303,7 @@ fn mounts_run_and_key_change() {
         secrets: vec![],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     };
 
     let out1 = run_memoized(&spec, &store).expect("run1 with mount");

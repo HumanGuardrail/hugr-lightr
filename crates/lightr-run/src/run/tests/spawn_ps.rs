@@ -52,6 +52,7 @@ fn start_supervised(
         detached: false,
         created_at_unix: nanos / 1_000_000_000,
         ports: vec![],
+        env_explicit: vec![],
         engine: "native".to_string(),
         rootfs_ref: None,
         env: vec![],
@@ -181,6 +182,7 @@ fn exec_in_cwd_correctness() {
         secrets: vec![],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     };
 
     let handle = spawn_detached(&spec, &store).expect("spawn_detached");
@@ -243,6 +245,7 @@ fn supervisor_health_flips_unhealthy() {
         detached: false,
         created_at_unix: nanos / 1_000_000_000,
         ports: vec![],
+        env_explicit: vec![],
         engine: "native".to_string(),
         rootfs_ref: None,
         env: vec![],
@@ -321,6 +324,7 @@ fn ps_enrich_fields() {
         detached: true,
         created_at_unix: nanos / 1_000_000_000,
         ports: vec![],
+        env_explicit: vec![],
         engine: "native".to_string(),
         rootfs_ref: None,
         env: vec![],
@@ -342,6 +346,7 @@ fn ps_enrich_fields() {
         detached: true,
         created_at_unix: nanos / 1_000_000_000,
         ports: vec![(8080, 80)],
+        env_explicit: vec![],
         engine: "vz".to_string(),
         rootfs_ref: Some("my-rootfs".to_string()),
         env: vec![],

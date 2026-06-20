@@ -63,6 +63,8 @@ fn publish_without_detach_exits_2() {
         None,
         &[],
         &[],
+        &[],  // env_set (WP-RC-1)
+        None, // env_file (WP-RC-1)
         &HealthFlags::default(),
     );
     assert_eq!(code, 2, "-p without -d must exit 2");
@@ -89,6 +91,8 @@ fn publish_on_engine_path_exits_2() {
         None,
         &[],
         &[],
+        &[],  // env_set (WP-RC-1)
+        None, // env_file (WP-RC-1)
         &HealthFlags::default(),
     );
     assert_eq!(code, 2, "-p on the engine path must exit 2 (Phase 2)");
@@ -200,4 +204,49 @@ fn mount_accepts_relative_target() {
     let m = parse_mount("valid-ref:sub/dir").expect("should parse");
     assert_eq!(m.ref_name, "valid-ref");
     assert_eq!(m.target, "sub/dir");
+}
+
+// ── WP-RC-1: `-e` is WIRED (no longer the WP-RUNFLAGS stub) ────────────────
+
+/// A native run WITH `-e KEY=VAL` set actually RUNS (exit = the command's exit),
+/// proving `-e`/`--env-file` were removed from the dispatch stub guard and flow
+/// through to the keyed env_explicit channel. (The pre-WP-RC-1 guard returned
+/// the WP-RUNFLAGS stub, exit 2, the instant `-e` was set.)
+#[test]
+fn dash_e_runs_not_stubbed() {
+    let _env_guard = crate::test_lock::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    std::env::set_var("LIGHTR_HOME", tmp.path());
+
+    let work = tmp.path().join("work");
+    std::fs::create_dir_all(&work).expect("mkdir work");
+
+    let code = run(
+        work.to_str().unwrap(),
+        &[],
+        &[],
+        &["true".to_string()],
+        false, // json
+        false, // explain
+        false, // detach
+        &[],   // publish
+        &[],   // mounts
+        "native",
+        None,                     // rootfs
+        false,                    // deep_memo
+        None,                     // memory
+        None,                     // cpus
+        &[],                      // secrets
+        &[],                      // configs
+        &["FOO=bar".to_string()], // env_set (WP-RC-1) — must NOT be stubbed
+        None,                     // env_file
+        &HealthFlags::default(),
+    );
+    std::env::remove_var("LIGHTR_HOME");
+    assert_eq!(
+        code, 0,
+        "a run with -e must execute the command (exit 0), not return the stub (exit 2)"
+    );
 }

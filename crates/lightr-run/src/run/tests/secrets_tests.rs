@@ -60,6 +60,7 @@ fn secret_ref_changes_memo_key() {
         }],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     };
 
     let spec_a = mk("sec-a");
@@ -102,6 +103,7 @@ fn config_ref_changes_memo_key_and_domain_separated() {
         secrets: vec![],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     };
 
     let mut as_secret = base();
@@ -151,6 +153,7 @@ fn empty_secrets_configs_leave_key_unchanged() {
         secrets: vec![],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     };
     // build_key is the storeless fast path (no mounts/secrets/configs).
     let fast = build_key(&spec).expect("fast key");
@@ -245,6 +248,7 @@ fn missing_secret_ref_fails_closed() {
         }],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     };
     let run_err = run_memoized_with(&spec, &store, &lightr_core::ResourceLimits::default());
     assert!(run_err.is_err(), "run with a missing secret must Err");
