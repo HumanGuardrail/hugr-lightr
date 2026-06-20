@@ -15,9 +15,16 @@ use std::path::Path;
 use super::args::{ArgOverrides, ArgState};
 use super::exec::StageTable;
 use super::exec_fs::{expand_glob, materialize_from_digest, place_sources, CopyMeta};
-use super::memo::{load_meta, save_meta, TempDirGuard};
+use super::imgcfg::ImageConfig;
+use super::memo::TempDirGuard;
 use super::parse::{CmdForm, Instr};
 use super::vars::{interpolate, VarScope};
+
+// WP-DF-IMGCFG: pure-metadata config-record bodies (ENTRYPOINT/USER/EXPOSE/
+// STOPSIGNAL/VOLUME) live in a sibling file (godfile cap), re-exported here.
+#[path = "exec_instr_cfg.rs"]
+mod cfg;
+pub(super) use cfg::{entrypoint, expose, stopsignal, user, volume};
 
 /// The default SHELL for shell-form RUN/ENTRYPOINT/CMD (Docker's default
 /// `["/bin/sh","-c"]`). SHELL state is per-stage and resets to this at FROM.
@@ -81,7 +88,7 @@ pub(super) fn from(ctx: &mut BuildCtx, instr: &Instr, image_ref: &str) -> Result
     // The hydrated base carries lightr's `.lightr-image.json` sidecar
     // (env/cmd/labels) for lightr-built bases; absent (e.g. scratch
     // or an OCI base without the sidecar) → empty, per the design.
-    let base = load_meta(ctx.work_dir);
+    let base = ImageConfig::load(ctx.work_dir);
     *ctx.accumulated_env = base.env.clone();
     ctx.scope.env = ctx.accumulated_env.iter().cloned().collect();
     // Stage boundary: global ARGs do NOT cross into the stage (Docker).
@@ -295,13 +302,16 @@ pub(super) fn env(ctx: &mut BuildCtx, pairs: &[(String, String)]) -> Result<()> 
         ctx.accumulated_env.push((key.clone(), val.clone()));
         ctx.scope.env.insert(key.clone(), val);
     }
-    let mut meta = load_meta(ctx.work_dir);
-    meta.env = ctx.accumulated_env.clone();
-    save_meta(ctx.work_dir, &meta)?;
+    let mut cfg = ImageConfig::load(ctx.work_dir);
+    cfg.env = ctx.accumulated_env.clone();
+    cfg.save(ctx.work_dir)?;
     Ok(())
 }
 
-/// `WORKDIR`: set the current workdir + ensure it exists in the work dir.
+/// `WORKDIR`: set the current workdir, ensure it exists in the work dir, AND
+/// record it into the image config (Docker: WORKDIR is the container's default
+/// cwd, carried in the image config so `run` honors it). The recorded value is
+/// the post-interpolation path — the same one used as the build cwd.
 pub(super) fn workdir(ctx: &mut BuildCtx, path: &str) -> Result<()> {
     let path = interpolate(path, ctx.scope, ctx.escape)?;
     *ctx.current_workdir = path.clone();
@@ -311,28 +321,31 @@ pub(super) fn workdir(ctx: &mut BuildCtx, path: &str) -> Result<()> {
         ctx.work_dir.join(&path)
     };
     std::fs::create_dir_all(&abs).map_err(LightrError::Io)?;
+    let mut cfg = ImageConfig::load(ctx.work_dir);
+    cfg.workdir = Some(path);
+    cfg.save(ctx.work_dir)?;
     Ok(())
 }
 
-/// `CMD`: record the (interpolated) default argv into image meta.
+/// `CMD`: record the (interpolated) default argv into the image config.
 pub(super) fn cmd(ctx: &mut BuildCtx, argv: &[String]) -> Result<()> {
     let argv = interp_vec(argv, ctx.scope, ctx.escape)?;
-    let mut meta = load_meta(ctx.work_dir);
-    meta.cmd = Some(argv);
-    save_meta(ctx.work_dir, &meta)?;
+    let mut cfg = ImageConfig::load(ctx.work_dir);
+    cfg.cmd = Some(argv);
+    cfg.save(ctx.work_dir)?;
     Ok(())
 }
 
-/// `LABEL`: record all (interpolated) pairs into image meta. Labels are not
-/// build vars, so they do NOT update the VarScope (Docker semantics).
+/// `LABEL`: record all (interpolated) pairs into the image config. Labels are
+/// not build vars, so they do NOT update the VarScope (Docker semantics).
 pub(super) fn label(ctx: &mut BuildCtx, pairs: &[(String, String)]) -> Result<()> {
-    let mut meta = load_meta(ctx.work_dir);
+    let mut cfg = ImageConfig::load(ctx.work_dir);
     for (key, raw_val) in pairs {
         let val = interpolate(raw_val, ctx.scope, ctx.escape)?;
-        meta.labels.retain(|(k, _)| k != key);
-        meta.labels.push((key.clone(), val));
+        cfg.labels.retain(|(k, _)| k != key);
+        cfg.labels.push((key.clone(), val));
     }
-    save_meta(ctx.work_dir, &meta)?;
+    cfg.save(ctx.work_dir)?;
     Ok(())
 }
 

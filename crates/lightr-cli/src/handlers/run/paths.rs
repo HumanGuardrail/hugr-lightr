@@ -29,6 +29,26 @@ mod vz;
 pub(super) use vz::run_vz_memo;
 
 // ── Engine path (non-memoized) ────────────────────────────────────────────────
+/// Run a hydrated image (`--rootfs <ref>`) through an engine, HONORING the
+/// image's recorded config (WP-DF-IMGCFG): a `lightr build`-produced image
+/// carries its config in the `.lightr-image.json` sidecar, and this path applies
+/// the run-relevant fields with Docker precedence (CLI flag/arg > image default):
+///
+/// - **ENTRYPOINT + CMD** → the final argv is `effective_argv(cfg, command)`:
+///   the image ENTRYPOINT is prepended, and a non-empty CLI `command` REPLACES
+///   the image CMD (Docker last-wins). With no image config (an OCI/scratch base
+///   without the sidecar) `cfg` is the default ⇒ argv == `command`, byte-identical
+///   to before this WP (behaviour-preserved for config-less images).
+/// - **WORKDIR** → the engine cwd-within-rootfs. The CLI `-w/--workdir` flag
+///   overrides the image WORKDIR; absent both, the caller's `cwd` is used.
+///
+/// Out of scope on THIS path (recorded by the build, NOT consumed here — flagged,
+/// never silently honored): image ENV and USER. The engine `ExecSpec` carries
+/// `env`/`user` fields but the native/ns/vz engines do not yet apply them
+/// (engine-owned, outside this WP's files), so wiring them here would be a
+/// recorded-but-ignored half-feature. The `--entrypoint` CLI override is gated
+/// behind the WP-RUNFLAGS stub in `dispatch.rs` (not an owned file), so only the
+/// image ENTRYPOINT is honored here (no in-scope CLI override exists yet).
 pub(super) fn run_engine(
     engine_kind: EngineKind,
     rootfs_ref: Option<&str>,
@@ -36,6 +56,7 @@ pub(super) fn run_engine(
     cwd: &std::path::Path,
     command: &[String],
     limits: ResourceLimits,
+    workdir: Option<&str>,
 ) -> i32 {
     // Hydrate rootfs ref into a temp dir if provided
     let rootfs_tmp: Option<tempfile::TempDir>;
@@ -59,14 +80,33 @@ pub(super) fn run_engine(
         rootfs_path = None;
     }
 
+    // Load the hydrated image's config sidecar (WP-DF-IMGCFG). Absent (no rootfs,
+    // or an image without the sidecar) ⇒ the DEFAULT config, so the argv/cwd below
+    // are byte-identical to the pre-WP behaviour (no entrypoint, cmd == command).
+    let cfg = match &rootfs_path {
+        Some(p) => lightr_build::ImageConfig::load(p),
+        None => lightr_build::ImageConfig::default(),
+    };
+
+    // ENTRYPOINT + CMD: prepend the image entrypoint; a non-empty CLI `command`
+    // replaces the image CMD (Docker last-wins). Empty entrypoint + empty CLI
+    // command + empty image CMD ⇒ empty argv ⇒ the engine's existing honest
+    // "empty command" error (fail-closed, unchanged).
+    let argv = lightr_build::effective_argv(&cfg, command);
+
+    // WORKDIR: CLI `-w/--workdir` wins over the image WORKDIR (Docker precedence).
+    // Absent both, keep the caller's cwd. Only meaningful WITH a rootfs (the path
+    // is in-rootfs); a rootfs-less engine run keeps `cwd` as before.
+    let run_cwd = resolve_run_cwd(workdir, cfg.workdir.as_deref(), rootfs_path.is_some(), cwd);
+
     let engine = match engine_for(engine_kind) {
         Ok(e) => e,
         Err(e) => return die_lightr(&e),
     };
 
     let spec = ExecSpec {
-        cwd,
-        command,
+        cwd: &run_cwd,
+        command: &argv,
         rootfs: rootfs_path.as_deref(),
         limits,
         net: false,   // synchronous CLI engine path; networked vz is detached (supervisor)
@@ -92,6 +132,31 @@ pub(super) fn run_engine(
 
     code
 }
+
+/// Resolve the engine cwd for a `--rootfs` run, honoring the image WORKDIR with
+/// Docker precedence (WP-DF-IMGCFG): the CLI `-w/--workdir` flag wins over the
+/// image's recorded WORKDIR; absent both, the caller's `fallback` cwd is used.
+/// Only the CLI flag / image WORKDIR take effect WHEN a rootfs is present (the
+/// recorded path is in-rootfs); a rootfs-less engine run always keeps `fallback`.
+pub(super) fn resolve_run_cwd(
+    cli_workdir: Option<&str>,
+    image_workdir: Option<&str>,
+    has_rootfs: bool,
+    fallback: &std::path::Path,
+) -> std::path::PathBuf {
+    if !has_rootfs {
+        return fallback.to_path_buf();
+    }
+    match (cli_workdir, image_workdir) {
+        (Some(w), _) => std::path::PathBuf::from(w), // CLI > image (Docker precedence)
+        (None, Some(w)) => std::path::PathBuf::from(w),
+        (None, None) => fallback.to_path_buf(),
+    }
+}
+
+#[cfg(test)]
+#[path = "paths_imgcfg_tests.rs"]
+mod imgcfg_tests;
 
 // ── Memoized path (native + no rootfs — unchanged R0/R1 behaviour) ────────────
 /// All already-parsed inputs the native memoized path needs, bundled into one
