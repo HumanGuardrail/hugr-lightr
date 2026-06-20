@@ -65,6 +65,7 @@ fn publish_without_detach_exits_2() {
         &[],
         &[],  // env_set (WP-RC-1)
         None, // env_file (WP-RC-1)
+        None, // workdir (WP-RC-WORKDIR)
         &HealthFlags::default(),
     );
     assert_eq!(code, 2, "-p without -d must exit 2");
@@ -93,6 +94,7 @@ fn publish_on_engine_path_exits_2() {
         &[],
         &[],  // env_set (WP-RC-1)
         None, // env_file (WP-RC-1)
+        None, // workdir (WP-RC-WORKDIR)
         &HealthFlags::default(),
     );
     assert_eq!(code, 2, "-p on the engine path must exit 2 (Phase 2)");
@@ -242,11 +244,80 @@ fn dash_e_runs_not_stubbed() {
         &[],                      // configs
         &["FOO=bar".to_string()], // env_set (WP-RC-1) — must NOT be stubbed
         None,                     // env_file
+        None,                     // workdir (WP-RC-WORKDIR)
         &HealthFlags::default(),
     );
     std::env::remove_var("LIGHTR_HOME");
     assert_eq!(
         code, 0,
         "a run with -e must execute the command (exit 0), not return the stub (exit 2)"
+    );
+}
+
+// ── WP-RC-WORKDIR: `-w`/`--workdir` is WIRED (no longer the WP-RUNFLAGS stub) ──
+
+/// A native run WITH `-w <sub>` set actually RUNS (exit 0) AND auto-creates the
+/// workdir, proving `-w` was removed from the dispatch stub guard and flows
+/// through to RunSpec.workdir → honored as the child cwd. (Pre-WP-RC-WORKDIR the
+/// guard returned the WP-RUNFLAGS stub, exit 2, the instant `-w` was set.) The
+/// command writes its CWD to a file under the run root; we assert it equals the
+/// auto-created workdir — the end-to-end honor proof.
+#[test]
+fn dash_w_runs_not_stubbed_and_honored() {
+    let _env_guard = crate::test_lock::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    std::env::set_var("LIGHTR_HOME", tmp.path());
+
+    let work = tmp.path().join("work");
+    std::fs::create_dir_all(&work).expect("mkdir work");
+
+    // The workdir does NOT exist yet — the run must create it (Docker WORKDIR).
+    let marker = work.join("pwd.out");
+    // `sh -c 'pwd > <marker>'`: the child's pwd is captured to a file at the run
+    // root, so we can compare it against the resolved workdir.
+    let script = format!("pwd > {}", marker.display());
+
+    let code = run(
+        work.to_str().unwrap(),
+        &[],
+        &[],
+        &["sh".to_string(), "-c".to_string(), script],
+        false, // json
+        false, // explain
+        false, // detach
+        &[],   // publish
+        &[],   // mounts
+        "native",
+        None,           // rootfs
+        false,          // deep_memo
+        None,           // memory
+        None,           // cpus
+        &[],            // secrets
+        &[],            // configs
+        &[],            // env_set
+        None,           // env_file
+        Some("sub/wd"), // workdir (WP-RC-WORKDIR) — must NOT be stubbed
+        &HealthFlags::default(),
+    );
+    std::env::remove_var("LIGHTR_HOME");
+
+    assert_eq!(
+        code, 0,
+        "a run with -w must execute the command (exit 0), not return the stub (exit 2)"
+    );
+    let expected = work.join("sub/wd");
+    assert!(
+        expected.is_dir(),
+        "workdir must be auto-created (Docker WORKDIR semantics)"
+    );
+    let observed = std::fs::read_to_string(&marker).expect("pwd marker written");
+    // Canonicalize both sides — macOS /var → /private/var symlink, etc.
+    let observed = std::fs::canonicalize(observed.trim()).expect("canon observed");
+    let expected = std::fs::canonicalize(&expected).expect("canon expected");
+    assert_eq!(
+        observed, expected,
+        "the child must run with cwd == the resolved workdir"
     );
 }

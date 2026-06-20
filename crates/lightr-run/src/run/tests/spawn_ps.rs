@@ -183,6 +183,7 @@ fn exec_in_cwd_correctness() {
         configs: vec![],
         ports: vec![],
         env_explicit: vec![],
+        workdir: None,
     };
 
     let handle = spawn_detached(&spec, &store).expect("spawn_detached");
