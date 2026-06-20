@@ -1,0 +1,195 @@
+//! Tests for the compose supervisor: service-cwd hydration + CMP-P0-DEPENDS
+//! topological start ordering, cycle rejection, and condition verdicts.
+//!
+//! Parallel-safe: no process-global state; every test that touches the
+//! filesystem uses its own `TempDir`.
+use super::*;
+use lightr_store::Store;
+use tempfile::TempDir;
+
+/// Build a minimal `ServiceSpec` with the given name and `depends_on` edges.
+fn svc_with_deps(name: &str, deps: Vec<(&str, DepCondition)>) -> ServiceSpec {
+    ServiceSpec {
+        name: name.to_string(),
+        image_ref: String::new(),
+        command: vec!["/bin/true".to_string()],
+        ports: Vec::new(),
+        env: Vec::new(),
+        eager: true,
+        run_dir: None,
+        secrets: Vec::new(),
+        configs: Vec::new(),
+        healthcheck: None,
+        depends_on: deps.into_iter().map(|(n, c)| (n.to_string(), c)).collect(),
+    }
+}
+
+/// The names in topo order (resolving indices back to names for readable asserts).
+fn ordered_names(services: &[ServiceSpec]) -> Vec<String> {
+    topo_order(services)
+        .unwrap()
+        .into_iter()
+        .map(|i| services[i].name.clone())
+        .collect()
+}
+
+#[test]
+fn prepare_service_cwd_hydrates_image_ref() {
+    let src = TempDir::new().unwrap();
+    std::fs::write(src.path().join("marker.txt"), b"from-image").unwrap();
+    let store_tmp = TempDir::new().unwrap();
+    let store = Store::open(store_tmp.path()).unwrap();
+    lightr_index::snapshot(src.path(), &store, "svc-img").unwrap();
+    let mut svc = svc_with_deps("hydrate-me", vec![]);
+    svc.image_ref = "svc-img".to_string();
+    let cwd = prepare_service_cwd(&svc, &store).unwrap();
+    assert!(
+        cwd.join("marker.txt").exists(),
+        "image_ref file must be hydrated"
+    );
+    assert_eq!(
+        std::fs::read(cwd.join("marker.txt")).unwrap(),
+        b"from-image"
+    );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn prepare_service_cwd_empty_ref_is_clean() {
+    let store_tmp = TempDir::new().unwrap();
+    let store = Store::open(store_tmp.path()).unwrap();
+    let svc = svc_with_deps("cmd-only", vec![]);
+    let cwd = prepare_service_cwd(&svc, &store).unwrap();
+    assert!(cwd.is_dir());
+    assert_eq!(std::fs::read_dir(&cwd).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn topo_order_no_deps_preserves_declaration_order() {
+    // Behavior-preserving: with no depends_on the order is 0..n (declaration).
+    let services = vec![
+        svc_with_deps("a", vec![]),
+        svc_with_deps("b", vec![]),
+        svc_with_deps("c", vec![]),
+    ];
+    assert_eq!(ordered_names(&services), vec!["a", "b", "c"]);
+}
+
+#[test]
+fn topo_order_starts_dep_before_dependent() {
+    // web depends_on db ⇒ db must come before web even though web is declared first.
+    let services = vec![
+        svc_with_deps("web", vec![("db", DepCondition::Started)]),
+        svc_with_deps("db", vec![]),
+    ];
+    let order = ordered_names(&services);
+    let db = order.iter().position(|n| n == "db").unwrap();
+    let web = order.iter().position(|n| n == "web").unwrap();
+    assert!(db < web, "db must start before web; got {order:?}");
+}
+
+#[test]
+fn topo_order_transitive_chain() {
+    // web -> api -> db. Result must be db, api, web.
+    let services = vec![
+        svc_with_deps("web", vec![("api", DepCondition::Started)]),
+        svc_with_deps("api", vec![("db", DepCondition::Healthy)]),
+        svc_with_deps("db", vec![]),
+    ];
+    assert_eq!(ordered_names(&services), vec!["db", "api", "web"]);
+}
+
+#[test]
+fn topo_order_rejects_cycle() {
+    // a -> b -> a is a cycle: honest error, not a partial order.
+    let services = vec![
+        svc_with_deps("a", vec![("b", DepCondition::Started)]),
+        svc_with_deps("b", vec![("a", DepCondition::Started)]),
+    ];
+    let err = topo_order(&services).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("cycle") && msg.contains('a') && msg.contains('b'),
+        "cycle error must name the entangled services; got: {msg}"
+    );
+}
+
+#[test]
+fn topo_order_ignores_edge_to_undeclared_service() {
+    // depends_on an external/undeclared service is not a phantom cycle and does
+    // not constrain ordering.
+    let services = vec![svc_with_deps(
+        "solo",
+        vec![("ghost", DepCondition::Started)],
+    )];
+    assert_eq!(ordered_names(&services), vec!["solo"]);
+}
+
+#[test]
+fn dep_condition_started_is_immediately_met() {
+    // service_started: satisfied the moment the dep has a run dir (it spawned).
+    let tmp = TempDir::new().unwrap();
+    assert!(dep_condition_met(tmp.path(), DepCondition::Started));
+}
+
+#[test]
+fn dep_condition_healthy_waits_on_health_verdict() {
+    let tmp = TempDir::new().unwrap();
+    // No health file yet ⇒ not met.
+    assert!(!dep_condition_met(tmp.path(), DepCondition::Healthy));
+    // A "starting" verdict is NOT healthy.
+    lightr_run::healthcheck::write_state(tmp.path(), lightr_run::healthcheck::Health::Starting);
+    assert!(!dep_condition_met(tmp.path(), DepCondition::Healthy));
+    // Only "healthy" satisfies the gate.
+    lightr_run::healthcheck::write_state(tmp.path(), lightr_run::healthcheck::Health::Healthy);
+    assert!(dep_condition_met(tmp.path(), DepCondition::Healthy));
+    // Unhealthy is not met.
+    lightr_run::healthcheck::write_state(tmp.path(), lightr_run::healthcheck::Health::Unhealthy);
+    assert!(!dep_condition_met(tmp.path(), DepCondition::Healthy));
+}
+
+#[test]
+fn dep_condition_completed_waits_on_exit_zero() {
+    let tmp = TempDir::new().unwrap();
+    // No status file ⇒ not met.
+    assert!(!dep_condition_met(tmp.path(), DepCondition::Completed));
+    // Still running ⇒ not met.
+    std::fs::write(tmp.path().join("status"), "running").unwrap();
+    assert!(!dep_condition_met(tmp.path(), DepCondition::Completed));
+    // Exited non-zero ⇒ NOT completed-successfully.
+    std::fs::write(tmp.path().join("status"), "exited 1").unwrap();
+    assert!(!dep_condition_met(tmp.path(), DepCondition::Completed));
+    // Exited 0 ⇒ met.
+    std::fs::write(tmp.path().join("status"), "exited 0").unwrap();
+    assert!(dep_condition_met(tmp.path(), DepCondition::Completed));
+}
+
+#[test]
+fn dep_run_dir_reads_live_spec() {
+    // dep_run_dir resolves a started dep's run dir from the live spec.json.
+    let stack = TempDir::new().unwrap();
+    let mut db = svc_with_deps("db", vec![]);
+    db.run_dir = Some("/tmp/run-db".to_string());
+    let spec = StackSpec {
+        ttl_secs: 60,
+        created_at_unix: 0,
+        project: "default".to_string(),
+        supervisor_pid: None,
+        services: vec![
+            db,
+            svc_with_deps("web", vec![("db", DepCondition::Started)]),
+        ],
+    };
+    let bytes = serde_json::to_vec_pretty(&spec).unwrap();
+    std::fs::write(stack.path().join("spec.json"), &bytes).unwrap();
+
+    assert_eq!(
+        dep_run_dir(stack.path(), "db"),
+        Some(PathBuf::from("/tmp/run-db"))
+    );
+    // A not-yet-started dep has no run dir.
+    assert_eq!(dep_run_dir(stack.path(), "web"), None);
+    // An unknown service is None.
+    assert_eq!(dep_run_dir(stack.path(), "nope"), None);
+}
