@@ -34,6 +34,7 @@ fn make_spec(cwd: &std::path::Path, command: Vec<&str>) -> RunSpec {
         env_explicit: vec![],
         workdir: None,
         user: None,
+        restart: None,
     }
 }
 
@@ -139,6 +140,24 @@ fn user_excluded_from_key() {
     );
 }
 
+// WP-RC-RESTART: --restart is RUNTIME (like ports/workdir/user; Docker does not
+// key on it). Specs differing ONLY in restart must key IDENTICALLY (no false miss).
+#[test]
+fn restart_excluded_from_key() {
+    let (_home, _env_guard) = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::write(cwd.join("f.txt"), b"data").unwrap();
+
+    let spec_no_restart = make_spec(cwd, vec!["/bin/echo", "x"]);
+    let mut spec_on_failure = make_spec(cwd, vec!["/bin/echo", "x"]);
+    spec_on_failure.restart = Some("on-failure:3".to_string());
+
+    let k0 = build_key(&spec_no_restart).expect("k0").0;
+    let k1 = build_key(&spec_on_failure).expect("k1").0;
+    assert_eq!(k0, k1, "restart must NOT affect the memo key");
+}
+
 // -----------------------------------------------------------------------
 // key_changes_when_input_file_changes
 // -----------------------------------------------------------------------
@@ -202,6 +221,7 @@ fn key_changes_when_selected_env_changes() {
         env_explicit: vec![],
         workdir: None,
         user: None,
+        restart: None,
     };
     let k1 = build_key(&spec1).expect("k1");
 
@@ -240,6 +260,7 @@ fn predict_miss_run_hit() {
         env_explicit: vec![],
         workdir: None,
         user: None,
+        restart: None,
     };
 
     let (key1, hit1) = predict(&spec, &store).expect("predict1");

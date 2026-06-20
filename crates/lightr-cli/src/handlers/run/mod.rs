@@ -200,15 +200,15 @@ pub fn run(
     // (env_keys, discovery channel) is a SEPARATE mechanism, untouched here.
     env_set: &[String],
     env_file: Option<&str>,
-    // WP-RC-WORKDIR: user `-w`/`--workdir` — the dir the run's process executes
-    // in (Docker WORKDIR). `None` ⇒ run in `dir` (today's behaviour). RUNTIME
-    // ONLY — never a memo-key input (like ports; like Docker, which does not key
-    // on `-w`). Honored as the child's cwd at exec (auto-created if absent).
+    // WP-RC-WORKDIR: `-w`/`--workdir` (Docker WORKDIR). `None` ⇒ run in `dir`.
+    // RUNTIME ONLY (never keyed). Honored as the child's cwd at exec (auto-created).
     workdir: Option<&str>,
-    // WP-RC-USER: user `-u`/`--user` — the POSIX identity (Docker `--user`).
-    // `None` ⇒ current user. RUNTIME ONLY (never keyed). Honored as the native
-    // child's uid/gid at exec (cfg(unix); honest non-root error).
+    // WP-RC-USER: `-u`/`--user` (Docker `--user`). `None` ⇒ current user. RUNTIME
+    // ONLY. Honored as the native child's uid/gid at exec (cfg(unix); honest error).
     user: Option<&str>,
+    // WP-RC-RESTART: `--restart` (Docker restart policy). `None` ⇒ `no` (run once +
+    // exit). RUNTIME ONLY. Honored by the supervisor re-spawn loop; pre-validated.
+    restart: Option<&str>,
     // WP-RC-4: healthcheck flags, now WIRED (was parsed & discarded). Lowered to
     // a Healthcheck and run by the detached supervisor's watchdog. Never a
     // memo-key input (runtime probe, §0).
@@ -347,13 +347,12 @@ pub fn run(
             configs,
             ports,
             env_explicit,
-            // WP-RC-WORKDIR: persisted to spec.json. The vz branch boots a
-            // microVM (not a native child) so it does not honor this here; the
-            // native paths below do. Carried for spec fidelity / future vz wiring.
+            // WP-RC-WORKDIR/USER/RESTART: persisted to spec.json for fidelity. The
+            // vz branch boots a microVM (not a native re-spawnable child) so it does
+            // not honor these here; the native supervisor (memo/supervise) does.
             workdir: workdir.map(String::from),
-            // WP-RC-USER: persisted to spec.json; honored only on the native
-            // paths below (the vz branch boots a microVM, not a native child).
             user: user.map(String::from),
+            restart: restart.map(String::from),
         };
         return match spawn_detached_engine(
             &spec,
@@ -396,5 +395,6 @@ pub fn run(
         // WP-RC-WORKDIR: `-w`/`--workdir` → honored as the native child's cwd.
         workdir: workdir.map(String::from),
         user: user.map(String::from), // WP-RC-USER: honored as native child uid/gid
+        restart: restart.map(String::from), // WP-RC-RESTART: honored by the supervisor re-spawn loop
     })
 }

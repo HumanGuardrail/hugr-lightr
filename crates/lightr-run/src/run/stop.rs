@@ -8,6 +8,13 @@ use super::paths::{parse_exit_code_from_status, pid_alive, read_pid_file, read_s
 pub fn stop(dir: &std::path::Path, grace_secs: u64) -> Result<i32> {
     use std::time::{Duration, Instant};
 
+    // WP-RC-RESTART: `stop` is the EXPLICIT-stop path (the `lightr stop` verb and
+    // `rm -f` route through here). Write the stop marker BEFORE killing the child
+    // so the supervisor's re-spawn loop sees it on the child's exit and does NOT
+    // restart — covering the direct-kill branch below, which never round-trips
+    // through the supervisor's ctl handler. A no-restart run is unaffected.
+    super::respawn::write_stop_marker(dir);
+
     let sock = ctl_sock_path(dir);
 
     if sock.exists() {

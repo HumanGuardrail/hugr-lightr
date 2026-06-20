@@ -62,6 +62,17 @@ pub struct RunSpec {
     /// Docker, which does not key on `-u`). It never enters
     /// `assemble_key`/`build_key`.
     pub user: Option<String>,
+    /// WP-RC-RESTART: user `--restart` — the Docker restart policy the detached
+    /// supervisor applies on child exit (`no` | `always` | `on-failure[:max]` |
+    /// `unless-stopped`). `None` ⇒ `no` (today's behaviour: the supervisor runs
+    /// the child once and exits, byte-identical). `Some(spec)` is honored ONLY on
+    /// the detached supervisor's re-spawn loop (a synchronous run returns once;
+    /// the vz branch boots a microVM, not a re-spawnable native child).
+    ///
+    /// RUNTIME ONLY — never a memo-key input (like `ports`/`workdir`/`user`; like
+    /// Docker, which does not key on `--restart`). It never enters
+    /// `assemble_key`/`build_key`.
+    pub restart: Option<String>,
 }
 
 impl RunSpec {

@@ -15,6 +15,10 @@
 pub(crate) fn win_pipe_server_loop(
     pipe_name: &str,
     child_pid: i32,
+    // WP-RC-RESTART: the run dir, so a `signal` op (the explicit stop/kill path)
+    // can write the stop marker that disables the supervisor's re-spawn loop —
+    // mirroring the unix ctl handler.
+    dir: &std::path::Path,
     done: &std::sync::atomic::AtomicBool,
 ) {
     use crate::run::paths::win_terminate;
@@ -89,6 +93,10 @@ pub(crate) fn win_pipe_server_loop(
                         "status" => serde_json::json!({"status": "running"}),
                         "signal" => {
                             if let Some(sig) = req.get("sig").and_then(|v| v.as_i64()) {
+                                // WP-RC-RESTART: a signal relayed through the pipe
+                                // is the explicit stop/kill path — latch the stop
+                                // marker so no policy re-spawns the child.
+                                crate::run::respawn::write_stop_marker(dir);
                                 // Map unix signal → forced TerminateProcess.
                                 // Exit code follows the unix 128+sig convention.
                                 let code = (128 + sig) as u32;

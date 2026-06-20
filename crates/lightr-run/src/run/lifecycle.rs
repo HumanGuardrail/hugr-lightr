@@ -154,6 +154,11 @@ pub fn respawn_run(home: &Path, id: &str) -> Result<()> {
     // PREVIOUS run's exit code before the re-launched supervisor overwrites it.
     let _ = std::fs::remove_file(dir.join("status"));
 
+    // WP-RC-RESTART: a deliberate `start` re-arms the run — clear any stop marker
+    // left by a prior `stop`/`rm -f`, else the re-launched supervisor's re-spawn
+    // loop would see the stale marker and refuse to restart the new child.
+    let _ = std::fs::remove_file(super::respawn::stop_marker_path(&dir));
+
     super::spawn::launch_supervisor(&dir)
 }
 

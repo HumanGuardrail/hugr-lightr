@@ -185,6 +185,7 @@ fn exec_in_cwd_correctness() {
         env_explicit: vec![],
         workdir: None,
         user: None,
+        restart: None,
     };
 
     let handle = spawn_detached(&spec, &store).expect("spawn_detached");

@@ -67,6 +67,7 @@ fn publish_without_detach_exits_2() {
         None, // env_file (WP-RC-1)
         None, // workdir (WP-RC-WORKDIR)
         None, // user (WP-RC-USER)
+        None, // restart (WP-RC-RESTART)
         &HealthFlags::default(),
     );
     assert_eq!(code, 2, "-p without -d must exit 2");
@@ -97,6 +98,7 @@ fn publish_on_engine_path_exits_2() {
         None, // env_file (WP-RC-1)
         None, // workdir (WP-RC-WORKDIR)
         None, // user (WP-RC-USER)
+        None, // restart (WP-RC-RESTART)
         &HealthFlags::default(),
     );
     assert_eq!(code, 2, "-p on the engine path must exit 2 (Phase 2)");
@@ -248,6 +250,7 @@ fn dash_e_runs_not_stubbed() {
         None,                     // env_file
         None,                     // workdir (WP-RC-WORKDIR)
         None,                     // user (WP-RC-USER)
+        None,                     // restart (WP-RC-RESTART)
         &HealthFlags::default(),
     );
     std::env::remove_var("LIGHTR_HOME");
@@ -303,6 +306,7 @@ fn dash_w_runs_not_stubbed_and_honored() {
         None,           // env_file
         Some("sub/wd"), // workdir (WP-RC-WORKDIR) — must NOT be stubbed
         None,           // user (WP-RC-USER)
+        None,           // restart (WP-RC-RESTART)
         &HealthFlags::default(),
     );
     std::env::remove_var("LIGHTR_HOME");
@@ -380,6 +384,7 @@ fn dash_u_current_uid_runs_not_stubbed() {
         None,       // env_file
         None,       // workdir
         Some(&uid), // user (WP-RC-USER) — must NOT be stubbed
+        None,       // restart (WP-RC-RESTART)
         &HealthFlags::default(),
     );
     std::env::remove_var("LIGHTR_HOME");
