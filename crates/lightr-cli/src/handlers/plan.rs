@@ -165,6 +165,9 @@ fn plan_run(
         // WP-RC-WORKDIR: `plan` doesn't take `-w` yet, and workdir is RUNTIME (not
         // a memo-key input) → `None` (key/prediction unchanged).
         workdir: None,
+        // WP-RC-USER (NON-OWNED site, set None): `plan` doesn't take `-u`, and
+        // user is RUNTIME (not a memo-key input) → `None` (prediction unchanged).
+        user: None,
     };
 
     match predict(&spec, &store) {

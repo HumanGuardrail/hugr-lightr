@@ -337,8 +337,9 @@ pub fn run_memoized_with(
     // WP-RC-WORKDIR: honor `-w` as the child cwd (auto-created; None ⇒ spec.cwd).
     let run_cwd = super::spawn::resolve_workdir(&spec.cwd, spec.workdir.as_deref())?;
     cmd.args(&spec.command[1..]).current_dir(&run_cwd);
-    // F-203: apply resource caps. Linux: RLIMIT_AS/RLIMIT_DATA via pre_exec;
-    // cpu_millis unsupported on native (honest Err). No-op when unlimited.
+    // WP-RC-USER: honor `-u` as the child uid/gid (cfg(unix); None ⇒ no-op).
+    super::spawn::apply_user(&mut cmd, spec.user.as_deref())?;
+    // F-203: apply resource caps (RLIMIT_AS/DATA via pre_exec); no-op when unlimited.
     crate::limits::apply_native(&mut cmd, limits)?;
     let output = cmd.output().map_err(LightrError::Io)?;
 

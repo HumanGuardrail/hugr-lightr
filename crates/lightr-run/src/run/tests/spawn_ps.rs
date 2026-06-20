@@ -184,6 +184,7 @@ fn exec_in_cwd_correctness() {
         ports: vec![],
         env_explicit: vec![],
         workdir: None,
+        user: None,
     };
 
     let handle = spawn_detached(&spec, &store).expect("spawn_detached");
@@ -268,12 +269,15 @@ fn supervisor_health_flips_unhealthy() {
     let run_dir_clone = run_dir.clone();
     let t = std::thread::spawn(move || supervise(&run_dir_clone).unwrap_or(-1));
 
-    // Wait for the supervisor to write the first health verdict.
-    let deadline = Instant::now() + Duration::from_secs(3);
+    // Poll until the verdict FLIPS to Unhealthy. The first write is `Starting`;
+    // a fixed wait that breaks on the first verdict races the watchdog on slow
+    // CI runners (caught `Starting` before the probe flipped it). Poll for the
+    // target state with a generous deadline instead.
+    let deadline = Instant::now() + Duration::from_secs(15);
     let mut health = None;
     while Instant::now() < deadline {
-        if let Some(h) = healthcheck::read_state(&run_dir) {
-            health = Some(h);
+        health = healthcheck::read_state(&run_dir);
+        if health == Some(healthcheck::Health::Unhealthy) {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));

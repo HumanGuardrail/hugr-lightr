@@ -33,6 +33,7 @@ fn make_spec(cwd: &std::path::Path, command: Vec<&str>) -> RunSpec {
         ports: vec![],
         env_explicit: vec![],
         workdir: None,
+        user: None,
     }
 }
 
@@ -114,6 +115,31 @@ fn workdir_excluded_from_key() {
 }
 
 // -----------------------------------------------------------------------
+// WP-RC-USER: -u/--user is RUNTIME (like ports/workdir; like Docker, which
+// does not key on -u). Two specs differing ONLY in user must key IDENTICALLY
+// — otherwise a `-u` would bust the cache (a false miss).
+// -----------------------------------------------------------------------
+#[test]
+fn user_excluded_from_key() {
+    let (_home, _env_guard) = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::write(cwd.join("f.txt"), b"data").unwrap();
+
+    let spec_no_user = make_spec(cwd, vec!["/bin/echo", "x"]);
+
+    let mut spec_with_user = make_spec(cwd, vec!["/bin/echo", "x"]);
+    spec_with_user.user = Some("1000:1000".to_string());
+
+    let k1 = build_key(&spec_no_user).expect("k1");
+    let k2 = build_key(&spec_with_user).expect("k2");
+    assert_eq!(
+        k1.0, k2.0,
+        "user must NOT affect the memo key (runtime-only, like -u in Docker)"
+    );
+}
+
+// -----------------------------------------------------------------------
 // key_changes_when_input_file_changes
 // -----------------------------------------------------------------------
 #[test]
@@ -175,6 +201,7 @@ fn key_changes_when_selected_env_changes() {
         ports: vec![],
         env_explicit: vec![],
         workdir: None,
+        user: None,
     };
     let k1 = build_key(&spec1).expect("k1");
 
@@ -212,6 +239,7 @@ fn predict_miss_run_hit() {
         ports: vec![],
         env_explicit: vec![],
         workdir: None,
+        user: None,
     };
 
     let (key1, hit1) = predict(&spec, &store).expect("predict1");
