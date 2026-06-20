@@ -22,16 +22,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows runtime is WSL (a future ring), so the unix-runtime integration
-        # suite (lightr-acceptance) runs on Linux+macOS; Windows validates build +
-        # clippy + lib/bin unit tests via `--exclude lightr-acceptance`.
+        # Per-PR gate runs only on the CHEAP GitHub runners: ubuntu (1x) +
+        # windows (2x). macOS-arm64 GitHub runners bill ~10x (~$10/hr) — macOS is
+        # covered (a) locally on the founder box per-WP and (b) by a self-hosted
+        # macOS runner once registered (gate-macos, below). Windows runtime is WSL
+        # (future ring), so the unix integration suite (lightr-acceptance) runs on
+        # Linux; Windows does build + clippy + lib/bin tests via `--exclude`.
         include:
           - runner: ubuntu-latest
             scope: "--workspace"
-          - runner: macos-14
-            scope: "--workspace"
           - runner: windows-latest
             scope: "--workspace --exclude lightr-acceptance"
+
+  # macOS gate: TO BE ADDED as a SELF-HOSTED job (labels: self-hosted, macOS) on
+  # the founder box once a runner is registered (repo Settings → Actions →
+  # Runners → New self-hosted runner; mirror the lightr-cri runner) — $0 vs the
+  # ~$10/hr GitHub-hosted macOS. NOT wired yet: a self-hosted job with no online
+  # runner hangs pending and would block merges. Until the runner is up, macOS-
+  # Intel is gated LOCALLY on the founder box per-WP (the lead's cold-check), so
+  # coverage is not lost. When the runner is online, add a `gate-macos` job here
+  # (+ move vz-build to it) and this whole macOS gate becomes free.
 
     steps:
       - name: Checkout
@@ -110,6 +120,12 @@ jobs:
     name: bench (perf-regression visibility)
     runs-on: ubuntu-latest
     needs: gate
+    # Visibility-only, codifying this job's documented intent: "a failure here is a
+    # regression signal to investigate, not an automatic merge block." It also
+    # immunizes CI against GitHub runner-provisioning hiccups (0-step/3s infra
+    # failures) that otherwise red the whole run. Bench budgets are dev-box-tuned
+    # and unreliable on hosted hardware; investigate reds, they never gate merges.
+    continue-on-error: true
 
     steps:
       - name: Checkout
@@ -155,7 +171,11 @@ jobs:
   vz-build:
     name: vz feature build (macOS)
     runs-on: macos-14
+    # GitHub-hosted macOS bills ~10x — run vz-build ONLY on push to main (1x per
+    # merge), not on every PR. Moves to the self-hosted macOS runner ($0) once
+    # registered. continue-on-error keeps it non-blocking either way.
     continue-on-error: true
+    if: ${{ github.event_name == 'push' }}
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain (honor rust-toolchain.toml)
