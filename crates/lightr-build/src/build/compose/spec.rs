@@ -126,15 +126,56 @@ pub struct ServiceDef {
     /// service rather than binding lazily.
     #[serde(default, rename = "x-lightr-eager")]
     pub x_lightr_eager: Option<bool>,
-    /// Lightr extension preserved from the legacy parser: store-backed
-    /// secrets as `name=ref` strings (compose-spec `secrets` is richer; the
-    /// legacy lowering treats the list-of-`name=ref` form).
+    /// Service `secrets:` references — SHORT (bare source name OR legacy Lightr
+    /// `name=ref`) OR LONG `{source, target, uid, gid, mode}`. Lowered by
+    /// `lower_files.rs` against the top-level `secrets:` map (WP-CMP-SECRETS-FULL).
+    /// FLAGGED additive widening of the prior `Vec<String>`: the untagged
+    /// [`ServiceFileRef`] still accepts every YAML the old field did (a scalar maps
+    /// to `Short`), so behavior-preserving for legacy/short; it ADDS the long form.
     #[serde(default)]
-    pub secrets: Vec<String>,
-    /// Lightr extension preserved from the legacy parser: store-backed
-    /// configs as `name=ref` strings.
+    pub secrets: Vec<ServiceFileRef>,
+    /// Service `configs:` references — counterpart of [`Self::secrets`].
     #[serde(default)]
-    pub configs: Vec<String>,
+    pub configs: Vec<ServiceFileRef>,
+}
+
+/// WP-CMP-SECRETS-FULL: a single service `secrets:`/`configs:` reference.
+///
+/// Docker accepts the SHORT form (a bare source name) or the LONG mapping form
+/// (`{source, target, uid, gid, mode}`). The Lightr legacy `name=ref` string is
+/// also a `Short` scalar (the `=` is split at lowering time). Untagged so a YAML
+/// scalar matches `Short` and a YAML mapping matches `Long`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ServiceFileRef {
+    /// A bare source name, OR the legacy Lightr `name=ref` string.
+    Short(String),
+    /// The long mapping form. Only `source`/`target` are acted on (the run-side
+    /// `StoreFile` carries no uid/gid/mode slot — see `lower_files.rs`).
+    Long(ServiceFileRefLong),
+}
+
+/// WP-CMP-SECRETS-FULL: the long `{source, target, uid, gid, mode}` service ref.
+/// `uid`/`gid`/`mode` are parsed for spec-faithfulness but not acted on (the
+/// run-side `StoreFile` has no slot — flagged in `lower_files.rs`).
+#[derive(Debug, Default, Deserialize)]
+pub struct ServiceFileRefLong {
+    /// The top-level source name this ref points at. REQUIRED by the spec.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Mount path; the run-side `StoreFile` keys on file NAME, so its basename
+    /// becomes the file name.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Parsed for spec-faithfulness; not acted on (no `StoreFile` slot).
+    #[serde(default)]
+    pub uid: Option<String>,
+    /// Parsed for spec-faithfulness; not acted on (no `StoreFile` slot).
+    #[serde(default)]
+    pub gid: Option<String>,
+    /// Parsed for spec-faithfulness; not acted on (no `StoreFile` slot).
+    #[serde(default)]
+    pub mode: Option<Value>,
 }
 
 /// SKELETON-FREEZE: service `depends_on` — Docker accepts the short list form

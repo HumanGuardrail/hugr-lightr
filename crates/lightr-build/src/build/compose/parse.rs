@@ -37,6 +37,8 @@ pub fn parse_compose(yaml: &str) -> Result<Compose> {
     if yaml.trim().is_empty() {
         return Ok(Compose {
             services: Vec::new(),
+            secret_sources: Vec::new(),
+            config_sources: Vec::new(),
         });
     }
     let spec: ComposeSpec = serde_yaml::from_str(yaml)

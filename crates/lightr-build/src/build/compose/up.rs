@@ -4,6 +4,7 @@ use lightr_store::Store;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use super::lower_files::{FileSource, SourceKind};
 use super::model::{Compose, ComposeHandle, Service, ServiceSpec, StackSpec};
 
 /// CMP-P1-PROFILES: does a service's own profile list make it active?
@@ -76,6 +77,60 @@ pub(crate) fn lightr_home_pub() -> PathBuf {
     lightr_home()
 }
 
+/// WP-CMP-SECRETS-FULL: ingest the top-level `file:` sources of one kind
+/// (`secret`/`config`) into the Store, registering each under its source name as
+/// a store ref so the service-side `(name, source)` `StoreFile` resolves at run.
+///
+/// A `file:` source is snapshotted as a single-file tree (the source name is the
+/// ref AND the file name inside the tree), matching how `lightr_run::secrets`
+/// hydrates a ref into `<cwd>/.lightr/{secrets,configs}/<name>`. An `external:`
+/// source is a no-op (the ref is assumed already registered — fail-closed at run
+/// if absent, exactly like a `lightr run --secret name=missingref`). An `Other`
+/// source (no `file:`/`external:`) is flagged once and skipped.
+///
+/// Fails CLOSED: a missing/unreadable `file:` path, or a source name that is not
+/// a valid store-ref name, is an honest `Err` and no stack is spawned — a secret
+/// the user declared must never be silently absent.
+fn ingest_file_sources(store: &Store, sources: &[FileSource], kind: &str) -> Result<()> {
+    for src in sources {
+        match &src.kind {
+            SourceKind::File(path) => ingest_one_file(store, &src.name, path, kind)?,
+            SourceKind::External => {} // already-registered ref; resolved at run.
+            SourceKind::Other => {
+                eprintln!(
+                    "lightr compose: top-level {kind} {:?} has neither `file:` nor \
+                     `external:`; not ingested (refs to it will fail at run)",
+                    src.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Ingest one `file:` source into the Store under `ref_name` (the source name).
+/// Snapshots a single-file staging tree so `lightr_index::hydrate(dest, store,
+/// ref_name)` materializes the bytes at run.
+fn ingest_one_file(store: &Store, ref_name: &str, path: &str, kind: &str) -> Result<()> {
+    let src_path = std::path::Path::new(path);
+    if !src_path.is_file() {
+        return Err(LightrError::InvalidManifest(format!(
+            "compose {kind} source {ref_name:?}: file {path:?} does not exist or is not a file"
+        )));
+    }
+    // Stage the file in a fresh tempdir under the file name == source name, then
+    // snapshot the dir as the named ref (the snapshot/hydrate model is a tree).
+    let staging = tempfile::tempdir().map_err(LightrError::Io)?;
+    let dest = staging.path().join(ref_name);
+    std::fs::copy(src_path, &dest).map_err(LightrError::Io)?;
+    lightr_index::snapshot(staging.path(), store, ref_name).map_err(|e| {
+        LightrError::InvalidManifest(format!(
+            "compose {kind} source {ref_name:?}: store ingest failed: {e}"
+        ))
+    })?;
+    Ok(())
+}
+
 /// Start a compose stack.
 ///
 /// - Creates `$LIGHTR_HOME/compose/<nanos-pid>/spec.json`.
@@ -105,7 +160,14 @@ pub fn compose_up(
     project: &str,
     active_profiles: &[String],
 ) -> Result<ComposeHandle> {
-    let _ = store; // store reserved for future hydrate-before-spawn path
+    // WP-CMP-SECRETS-FULL: ingest every top-level `file:` secret/config source
+    // into the Store under its source name as the ref, BEFORE the supervisor is
+    // spawned — so a service's `(name, source)` `StoreFile` resolves at run
+    // (`lightr_index::hydrate`) instead of failing on a missing ref. `external:`
+    // sources are assumed already-registered; `Other` entries are flagged. No
+    // top-level sources ⇒ no-op (behavior-preserving).
+    ingest_file_sources(store, &c.secret_sources, "secret")?;
+    ingest_file_sources(store, &c.config_sources, "config")?;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let now_nanos = SystemTime::now()
@@ -209,111 +271,5 @@ pub fn compose_up(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::build::compose::model::{empty_service, DepCondition};
-
-    /// A service with the given name + profile list (no deps).
-    fn svc(name: &str, profiles: &[&str]) -> Service {
-        let mut s = empty_service(name.to_string());
-        s.profiles = profiles.iter().map(|p| p.to_string()).collect();
-        s
-    }
-
-    /// `active` set from a slice of profile names.
-    fn active<'a>(names: &[&'a str]) -> HashSet<&'a str> {
-        names.iter().copied().collect()
-    }
-
-    fn names_of(c: &Compose, act: &HashSet<&str>) -> Vec<String> {
-        let mut v: Vec<String> = active_service_names(c, act).into_iter().collect();
-        v.sort();
-        v
-    }
-
-    #[test]
-    fn no_profiles_no_active_all_services_active() {
-        // Behavior-preserving: nothing profiled, no --profile ⇒ every service.
-        let c = Compose {
-            services: vec![svc("web", &[]), svc("db", &[])],
-        };
-        assert_eq!(names_of(&c, &active(&[])), vec!["db", "web"]);
-    }
-
-    #[test]
-    fn profiled_service_excluded_when_profile_inactive() {
-        let c = Compose {
-            services: vec![svc("web", &[]), svc("debug", &["dev"])],
-        };
-        // `dev` not active ⇒ `debug` excluded, `web` (no profiles) stays.
-        assert_eq!(names_of(&c, &active(&[])), vec!["web"]);
-    }
-
-    #[test]
-    fn profiled_service_included_when_profile_active() {
-        let c = Compose {
-            services: vec![svc("web", &[]), svc("debug", &["dev"])],
-        };
-        assert_eq!(names_of(&c, &active(&["dev"])), vec!["debug", "web"]);
-    }
-
-    #[test]
-    fn one_of_several_profiles_activates() {
-        let c = Compose {
-            services: vec![svc("svc", &["a", "b"])],
-        };
-        // Any one matching profile activates the service.
-        assert_eq!(names_of(&c, &active(&["b"])), vec!["svc"]);
-        assert!(active_service_names(&c, &active(&["c"])).is_empty());
-    }
-
-    #[test]
-    fn no_profile_service_always_active() {
-        let c = Compose {
-            services: vec![svc("web", &[])],
-        };
-        // Even with unrelated profiles active, a no-profile service stays in.
-        assert_eq!(names_of(&c, &active(&["dev", "prod"])), vec!["web"]);
-    }
-
-    #[test]
-    fn active_service_pulls_in_profiled_dependency() {
-        // Docker rule: an active service's depends_on target auto-activates even
-        // if that target is profile-gated and its profile is not active.
-        let mut web = svc("web", &[]);
-        web.depends_on = vec![("db".to_string(), DepCondition::Started)];
-        let db = svc("db", &["storage"]);
-        let c = Compose {
-            services: vec![web, db],
-        };
-        // `storage` is NOT active, yet `db` is pulled in by `web`'s depends_on.
-        assert_eq!(names_of(&c, &active(&[])), vec!["db", "web"]);
-    }
-
-    #[test]
-    fn auto_activation_is_transitive() {
-        // active web -> profiled api -> profiled db: all pulled in.
-        let mut web = svc("web", &[]);
-        web.depends_on = vec![("api".to_string(), DepCondition::Started)];
-        let mut api = svc("api", &["backend"]);
-        api.depends_on = vec![("db".to_string(), DepCondition::Started)];
-        let db = svc("db", &["storage"]);
-        let c = Compose {
-            services: vec![web, api, db],
-        };
-        assert_eq!(names_of(&c, &active(&[])), vec!["api", "db", "web"]);
-    }
-
-    #[test]
-    fn inactive_service_does_not_pull_in_its_deps() {
-        // `debug` (profile `dev`, inactive) depends_on `db` (profile `storage`).
-        // Neither is active and `debug` is not selected, so nothing is pulled in.
-        let mut debug = svc("debug", &["dev"]);
-        debug.depends_on = vec![("db".to_string(), DepCondition::Started)];
-        let db = svc("db", &["storage"]);
-        let c = Compose {
-            services: vec![svc("web", &[]), debug, db],
-        };
-        assert_eq!(names_of(&c, &active(&[])), vec!["web"]);
-    }
-}
+#[path = "up_tests.rs"]
+mod tests;
