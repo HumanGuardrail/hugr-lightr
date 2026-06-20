@@ -1,4 +1,6 @@
 //! Build submodule -- re-exports the public build API.
+// WP-DF-08: ARG instruction + --build-arg scoping (crate-internal).
+pub(crate) mod args;
 pub mod compose;
 pub(crate) mod exec;
 // R-IMGCFG (parity-contract.md §0): ImageConfig sidecar + shared effective_argv.

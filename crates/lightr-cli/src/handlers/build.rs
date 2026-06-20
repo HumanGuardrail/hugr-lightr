@@ -59,6 +59,7 @@ pub fn run(
     dockerfile: Option<&str>,
     name: &str,
     engine_str: &str,
+    build_arg: &[String],
     json: bool,
     explain: bool,
 ) -> i32 {
@@ -72,6 +73,19 @@ pub fn run(
         Ok(k) => k,
         Err(e) => return die_lightr(&e),
     };
+
+    // Parse `--build-arg NAME=VALUE` into (name, value) pairs. A bare `NAME`
+    // (no `=`) means "pass this from the environment" in Docker; we resolve it
+    // from the process env (NAME=$NAME), and drop it if unset — Docker also
+    // drops a bare --build-arg whose env var is unset.
+    let mut build_args: Vec<(String, String)> = Vec::new();
+    for spec in build_arg {
+        if let Some((k, v)) = spec.split_once('=') {
+            build_args.push((k.to_string(), v.to_string()));
+        } else if let Ok(v) = std::env::var(spec) {
+            build_args.push((spec.to_string(), v));
+        }
+    }
 
     let context_path = std::path::Path::new(context);
 
@@ -132,7 +146,14 @@ pub fn run(
         eprintln!("lightr: build: native engine — no filesystem isolation");
     }
 
-    let report = match build(context_path, dockerfile_path, name, engine_kind, &store) {
+    let report = match build(
+        context_path,
+        dockerfile_path,
+        name,
+        engine_kind,
+        &store,
+        &build_args,
+    ) {
         Ok(r) => r,
         Err(e) => return die_lightr(&e),
     };
@@ -148,7 +169,15 @@ mod tests {
     /// Bad ref name ⇒ exit 2
     #[test]
     fn build_bad_ref_exits_2() {
-        let code = super::run("/some/ctx", None, "INVALID-REF", "native", false, false);
+        let code = super::run(
+            "/some/ctx",
+            None,
+            "INVALID-REF",
+            "native",
+            &[],
+            false,
+            false,
+        );
         assert_eq!(code, 2, "uppercase ref must exit 2");
     }
 
@@ -156,14 +185,22 @@ mod tests {
     #[test]
     fn build_bad_engine_exits_2() {
         // validate_ref_name must pass first — use a valid name
-        let code = super::run("/some/ctx", None, "my-ref", "bogus-engine", false, false);
+        let code = super::run(
+            "/some/ctx",
+            None,
+            "my-ref",
+            "bogus-engine",
+            &[],
+            false,
+            false,
+        );
         assert_eq!(code, 2, "bad engine must exit 2");
     }
 
     /// Empty ref name ⇒ exit 2
     #[test]
     fn build_empty_ref_exits_2() {
-        let code = super::run("/some/ctx", None, "", "native", false, false);
+        let code = super::run("/some/ctx", None, "", "native", &[], false, false);
         assert_eq!(code, 2, "empty ref must exit 2");
     }
 }

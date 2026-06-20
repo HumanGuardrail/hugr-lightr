@@ -11,6 +11,7 @@ fn build_minimal() {
             file,
             name,
             engine,
+            ..
         } => {
             assert_eq!(context, "/some/ctx");
             assert!(file.is_none(), "no -f by default");
@@ -74,6 +75,7 @@ fn build_all_flags() {
             file,
             name,
             engine,
+            ..
         } => {
             assert_eq!(context, "/my/ctx");
             assert_eq!(file.as_deref(), Some("/path/Dockerfile"));

@@ -41,6 +41,7 @@ fn build_memoization_scratch_copy_run() {
         "test-build",
         lightr_engine::EngineKind::Native,
         &store,
+        &[],
     )
     .unwrap();
     assert_eq!(report1.steps, 3);
@@ -57,6 +58,7 @@ fn build_memoization_scratch_copy_run() {
         "test-build",
         lightr_engine::EngineKind::Native,
         &store,
+        &[],
     )
     .unwrap();
     assert_eq!(report2.cached_steps, 3, "all steps must be cache hits");
@@ -73,6 +75,7 @@ fn build_memoization_scratch_copy_run() {
         "test-build",
         lightr_engine::EngineKind::Native,
         &store,
+        &[],
     )
     .unwrap();
     assert!(
@@ -108,6 +111,7 @@ fn build_hydrate_final_tree() {
         "test-hydrate",
         lightr_engine::EngineKind::Native,
         &store,
+        &[],
     )
     .unwrap();
     assert_eq!(report.steps, 3);
@@ -144,6 +148,7 @@ fn run_build_with_x(
         "buildkey-memo",
         lightr_engine::EngineKind::Native,
         store,
+        &[],
     )
     .unwrap()
 }
@@ -227,6 +232,7 @@ fn no_var_dockerfile_builds_and_is_stable() {
         "buildkey-novar",
         lightr_engine::EngineKind::Native,
         &store,
+        &[],
     )
     .unwrap();
     assert_eq!(r1.cached_steps, 0, "cold no-var build runs every step");
@@ -236,6 +242,7 @@ fn no_var_dockerfile_builds_and_is_stable() {
         "buildkey-novar",
         lightr_engine::EngineKind::Native,
         &store,
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -244,4 +251,122 @@ fn no_var_dockerfile_builds_and_is_stable() {
     );
 
     std::env::remove_var("LIGHTR_HOME");
+}
+
+// ---- WP-DF-08: ARG instruction + --build-arg end-to-end MEMO-correctness ----
+// These tests pass the store + counter EXPLICITLY (build() does not read
+// LIGHTR_HOME and uses a nanos-unique temp work dir), so they need NO env mutation
+// and NO shared mutex — parallel-safe by construction (own tempdirs per test).
+
+struct ArgFix {
+    _ctx: TempDir,
+    _store_tmp: TempDir,
+    store: Store,
+    counter: std::path::PathBuf,
+    ctx_path: std::path::PathBuf,
+}
+
+fn arg_fix() -> ArgFix {
+    let _ctx = TempDir::new().unwrap();
+    let _store_tmp = TempDir::new().unwrap();
+    let store = Store::open(_store_tmp.path().join("store")).unwrap();
+    let counter = _store_tmp.path().join("counter.txt");
+    let ctx_path = _ctx.path().to_path_buf();
+    ArgFix {
+        _ctx,
+        _store_tmp,
+        store,
+        counter,
+        ctx_path,
+    }
+}
+
+/// Write `df_body` (with `{CF}` → counter path) and run `build()` with `build_args`.
+fn run_build_with_arg(f: &ArgFix, df_body: &str, build_args: &[(String, String)]) -> BuildReport {
+    let df = df_body.replace("{CF}", &f.counter.to_string_lossy());
+    let df_path = f.ctx_path.join("Dockerfile");
+    std::fs::write(&df_path, &df).unwrap();
+    build(
+        &f.ctx_path,
+        &df_path,
+        "arg-memo",
+        lightr_engine::EngineKind::Native,
+        &f.store,
+        build_args,
+    )
+    .unwrap()
+}
+
+fn arg(k: &str, v: &str) -> Vec<(String, String)> {
+    vec![(k.to_string(), v.to_string())]
+}
+
+#[test]
+fn arg_default_is_used_in_run() {
+    // `ARG GREET=hi` + `RUN echo ${GREET}` with NO --build-arg → the default is
+    // interpolated into the RUN, proven by the side effect.
+    let f = arg_fix();
+    let df = "FROM scratch\nARG GREET=hi\nRUN /bin/sh -c 'echo ${GREET} >> {CF}'\n";
+    run_build_with_arg(&f, df, &[]);
+    assert_eq!(
+        std::fs::read_to_string(&f.counter).unwrap(),
+        "hi\n",
+        "ARG default must be interpolated into RUN"
+    );
+}
+
+#[test]
+fn build_arg_override_busts_cache_no_false_hit() {
+    // CORE acceptance: a different --build-arg value used in a RUN must NOT reuse
+    // the prior cached layer — the override changes the interpolated RUN text →
+    // key differs (via WP-DF-BUILDKEY) → RUN re-runs. The build key is NOT touched
+    // by WP-DF-08; this verifies the automatic correctness via a side effect.
+    let f = arg_fix();
+    let df = "FROM scratch\nARG GREET=hi\nRUN /bin/sh -c 'echo ${GREET} >> {CF}'\n";
+    run_build_with_arg(&f, df, &arg("GREET", "alpha"));
+    assert_eq!(std::fs::read_to_string(&f.counter).unwrap(), "alpha\n");
+    run_build_with_arg(&f, df, &arg("GREET", "beta"));
+    assert_eq!(
+        std::fs::read_to_string(&f.counter).unwrap(),
+        "alpha\nbeta\n",
+        "different --build-arg must NOT reuse the cached layer (no false hit)"
+    );
+}
+
+#[test]
+fn unused_arg_does_not_bust_cache() {
+    // An ARG NOT referenced by any instruction changes no instruction text → no
+    // key change → rebuild is a full memo HIT even when the --build-arg value
+    // differs (matches Docker). The RUN side effect must NOT repeat.
+    let f = arg_fix();
+    let df = "FROM scratch\nARG UNUSED=x\nRUN /bin/sh -c 'echo run >> {CF}'\n";
+    let r1 = run_build_with_arg(&f, df, &arg("UNUSED", "first"));
+    assert_eq!(r1.cached_steps, 0, "cold build runs every step");
+    assert_eq!(std::fs::read_to_string(&f.counter).unwrap(), "run\n");
+    let r2 = run_build_with_arg(&f, df, &arg("UNUSED", "second"));
+    assert_eq!(
+        r2.cached_steps, r2.steps,
+        "unused ARG change must be a full memo hit"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&f.counter).unwrap(),
+        "run\n",
+        "RUN must NOT re-run when only an UNUSED ARG changed"
+    );
+}
+
+#[test]
+fn global_arg_before_from_is_usable_in_from() {
+    // A global ARG (before FROM) interpolates into the FROM line. `scratch` is the
+    // only base the native builder hydrates without a registry, so a global ARG
+    // whose --build-arg resolves `FROM ${BASE}` to `scratch` proves it reaches FROM.
+    let f = arg_fix();
+    let df = "ARG BASE=scratch\nFROM ${BASE}\nRUN /bin/sh -c 'echo built >> {CF}'\n";
+    let report = run_build_with_arg(&f, df, &arg("BASE", "scratch"));
+    assert_eq!(report.cached_steps, 0, "cold build");
+    assert_eq!(
+        std::fs::read_to_string(&f.counter).unwrap(),
+        "built\n",
+        "global ARG must resolve the FROM ref and the build must run"
+    );
 }
