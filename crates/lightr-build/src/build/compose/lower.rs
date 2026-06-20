@@ -94,6 +94,7 @@ fn lower_service(name: String, mut def: ServiceDef, base_dir: Option<&Path>) -> 
     lower_stubs::lower_working_dir(&def, &mut svc);
     lower_stubs::lower_user(&def, &mut svc);
     lower_stubs::lower_entrypoint(&def, &mut svc);
+    lower_stubs::lower_profiles(&def, &mut svc);
 
     Ok(svc)
 }

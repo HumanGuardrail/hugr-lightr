@@ -171,3 +171,15 @@ pub(super) fn lower_user(def: &ServiceDef, svc: &mut Service) {
 pub(super) fn lower_entrypoint(def: &ServiceDef, _svc: &mut Service) {
     let _ = &def.entrypoint;
 }
+
+/// `profiles` (CMP-P1-PROFILES): the service's profile-gating list.
+///
+/// Copies the compose `profiles: [...]` list verbatim onto `svc.profiles`. The
+/// runtime activation filter (a service is started only if it has NO profiles,
+/// or one of its profiles is active per `--profile`/`COMPOSE_PROFILES`) runs at
+/// the `compose up` call site (`up.rs`), not here — this aspect only transcribes
+/// the declared list. Absent/empty ⇒ empty list ⇒ always active (today's
+/// behavior, behavior-preserving).
+pub(super) fn lower_profiles(def: &ServiceDef, svc: &mut Service) {
+    svc.profiles = def.profiles.clone();
+}

@@ -70,6 +70,12 @@ pub struct Service {
     /// CMP-LOWER-RUNCFG: compose `restart`, lowered into `RunSpec.restart`
     /// (WP-RC-RESTART). `None` ⇒ `no` policy (today's behavior).
     pub restart: Option<String>,
+    /// CMP-P1-PROFILES: the service's `profiles: [...]` list (verbatim from the
+    /// compose file). A service with a NON-EMPTY list is started only when one of
+    /// these profiles is ACTIVE (`--profile`/`COMPOSE_PROFILES`); an EMPTY list
+    /// means the service is always active (the default / today's behavior). The
+    /// activation filter lives at the `compose up` call site (`up.rs`), not here.
+    pub profiles: Vec<String>,
 }
 
 pub struct Compose {
@@ -160,6 +166,7 @@ pub(crate) fn empty_service(name: String) -> Service {
         working_dir: None,
         user: None,
         restart: None,
+        profiles: Vec::new(),
     }
 }
 

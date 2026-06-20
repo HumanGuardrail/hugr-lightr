@@ -73,7 +73,40 @@ struct ComposeServiceJson {
 
 // ── `compose up` handler ──────────────────────────────────────────────────────
 
-pub fn up(compose_file: &str, project: Option<&str>, eager_all: bool, ttl: u64, json: bool) -> i32 {
+/// CMP-P1-PROFILES: the union of `--profile` flags and `COMPOSE_PROFILES`.
+///
+/// `cli` is the repeatable `--profile` list; `env` is the raw `COMPOSE_PROFILES`
+/// value (comma-separated, Docker grammar). Pure (env injected) so the union
+/// rule is tested without touching process-global state. Order is CLI-first then
+/// env, de-duplicated; blank/whitespace entries are dropped. An empty result
+/// selects every service downstream (behavior-preserving).
+fn union_profiles(cli: &[String], env: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |raw: &str| {
+        let p = raw.trim();
+        if !p.is_empty() && !out.iter().any(|e| e == p) {
+            out.push(p.to_string());
+        }
+    };
+    for p in cli {
+        push(p);
+    }
+    if let Some(env) = env {
+        for p in env.split(',') {
+            push(p);
+        }
+    }
+    out
+}
+
+pub fn up(
+    compose_file: &str,
+    project: Option<&str>,
+    eager_all: bool,
+    cli_profiles: &[String],
+    ttl: u64,
+    json: bool,
+) -> i32 {
     // Read and parse the compose file
     let text = match std::fs::read_to_string(compose_file) {
         Ok(t) => t,
@@ -107,16 +140,31 @@ pub fn up(compose_file: &str, project: Option<&str>, eager_all: bool, ttl: u64, 
         Err(e) => return die_lightr(&e),
     };
 
-    let handle = match compose_up(&compose, &store, ttl, &project_name) {
+    // CMP-P1-PROFILES: union of `--profile` and COMPOSE_PROFILES, read here at
+    // the call site (resolver stays pure + parallel-safe).
+    let active_profiles = union_profiles(
+        cli_profiles,
+        std::env::var("COMPOSE_PROFILES").ok().as_deref(),
+    );
+
+    let handle = match compose_up(&compose, &store, ttl, &project_name, &active_profiles) {
         Ok(h) => h,
         Err(e) => return die_lightr(&e),
     };
 
+    // CMP-P1-PROFILES: report only the ACTIVE services that were actually
+    // started (`handle.services`), not every declared service — profile-gated
+    // services excluded from the start are not listed. With no profiles this is
+    // every service (behavior-preserving).
+    let active: std::collections::HashSet<&str> =
+        handle.services.iter().map(String::as_str).collect();
+
     if json {
-        // Build JSON output from the compose services
+        // Build JSON output from the active compose services
         let svc_json: Vec<ComposeServiceJson> = compose
             .services
             .iter()
+            .filter(|s| active.contains(s.name.as_str()))
             .map(|s| ComposeServiceJson {
                 name: s.name.clone(),
                 eager: s.eager,
@@ -133,9 +181,14 @@ pub fn up(compose_file: &str, project: Option<&str>, eager_all: bool, ttl: u64, 
             serde_json::to_string(&out).expect("serialize compose up")
         );
     } else {
-        let n = compose.services.len();
+        let active_svcs: Vec<&_> = compose
+            .services
+            .iter()
+            .filter(|s| active.contains(s.name.as_str()))
+            .collect();
+        let n = active_svcs.len();
         println!("up: {n} services (listeners bound)");
-        for svc in &compose.services {
+        for svc in active_svcs {
             let kind = if svc.eager { "eager" } else { "lazy" };
             println!("  {}  ({kind})", svc.name);
         }
@@ -246,7 +299,7 @@ mod tests {
     /// `compose up` with a missing file ⇒ exit 1
     #[test]
     fn compose_up_missing_file_exits_1() {
-        let code = super::up("/no/such/file.yml", None, false, 3600, false);
+        let code = super::up("/no/such/file.yml", None, false, &[], 3600, false);
         assert_eq!(code, 1, "missing compose file must exit 1");
     }
 
@@ -260,7 +313,7 @@ mod tests {
         std::env::set_var("LIGHTR_HOME", tmp.path());
         let f = tmp.path().join("compose.yml");
         std::fs::write(&f, "services:\n").unwrap();
-        let code = super::up(f.to_str().unwrap(), None, false, 3600, false);
+        let code = super::up(f.to_str().unwrap(), None, false, &[], 3600, false);
         std::env::remove_var("LIGHTR_HOME");
         assert_eq!(code, 0);
     }
@@ -289,5 +342,39 @@ mod tests {
         let result = super::resolve_latest_stack(None);
         std::env::remove_var("LIGHTR_HOME");
         assert!(result.is_none());
+    }
+
+    // ── CMP-P1-PROFILES: union_profiles (pure, env injected; parallel-safe) ──
+
+    #[test]
+    fn union_profiles_empty_when_nothing_given() {
+        // Behavior-preserving: no --profile, no COMPOSE_PROFILES ⇒ empty union
+        // ⇒ all services active downstream.
+        assert!(super::union_profiles(&[], None).is_empty());
+        assert!(super::union_profiles(&[], Some("")).is_empty());
+    }
+
+    #[test]
+    fn union_profiles_cli_only() {
+        let cli = vec!["dev".to_string(), "debug".to_string()];
+        assert_eq!(super::union_profiles(&cli, None), cli);
+    }
+
+    #[test]
+    fn union_profiles_env_only_comma_separated() {
+        assert_eq!(
+            super::union_profiles(&[], Some("dev,prod")),
+            vec!["dev".to_string(), "prod".to_string()]
+        );
+    }
+
+    #[test]
+    fn union_profiles_union_cli_and_env_dedup() {
+        // CLI-first, env appended, duplicates dropped, blanks trimmed.
+        let cli = vec!["dev".to_string()];
+        assert_eq!(
+            super::union_profiles(&cli, Some(" dev , prod , ")),
+            vec!["dev".to_string(), "prod".to_string()]
+        );
     }
 }

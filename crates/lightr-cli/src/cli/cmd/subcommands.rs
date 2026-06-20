@@ -21,6 +21,11 @@ pub enum ComposeCmd {
         /// Start all services immediately (override lazy)
         #[arg(long)]
         eager: bool,
+        /// Activate a service profile (repeatable). Profile-gated services start
+        /// only when one of their profiles is active; the active set is the union
+        /// of these flags and the COMPOSE_PROFILES env var (comma-separated).
+        #[arg(long = "profile")]
+        profile: Vec<String>,
         /// Stack TTL in seconds before the supervisor exits
         #[arg(long, default_value_t = 3600)]
         ttl: u64,
