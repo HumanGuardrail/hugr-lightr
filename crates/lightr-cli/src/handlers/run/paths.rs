@@ -92,13 +92,12 @@ pub(super) fn run_vz_memo(
             dns: &[],
             mesh_ip: None,
         };
-        // Suppress the guest CONSOLE (kernel boot log + the exit marker) from
-        // the host's stdout on a memo MISS: the command's real stdout/stderr
-        // come from the capture files below, so the console is pure noise that
-        // would otherwise prepend the boot log to the user's output (and make
-        // a MISS look different from a HIT). The shim still taps the pipe for
-        // the exit marker (the tap precedes the forward), so force-stop is
-        // unaffected. Respect an explicit LIGHTR_VZ_CONSOLE (user debugging).
+        // Suppress the guest CONSOLE (boot log + exit marker) from the host's
+        // stdout on a memo MISS: real stdout/stderr come from the capture files
+        // below, so the console is noise that would prepend the boot log (and
+        // make a MISS look unlike a HIT). The shim still taps the pipe for the
+        // exit marker (tap precedes forward), so force-stop is unaffected.
+        // Respect an explicit LIGHTR_VZ_CONSOLE (user debugging).
         if std::env::var_os("LIGHTR_VZ_CONSOLE").is_none() {
             // Safety: single-threaded here, before the engine spawns the VM.
             unsafe { std::env::set_var("LIGHTR_VZ_CONSOLE", "/dev/null") };
@@ -106,13 +105,10 @@ pub(super) fn run_vz_memo(
         let exit = engine.run(&spec)?;
 
         // Read the guest's stdout/stderr capture files off the rootfs share.
-        // PID1 fsyncs them BEFORE the console marker the engine waits on, so
-        // they should be present; the retry loop covers virtiofs flush lag
-        // (~30×100ms), mirroring the engine's EXIT_FILE read.
-        //
-        // Constants pinned to lightr_init::{STDOUT_FILE, STDERR_FILE}; kept
-        // inline to avoid a new crate dependency (handler is a pure client
-        // of the file channel, like the engine for CMD_FILE/EXIT_FILE).
+        // PID1 fsyncs them BEFORE the console marker the engine waits on; the
+        // retry loop covers virtiofs flush lag (~30×100ms), mirroring the
+        // engine's EXIT_FILE read. Constants pinned to lightr_init::{STDOUT_FILE,
+        // STDERR_FILE}, kept inline to avoid a new crate dependency.
         const STDOUT_FILE: &str = "/.lightr-stdout";
         const STDERR_FILE: &str = "/.lightr-stderr";
         let stdout_path = rootfs_path.join(STDOUT_FILE.trim_start_matches('/'));
@@ -268,6 +264,8 @@ pub(super) struct NativeRun<'a> {
     /// WP-RC-1 (R-KEY): user `-e`/`--env-file` env, resolved pairs — the ONLY env
     /// in the run memo key. Empty for no-`-e` runs (key/behaviour unchanged).
     pub env_explicit: Vec<(String, String)>,
+    /// WP-RC-WORKDIR: `-w`/`--workdir` — honored as the child cwd. RUNTIME ONLY.
+    pub workdir: Option<String>,
 }
 
 pub(super) fn run_native_memo(req: NativeRun) -> i32 {
@@ -288,6 +286,7 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         limits,
         healthcheck,
         env_explicit,
+        workdir,
     } = req;
     let input_paths: Vec<std::path::PathBuf> = if inputs.is_empty() {
         vec![cwd.clone()]
@@ -316,6 +315,7 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         configs,
         ports,
         env_explicit,
+        workdir, // WP-RC-WORKDIR: honored as the child cwd (memo exec + supervisor).
     };
 
     // Detach path: spawn detached and print the run id. WP-RC-4: when a

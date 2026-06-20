@@ -37,10 +37,17 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
     let stdout_log = std::fs::File::create(dir.join("stdout.log")).map_err(LightrError::Io)?;
     let stderr_log = std::fs::File::create(dir.join("stderr.log")).map_err(LightrError::Io)?;
 
+    // WP-RC-WORKDIR: honor `-w`/`--workdir` (persisted to spec.json at spawn) as
+    // the detached child's cwd (Docker WORKDIR), creating it if absent. `None` ⇒
+    // `cwd` unchanged + no mkdir, so a plain `-d` run is byte-identical to before.
+    // Mounts/healthcheck stay anchored at the run's `cwd` (the workspace root);
+    // only the child process moves into the workdir.
+    let run_cwd = super::spawn::resolve_workdir(&cwd, spec.workdir.as_deref())?;
+
     // Spawn child
     let mut child = std::process::Command::new(&spec.command[0])
         .args(&spec.command[1..])
-        .current_dir(&cwd)
+        .current_dir(&run_cwd)
         // WP-DISC: explicit per-child env (compose service discovery
         // <PEER>_HOST/<PEER>_PORT + the service's own env), plumbed through
         // spec.json instead of the racy process-global set_var. Empty for a

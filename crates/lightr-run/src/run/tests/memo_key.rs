@@ -32,6 +32,7 @@ fn make_spec(cwd: &std::path::Path, command: Vec<&str>) -> RunSpec {
         configs: vec![],
         ports: vec![],
         env_explicit: vec![],
+        workdir: None,
     }
 }
 
@@ -84,6 +85,31 @@ fn ports_excluded_from_key() {
     assert_eq!(
         k1.0, k2.0,
         "ports must NOT affect the memo key (runtime-only, like -p in Docker)"
+    );
+}
+
+// -----------------------------------------------------------------------
+// WP-RC-WORKDIR: -w/--workdir is RUNTIME (like ports/limits; like Docker,
+// which does not key on -w). Two specs differing ONLY in workdir must key
+// IDENTICALLY — otherwise a `-w` would bust the cache (a false miss).
+// -----------------------------------------------------------------------
+#[test]
+fn workdir_excluded_from_key() {
+    let (_home, _env_guard) = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::write(cwd.join("f.txt"), b"data").unwrap();
+
+    let spec_no_wd = make_spec(cwd, vec!["/bin/echo", "x"]);
+
+    let mut spec_with_wd = make_spec(cwd, vec!["/bin/echo", "x"]);
+    spec_with_wd.workdir = Some("sub/wd".to_string());
+
+    let k1 = build_key(&spec_no_wd).expect("k1");
+    let k2 = build_key(&spec_with_wd).expect("k2");
+    assert_eq!(
+        k1.0, k2.0,
+        "workdir must NOT affect the memo key (runtime-only, like -w in Docker)"
     );
 }
 
@@ -148,6 +174,7 @@ fn key_changes_when_selected_env_changes() {
         configs: vec![],
         ports: vec![],
         env_explicit: vec![],
+        workdir: None,
     };
     let k1 = build_key(&spec1).expect("k1");
 
@@ -184,6 +211,7 @@ fn predict_miss_run_hit() {
         configs: vec![],
         ports: vec![],
         env_explicit: vec![],
+        workdir: None,
     };
 
     let (key1, hit1) = predict(&spec, &store).expect("predict1");

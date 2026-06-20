@@ -162,6 +162,9 @@ fn plan_run(
         ports: vec![],
         // WP-RC-1: `plan` doesn't take `-e`/`--env-file` yet → no explicit env.
         env_explicit: vec![],
+        // WP-RC-WORKDIR: `plan` doesn't take `-w` yet, and workdir is RUNTIME (not
+        // a memo-key input) → `None` (key/prediction unchanged).
+        workdir: None,
     };
 
     match predict(&spec, &store) {
