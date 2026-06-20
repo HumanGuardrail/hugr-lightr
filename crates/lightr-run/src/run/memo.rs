@@ -322,9 +322,8 @@ pub fn run_memoized_with(
         }
     }
 
-    // F-309: hydrate secrets/configs into the run cwd (only on miss). Each ref
-    // is materialized from the store at mode 0600 (secret) or 0644 (config),
-    // content-verified against the sealed CAS before write.
+    // F-309: hydrate secrets/configs into the run cwd (only on miss) — mode 0600
+    // (secret) / 0644 (config), content-verified against the sealed CAS first.
     crate::secrets::hydrate(&spec.cwd, store, &spec.secrets, &spec.configs)?;
 
     if spec.command.is_empty() {
@@ -335,10 +334,11 @@ pub fn run_memoized_with(
     }
 
     let mut cmd = std::process::Command::new(&spec.command[0]);
-    cmd.args(&spec.command[1..]).current_dir(&spec.cwd);
-    // F-203: apply resource caps to the spawn. On Linux: RLIMIT_AS/RLIMIT_DATA
-    // via pre_exec hook; cpu_millis unsupported on native (honest Err). No-op
-    // when limits are unlimited.
+    // WP-RC-WORKDIR: honor `-w` as the child cwd (auto-created; None ⇒ spec.cwd).
+    let run_cwd = super::spawn::resolve_workdir(&spec.cwd, spec.workdir.as_deref())?;
+    cmd.args(&spec.command[1..]).current_dir(&run_cwd);
+    // F-203: apply resource caps. Linux: RLIMIT_AS/RLIMIT_DATA via pre_exec;
+    // cpu_millis unsupported on native (honest Err). No-op when unlimited.
     crate::limits::apply_native(&mut cmd, limits)?;
     let output = cmd.output().map_err(LightrError::Io)?;
 

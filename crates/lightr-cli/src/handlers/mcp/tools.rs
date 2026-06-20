@@ -174,6 +174,9 @@ pub(super) fn handle_tools_call(id: Value, params: &Value) -> Value {
                 // WP-RC-1: the MCP run tool has no `-e`/`--env-file` → no
                 // explicit env (key unchanged for this surface).
                 env_explicit: vec![],
+                // WP-RC-WORKDIR: the MCP run tool has no `-w` → `None` (runs in
+                // cwd; workdir is RUNTIME, not a memo-key input).
+                workdir: None,
             };
             match run_memoized(&spec, &store) {
                 Ok(outcome) => {

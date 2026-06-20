@@ -44,6 +44,27 @@ pub struct RunSpec {
     /// `assemble_key`/`build_key`. Empty ⇒ no contribution, so a run with no
     /// `-e`/`--env-file` keys byte-identically to before (behavior-preserving).
     pub env_explicit: Vec<(String, String)>,
+    /// WP-RC-WORKDIR: user `-w`/`--workdir` — the working directory the run's
+    /// process executes in (Docker `WORKDIR`). `None` ⇒ run in `cwd` (today's
+    /// behaviour, byte-identical). `Some(path)` ⇒ run in `effective_cwd()` =
+    /// `cwd.join(path)` (created on demand, like Docker creates `WORKDIR`).
+    ///
+    /// RUNTIME ONLY — never a memo-key input (like `ports`/limits; like Docker,
+    /// which does not key on `-w`). It never enters `assemble_key`/`build_key`.
+    pub workdir: Option<String>,
+}
+
+impl RunSpec {
+    /// The directory the run's process actually executes in (WP-RC-WORKDIR).
+    /// A `workdir`-less run returns `cwd` unchanged (behavior-preserving); a set
+    /// `workdir` resolves against `cwd` (a relative path joins; an absolute path
+    /// replaces — `PathBuf::join` semantics, matching Docker's absolute-`WORKDIR`).
+    pub fn effective_cwd(&self) -> std::path::PathBuf {
+        match &self.workdir {
+            Some(w) => self.cwd.join(w),
+            None => self.cwd.clone(),
+        }
+    }
 }
 
 pub struct Mount {

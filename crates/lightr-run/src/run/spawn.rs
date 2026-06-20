@@ -91,6 +91,11 @@ pub fn spawn_detached_engine(
         // spec.json so a restart re-applies it (distinct from the UNKEYED
         // discovery `env` above). Empty for runs with no `-e`/`--env-file`.
         env_explicit: spec.env_explicit.clone(),
+        // WP-RC-WORKDIR: persist `-w`/`--workdir` so the detached supervisor
+        // honors it as the native child's cwd (`supervise` reads it back).
+        // `None` for runs with no `-w` ⇒ child runs in `cwd`, as before. RUNTIME
+        // ONLY — never a memo-key input (detached runs aren't memoized anyway).
+        workdir: spec.workdir.clone(),
         // R-SPECDISK freeze-gate fields: defaults until the Wave-A/B WPs
         // populate them (no behaviour change here).
         ..Default::default()
@@ -144,4 +149,25 @@ pub(super) fn launch_supervisor(dir: &std::path::Path) -> Result<()> {
 
     cmd.spawn().map_err(LightrError::Io)?;
     Ok(())
+}
+
+/// WP-RC-WORKDIR: resolve the directory the run's process must execute in, and
+/// CREATE it if absent (Docker creates `WORKDIR`). `workdir = None` ⇒ `base`
+/// unchanged, with NO mkdir — so a run with no `-w` is byte-identical to before
+/// (the base cwd is the caller's existing, already-present dir). `Some(w)` ⇒
+/// `base.join(w)` (a relative `w` nests; an absolute `w` replaces), created
+/// recursively. Both the synchronous native path (`memo`) and the detached
+/// supervisor (`supervise`) call this so `-w` is honored on every native run.
+pub(super) fn resolve_workdir(
+    base: &std::path::Path,
+    workdir: Option<&str>,
+) -> Result<std::path::PathBuf> {
+    match workdir {
+        None => Ok(base.to_path_buf()),
+        Some(w) => {
+            let dir = base.join(w);
+            std::fs::create_dir_all(&dir).map_err(LightrError::Io)?;
+            Ok(dir)
+        }
+    }
 }

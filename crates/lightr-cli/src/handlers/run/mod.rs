@@ -200,6 +200,11 @@ pub fn run(
     // (env_keys, discovery channel) is a SEPARATE mechanism, untouched here.
     env_set: &[String],
     env_file: Option<&str>,
+    // WP-RC-WORKDIR: user `-w`/`--workdir` — the dir the run's process executes
+    // in (Docker WORKDIR). `None` ⇒ run in `dir` (today's behaviour). RUNTIME
+    // ONLY — never a memo-key input (like ports; like Docker, which does not key
+    // on `-w`). Honored as the child's cwd at exec (auto-created if absent).
+    workdir: Option<&str>,
     // WP-RC-4: healthcheck flags, now WIRED (was parsed & discarded). Lowered to
     // a Healthcheck and run by the detached supervisor's watchdog. Never a
     // memo-key input (runtime probe, §0).
@@ -338,6 +343,10 @@ pub fn run(
             configs,
             ports,
             env_explicit,
+            // WP-RC-WORKDIR: persisted to spec.json. The vz branch boots a
+            // microVM (not a native child) so it does not honor this here; the
+            // native paths below do. Carried for spec fidelity / future vz wiring.
+            workdir: workdir.map(String::from),
         };
         return match spawn_detached_engine(
             &spec,
@@ -377,5 +386,7 @@ pub fn run(
         limits,
         healthcheck,
         env_explicit,
+        // WP-RC-WORKDIR: `-w`/`--workdir` → honored as the native child's cwd.
+        workdir: workdir.map(String::from),
     })
 }

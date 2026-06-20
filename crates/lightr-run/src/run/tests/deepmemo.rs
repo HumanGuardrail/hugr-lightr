@@ -46,6 +46,7 @@ fn deep_memo_disabled_equals_run_memoized() {
         configs: vec![],
         ports: vec![],
         env_explicit: vec![],
+        workdir: None,
     };
     let cfg = DeepMemoConfig { enabled: false };
 
@@ -122,6 +123,7 @@ fn deep_memo_enabled_fallback_correctness() {
         configs: vec![],
         ports: vec![],
         env_explicit: vec![],
+        workdir: None,
     };
     let cfg_on = DeepMemoConfig { enabled: true };
 
