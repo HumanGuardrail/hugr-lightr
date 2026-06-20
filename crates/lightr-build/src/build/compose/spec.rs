@@ -27,6 +27,19 @@ pub struct ComposeSpec {
     pub volumes: IndexMap<String, Value>,
     #[serde(default)]
     pub networks: IndexMap<String, Value>,
+    /// SKELETON-FREEZE: top-level `secrets:` block (source/file/external/...).
+    /// Data-only; the feature WP lowers it. Kept as raw `Value` per entry so the
+    /// later WP owns the source/external grammar.
+    #[serde(default)]
+    pub secrets: IndexMap<String, Value>,
+    /// SKELETON-FREEZE: top-level `configs:` block. Data-only; lowered by the
+    /// feature WP.
+    #[serde(default)]
+    pub configs: IndexMap<String, Value>,
+    /// SKELETON-FREEZE: top-level `profiles:` list. Data-only; the feature WP
+    /// applies profile activation.
+    #[serde(default)]
+    pub profiles: Vec<String>,
 }
 
 /// A single service entry under `services:`.
@@ -53,16 +66,24 @@ pub struct ServiceDef {
     pub expose: Vec<Value>,
     #[serde(default)]
     pub volumes: Vec<Value>,
+    /// SKELETON-FREEZE: service `networks` — short list (`["frontend"]`) OR map
+    /// with per-network `aliases`/`ipv4_address`/.... Typed [`ServiceNetworks`];
+    /// data-only. (Replaces the prior raw-`Value` shape — same YAML parses.)
     #[serde(default)]
-    pub networks: Option<Value>,
+    pub networks: Option<ServiceNetworks>,
+    /// SKELETON-FREEZE: short list (`["db", "redis"]`) OR long map with
+    /// per-dependency `condition`. Modeled as a typed [`DependsOn`] so the
+    /// feature WP transcribes the condition; data-only here.
     #[serde(default)]
-    pub depends_on: Option<Value>,
+    pub depends_on: Option<DependsOn>,
     #[serde(default)]
     pub healthcheck: Option<Healthcheck>,
     #[serde(default)]
     pub restart: Option<String>,
+    /// SKELETON-FREEZE: the `deploy` block (replicas, resources.limits,
+    /// restart_policy). Typed [`Deploy`]; data-only — the feature WP lowers it.
     #[serde(default)]
-    pub deploy: Option<Value>,
+    pub deploy: Option<Deploy>,
     #[serde(default)]
     pub profiles: Vec<String>,
     #[serde(default)]
@@ -73,6 +94,34 @@ pub struct ServiceDef {
     pub user: Option<String>,
     #[serde(default)]
     pub container_name: Option<String>,
+    /// SKELETON-FREEZE: `extends` (from another file/service). Data-only —
+    /// modeled as raw `Value`; the feature WP owns the file/service grammar.
+    #[serde(default)]
+    pub extends: Option<Value>,
+    /// SKELETON-FREEZE: extra `/etc/hosts` entries (`["host:ip", ...]` or a map).
+    #[serde(default)]
+    pub extra_hosts: Option<StringOrList>,
+    /// SKELETON-FREEZE: graceful-stop window (compose duration string).
+    #[serde(default)]
+    pub stop_grace_period: Option<String>,
+    /// SKELETON-FREEZE: signal used to stop the container (e.g. `SIGTERM`).
+    #[serde(default)]
+    pub stop_signal: Option<String>,
+    /// SKELETON-FREEZE: run an init process (PID 1 reaper) inside the container.
+    #[serde(default)]
+    pub init: Option<bool>,
+    /// SKELETON-FREEZE: allocate a TTY.
+    #[serde(default)]
+    pub tty: Option<bool>,
+    /// SKELETON-FREEZE: capabilities to add.
+    #[serde(default)]
+    pub cap_add: Vec<String>,
+    /// SKELETON-FREEZE: capabilities to drop.
+    #[serde(default)]
+    pub cap_drop: Vec<String>,
+    /// SKELETON-FREEZE: run the container in privileged mode.
+    #[serde(default)]
+    pub privileged: Option<bool>,
     /// Lightr extension preserved from the legacy parser: eager-start a
     /// service rather than binding lazily.
     #[serde(default, rename = "x-lightr-eager")]
@@ -86,6 +135,106 @@ pub struct ServiceDef {
     /// configs as `name=ref` strings.
     #[serde(default)]
     pub configs: Vec<String>,
+}
+
+/// SKELETON-FREEZE: service `depends_on` — Docker accepts the short list form
+/// (`["db", "redis"]`) OR the long map form keyed by service name with a
+/// per-dependency `condition` (and optional `restart`/`required`). Untagged so
+/// both shapes parse; data-only. The feature WP (CMP-P0-DEPENDS) lowers it.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum DependsOn {
+    /// Short form: a plain list of service names.
+    List(Vec<String>),
+    /// Long form: `name -> { condition, restart, required }`.
+    Map(IndexMap<String, DependsOnEntry>),
+}
+
+/// SKELETON-FREEZE: a long-form `depends_on` entry. Data-only.
+#[derive(Debug, Default, Deserialize)]
+pub struct DependsOnEntry {
+    /// `service_started` | `service_healthy` | `service_completed_successfully`.
+    #[serde(default)]
+    pub condition: Option<String>,
+    /// Whether the dependency is restarted when it is updated.
+    #[serde(default)]
+    pub restart: Option<bool>,
+    /// Whether the dependency is required (compose-spec `required`, default true).
+    #[serde(default)]
+    pub required: Option<bool>,
+}
+
+/// SKELETON-FREEZE: the `deploy` block. Only the fields the parity contract
+/// names (replicas, resources.limits {cpus,memory}, restart_policy) are modeled;
+/// other deploy keys are ignored (house leniency). Data-only; the feature WP
+/// (CMP-P1-DEPLOY-RES) lowers it.
+#[derive(Debug, Default, Deserialize)]
+pub struct Deploy {
+    #[serde(default)]
+    pub replicas: Option<u32>,
+    #[serde(default)]
+    pub resources: Option<DeployResources>,
+    #[serde(default)]
+    pub restart_policy: Option<RestartPolicy>,
+}
+
+/// SKELETON-FREEZE: `deploy.resources` (limits / reservations). Data-only.
+#[derive(Debug, Default, Deserialize)]
+pub struct DeployResources {
+    #[serde(default)]
+    pub limits: Option<ResourceSpec>,
+    #[serde(default)]
+    pub reservations: Option<ResourceSpec>,
+}
+
+/// SKELETON-FREEZE: a `{cpus, memory}` resource spec. `cpus` is a string in the
+/// compose spec (`"0.5"`); kept as a string to transcribe faithfully. Data-only.
+#[derive(Debug, Default, Deserialize)]
+pub struct ResourceSpec {
+    #[serde(default)]
+    pub cpus: Option<String>,
+    #[serde(default)]
+    pub memory: Option<String>,
+}
+
+/// SKELETON-FREEZE: `deploy.restart_policy`. Data-only.
+#[derive(Debug, Default, Deserialize)]
+pub struct RestartPolicy {
+    /// `none` | `on-failure` | `any`.
+    #[serde(default)]
+    pub condition: Option<String>,
+    #[serde(default)]
+    pub delay: Option<String>,
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
+    #[serde(default)]
+    pub window: Option<String>,
+}
+
+/// SKELETON-FREEZE: service `networks` — short list (`["frontend", "backend"]`)
+/// OR a map keyed by network name with per-attachment options (`aliases`,
+/// `ipv4_address`, ...). Untagged so both parse; data-only. The feature WP
+/// (CMP-P1-NETWORKS) lowers it.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ServiceNetworks {
+    /// Short form: a plain list of network names.
+    List(Vec<String>),
+    /// Long form: `name -> attachment options` (a null value is allowed).
+    Map(IndexMap<String, Option<NetworkAttachment>>),
+}
+
+/// SKELETON-FREEZE: per-network attachment options under the long `networks`
+/// map. Only `aliases` is named by the contract; other keys are accepted and
+/// ignored (leniency). Data-only.
+#[derive(Debug, Default, Deserialize)]
+pub struct NetworkAttachment {
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub ipv4_address: Option<String>,
+    #[serde(default)]
+    pub ipv6_address: Option<String>,
 }
 
 /// A single compose `ports` entry: Docker accepts BOTH the short scalar form
@@ -201,3 +350,7 @@ pub struct Healthcheck {
     #[serde(default)]
     pub disable: Option<bool>,
 }
+
+#[cfg(test)]
+#[path = "spec_tests.rs"]
+mod tests;
