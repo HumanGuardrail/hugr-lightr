@@ -5,6 +5,10 @@ pub mod compose;
 pub(crate) mod exec;
 // Filesystem/CAS helpers split out of exec.rs (behavior-preserving, <400 LOC).
 pub(crate) mod exec_fs;
+// Per-instruction execution bodies (skeleton-freeze): one `fn` per Dockerfile
+// instruction over a shared BuildCtx, so WPs on different instructions stay
+// disjoint. `exec::build()` is the thin dispatcher. Behavior-preserving.
+pub(crate) mod exec_instr;
 // R-IMGCFG (parity-contract.md §0): ImageConfig sidecar + shared effective_argv.
 pub mod imgcfg;
 pub(crate) mod memo;
