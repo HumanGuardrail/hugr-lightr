@@ -118,6 +118,26 @@ pub(super) fn hasher_to_hex(hasher: Sha256) -> String {
 // Multi-arch selection (WP-A-pull item 5)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Extract `"<os>/<arch>"` from an OCI image config JSON's top-level `os` +
+/// `architecture` fields (WP-IMG-01 platform retention at import, where the
+/// manifest descriptor carries no platform). Returns `""` when the config is
+/// unparsable or either field is missing — platform is best-effort metadata.
+pub(super) fn platform_of_config(config_bytes: &[u8]) -> String {
+    #[derive(serde::Deserialize)]
+    struct Cfg {
+        #[serde(default)]
+        os: String,
+        #[serde(default)]
+        architecture: String,
+    }
+    match serde_json::from_slice::<Cfg>(config_bytes) {
+        Ok(c) if !c.os.is_empty() && !c.architecture.is_empty() => {
+            format!("{}/{}", c.os, c.architecture)
+        }
+        _ => String::new(),
+    }
+}
+
 /// Map `std::env::consts::ARCH` → OCI architecture string.
 pub(super) fn host_arch() -> &'static str {
     match std::env::consts::ARCH {
