@@ -41,6 +41,7 @@ mod oci;
 // ── Public API re-exports ─────────────────────────────────────────────────
 
 pub use oci::import::import_layout;
-pub use oci::model::{ImportReport, PushReport};
+pub use oci::model::{ImportReport, PushReport, SaveReport};
 pub use oci::pull::pull;
 pub use oci::push::push;
+pub use oci::save::save;
