@@ -101,12 +101,18 @@ fn compose_up_minimal() {
             ComposeCmd::Up {
                 file,
                 project_name,
+                project_directory,
+                env_file,
                 eager,
                 profile,
                 ttl,
             } => {
                 assert_eq!(file, "compose.yml", "default compose file");
                 assert!(project_name.is_none(), "no -p by default");
+                assert!(
+                    project_directory.is_none() && env_file.is_none(),
+                    "no dir/env-file"
+                );
                 assert!(!eager, "eager is false by default");
                 assert!(profile.is_empty(), "no --profile by default");
                 assert_eq!(*ttl, 3600, "default TTL is 3600");

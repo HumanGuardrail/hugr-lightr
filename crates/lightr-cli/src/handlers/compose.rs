@@ -1,31 +1,124 @@
 //! `lightr compose up/down` handlers — build-spec-r3 §5.
 //!
-//! Sub-verbs:
-//!   compose up [-f compose.yml] [-p <project>] [--eager] [--ttl <secs=3600>]
-//!   compose down [-f compose.yml] [-p <project>]
+//! `up [-f F] [-p NAME] [--project-directory D] [--env-file E] [--profile P]…
+//!  [--eager] [--ttl N]` and `down [-f F] [-p NAME]`. Exit 0 = success, 1 =
+//! runtime error. Human `up`: `up: <n> services (listeners bound)` then one
+//! `  <name>  (<eager|lazy>)` line per active service; `--json`:
+//! `{"services":[...],"stack_dir":"<path>"}`.
 //!
-//! Exit codes:
-//!   0  — success (listeners bound / stack torn down)
-//!   1  — runtime error
+//! `down` reads the most-recent stack under `$LIGHTR_HOME/compose/`; when a
+//! project is resolved (flag/env/`name:`/basename) the teardown is scoped to it.
 //!
-//! `up` human output:
-//!   `up: <n> services (listeners bound)`
-//!   followed by one line per service: `  <name>  (<eager|lazy>)`
-//!
-//! `up` --json: `{"services":[...],"stack_dir":"<path>"}`
-//!
-//! `down` reads the most-recent compose stack under $LIGHTR_HOME/compose/.
-//! CMP-P1-PROJECT: when a project is resolved (flag/env/`name:`/basename), the
-//! teardown is scoped to stacks recorded under that project name.
+//! CMP-CLI-INTEGRATION: `up` runs the unified build path
+//! `parse_compose_merged` (override deep-merge → `${VAR}` interpolation → parse
+//! → lowering), with the dotenv/`--env-file` scope built at this call site.
 
 use lightr_build::{
-    compose_down, compose_up, dir_basename, parse_compose, parse_compose_project_name,
-    resolve_project_name, StackSpec,
+    compose_down, compose_up, dir_basename, parse_compose_merged, parse_compose_project_name,
+    resolve_project_name, scope_from_project_dir, StackSpec, VarScope, OVERRIDE_FILENAMES,
 };
 use lightr_store::Store;
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 
 use crate::exit::die_lightr;
+
+/// CMP-CLI-INTEGRATION: the project directory for a compose run. Docker
+/// `--project-directory` wins; else the compose file's parent (current dir for a
+/// bare filename). Pure (args + current-dir fallback). Base for the default `.env`.
+fn project_directory(compose_file: &str, project_directory: Option<&str>) -> PathBuf {
+    if let Some(d) = project_directory {
+        return PathBuf::from(d);
+    }
+    Path::new(compose_file)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default()
+}
+
+/// CMP-CLI-INTEGRATION: build the interpolation `VarScope` for `compose up`.
+///
+/// Compose precedence: the live process env WINS over the dotenv (lower) source.
+/// No `--env-file` ⇒ `<project_dir>/.env` via the build crate's
+/// [`scope_from_project_dir`]. `--env-file <path>` REPLACES the default `.env`;
+/// the file is read via the compose `.env` subset adapter ([`parse_dotenv_subset`])
+/// because the build crate's `parse_dotenv` is not re-exported and lib.rs is out
+/// of WP scope (flagged). Fail-closed: an unreadable `--env-file` is an error.
+fn build_scope(project_dir: &Path, env_file: Option<&str>) -> Result<VarScope, String> {
+    let Some(env_file) = env_file else {
+        // No --env-file: delegate to the build crate (reads <dir>/.env, process
+        // env wins) — behavior-preserving, no reimplementation.
+        return Ok(scope_from_project_dir(project_dir));
+    };
+    let text = std::fs::read_to_string(env_file)
+        .map_err(|e| format!("compose up: cannot read --env-file {env_file}: {e}"))?;
+    let mut env: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    // Lower precedence: the explicit env-file.
+    for (k, v) in parse_dotenv_subset(&text) {
+        env.insert(k, v);
+    }
+    // Higher precedence: the live process environment overwrites env-file values.
+    for (k, v) in std::env::vars() {
+        env.insert(k, v);
+    }
+    Ok(VarScope {
+        args: std::collections::BTreeMap::new(),
+        env,
+    })
+}
+
+/// Compose `.env` subset for `--env-file` (CLI adapter faithful to the build
+/// crate's `parse_dotenv`): `KEY=VAL`, `#`/blank skipped, `export ` stripped,
+/// first `=` splits, one quote layer removed.
+fn parse_dotenv_subset(text: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = value.trim();
+        let bytes = value.as_bytes();
+        let value = if bytes.len() >= 2
+            && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+                || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+        {
+            value[1..value.len() - 1].to_string()
+        } else {
+            value.to_string()
+        };
+        pairs.push((key.to_string(), value));
+    }
+    pairs
+}
+
+/// CMP-CLI-INTEGRATION: discover the docker-compose override file beside the
+/// base — first existing of [`OVERRIDE_FILENAMES`] (precedence order), for
+/// deep-merge via `parse_compose_merged`. None present ⇒ behavior-preserving.
+fn discover_override(compose_file: &str) -> Option<String> {
+    let base = Path::new(compose_file);
+    let dir = base.parent().filter(|p| !p.as_os_str().is_empty());
+    for name in OVERRIDE_FILENAMES {
+        let candidate = match dir {
+            Some(d) => d.join(name),
+            None => PathBuf::from(name),
+        };
+        if let Ok(text) = std::fs::read_to_string(&candidate) {
+            return Some(text);
+        }
+    }
+    None
+}
 
 /// CMP-P1-PROJECT: resolve the effective project name for a compose file.
 ///
@@ -43,8 +136,7 @@ fn resolve_project(
     let env_ref = env.as_deref().filter(|s| !s.is_empty());
     let file_name = parse_compose_project_name(text)?;
     let path = std::path::Path::new(compose_file);
-    // The project directory is the compose file's parent; an absolute file with
-    // no parent (or a bare filename) falls back to the current dir's basename.
+    // Basename rung: compose file's parent (current dir for a bare filename).
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -99,15 +191,17 @@ fn union_profiles(cli: &[String], env: Option<&str>) -> Vec<String> {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn up(
     compose_file: &str,
     project: Option<&str>,
+    project_dir: Option<&str>,
+    env_file: Option<&str>,
     eager_all: bool,
     cli_profiles: &[String],
     ttl: u64,
     json: bool,
 ) -> i32 {
-    // Read and parse the compose file
     let text = match std::fs::read_to_string(compose_file) {
         Ok(t) => t,
         Err(e) => {
@@ -123,7 +217,20 @@ pub fn up(
         Err(e) => return die_lightr(&e),
     };
 
-    let mut compose = match parse_compose(&text) {
+    // CMP-CLI-INTEGRATION: build the interpolation scope (.env / --env-file,
+    // process-env-over-dotenv) + discover any override beside the base, then run
+    // the unified build path (merge → interpolate → parse → lower). No override
+    // and no ${VAR} ⇒ byte-identical to the old bare parse (behavior-preserving).
+    let pdir = project_directory(compose_file, project_dir);
+    let scope = match build_scope(&pdir, env_file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("lightr: {e}");
+            return 1;
+        }
+    };
+    let override_yaml = discover_override(compose_file);
+    let mut compose = match parse_compose_merged(&text, override_yaml.as_deref(), &scope) {
         Ok(c) => c,
         Err(e) => return die_lightr(&e),
     };
@@ -140,8 +247,7 @@ pub fn up(
         Err(e) => return die_lightr(&e),
     };
 
-    // CMP-P1-PROFILES: union of `--profile` and COMPOSE_PROFILES, read here at
-    // the call site (resolver stays pure + parallel-safe).
+    // CMP-P1-PROFILES: union of `--profile` and COMPOSE_PROFILES (env read here).
     let active_profiles = union_profiles(
         cli_profiles,
         std::env::var("COMPOSE_PROFILES").ok().as_deref(),
@@ -152,15 +258,12 @@ pub fn up(
         Err(e) => return die_lightr(&e),
     };
 
-    // CMP-P1-PROFILES: report only the ACTIVE services that were actually
-    // started (`handle.services`), not every declared service — profile-gated
-    // services excluded from the start are not listed. With no profiles this is
-    // every service (behavior-preserving).
+    // CMP-P1-PROFILES: report only the ACTIVE started services (`handle.services`),
+    // not every declared one. With no profiles this is every service.
     let active: std::collections::HashSet<&str> =
         handle.services.iter().map(String::as_str).collect();
 
     if json {
-        // Build JSON output from the active compose services
         let svc_json: Vec<ComposeServiceJson> = compose
             .services
             .iter()
@@ -290,91 +393,7 @@ pub fn down(compose_file: Option<&str>, project: Option<&str>) -> i32 {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
+// ── Tests (split out for godfile headroom — house convention) ──────────────────
 #[cfg(test)]
-mod tests {
-    use tempfile::TempDir;
-
-    /// `compose up` with a missing file ⇒ exit 1
-    #[test]
-    fn compose_up_missing_file_exits_1() {
-        let code = super::up("/no/such/file.yml", None, false, &[], 3600, false);
-        assert_eq!(code, 1, "missing compose file must exit 1");
-    }
-
-    /// `compose up` with an empty services block ⇒ exit 0 (nothing to bind)
-    #[test]
-    fn compose_up_empty_services_exits_0() {
-        let _env = crate::test_lock::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let tmp = TempDir::new().unwrap();
-        std::env::set_var("LIGHTR_HOME", tmp.path());
-        let f = tmp.path().join("compose.yml");
-        std::fs::write(&f, "services:\n").unwrap();
-        let code = super::up(f.to_str().unwrap(), None, false, &[], 3600, false);
-        std::env::remove_var("LIGHTR_HOME");
-        assert_eq!(code, 0);
-    }
-
-    /// `compose down` with no active stack ⇒ exit 1
-    #[test]
-    fn compose_down_no_stack_exits_1() {
-        let _env = crate::test_lock::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let tmp = TempDir::new().unwrap();
-        std::env::set_var("LIGHTR_HOME", tmp.path());
-        let code = super::down(None, None);
-        std::env::remove_var("LIGHTR_HOME");
-        assert_eq!(code, 1, "no active stack must exit 1");
-    }
-
-    /// resolve_latest_stack: returns None when compose dir is absent
-    #[test]
-    fn resolve_latest_stack_absent_dir_is_none() {
-        let _env = crate::test_lock::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let tmp = TempDir::new().unwrap();
-        std::env::set_var("LIGHTR_HOME", tmp.path());
-        let result = super::resolve_latest_stack(None);
-        std::env::remove_var("LIGHTR_HOME");
-        assert!(result.is_none());
-    }
-
-    // ── CMP-P1-PROFILES: union_profiles (pure, env injected; parallel-safe) ──
-
-    #[test]
-    fn union_profiles_empty_when_nothing_given() {
-        // Behavior-preserving: no --profile, no COMPOSE_PROFILES ⇒ empty union
-        // ⇒ all services active downstream.
-        assert!(super::union_profiles(&[], None).is_empty());
-        assert!(super::union_profiles(&[], Some("")).is_empty());
-    }
-
-    #[test]
-    fn union_profiles_cli_only() {
-        let cli = vec!["dev".to_string(), "debug".to_string()];
-        assert_eq!(super::union_profiles(&cli, None), cli);
-    }
-
-    #[test]
-    fn union_profiles_env_only_comma_separated() {
-        assert_eq!(
-            super::union_profiles(&[], Some("dev,prod")),
-            vec!["dev".to_string(), "prod".to_string()]
-        );
-    }
-
-    #[test]
-    fn union_profiles_union_cli_and_env_dedup() {
-        // CLI-first, env appended, duplicates dropped, blanks trimmed.
-        let cli = vec!["dev".to_string()];
-        assert_eq!(
-            super::union_profiles(&cli, Some(" dev , prod , ")),
-            vec!["dev".to_string(), "prod".to_string()]
-        );
-    }
-}
+#[path = "compose_tests.rs"]
+mod tests;

@@ -23,10 +23,14 @@ pub(super) fn translate_compose(args: &[String], json: bool) -> i32 {
     }
 }
 
-/// `docker compose up [-f F] [-p NAME] [--profile P]… [--eager] [--ttl N]`.
+/// `docker compose up [-f F] [-p NAME] [--project-directory D] [--env-file E]
+/// [--profile P]… [--eager] [--ttl N]`.
 fn translate_up(rest: &[String], json: bool) -> i32 {
     let mut compose_file = "compose.yml".to_string();
     let mut project: Option<String> = None;
+    // CMP-CLI-INTEGRATION: docker-compose `--project-directory` / `--env-file`.
+    let mut project_dir: Option<String> = None;
+    let mut env_file: Option<String> = None;
     let mut eager = false;
     // CMP-P1-PROFILES: `docker compose up --profile <name>` (repeatable).
     let mut profiles: Vec<String> = Vec::new();
@@ -44,6 +48,18 @@ fn translate_up(rest: &[String], json: bool) -> i32 {
                 i += 1;
                 if i < rest.len() {
                     project = Some(rest[i].clone());
+                }
+            }
+            "--project-directory" => {
+                i += 1;
+                if i < rest.len() {
+                    project_dir = Some(rest[i].clone());
+                }
+            }
+            "--env-file" => {
+                i += 1;
+                if i < rest.len() {
+                    env_file = Some(rest[i].clone());
                 }
             }
             "--profile" => {
@@ -67,6 +83,8 @@ fn translate_up(rest: &[String], json: bool) -> i32 {
     crate::handlers::compose::up(
         &compose_file,
         project.as_deref(),
+        project_dir.as_deref(),
+        env_file.as_deref(),
         eager,
         &profiles,
         ttl,

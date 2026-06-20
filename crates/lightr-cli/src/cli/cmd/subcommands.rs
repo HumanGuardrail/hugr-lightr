@@ -18,6 +18,16 @@ pub enum ComposeCmd {
         /// COMPOSE_PROJECT_NAME > the file's `name:` > the directory basename.
         #[arg(short = 'p', long = "project-name")]
         project_name: Option<String>,
+        /// Alternate working directory used as the base for the default `.env`
+        /// (docker-compose `--project-directory`). Defaults to the compose
+        /// file's parent directory.
+        #[arg(long = "project-directory")]
+        project_directory: Option<String>,
+        /// Compose-level env-file for `${VAR}` interpolation (docker-compose
+        /// `--env-file`). Replaces the default `.env`; the live process
+        /// environment still wins over its values.
+        #[arg(long = "env-file")]
+        env_file: Option<String>,
         /// Start all services immediately (override lazy)
         #[arg(long)]
         eager: bool,
