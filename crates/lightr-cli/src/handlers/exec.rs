@@ -86,6 +86,11 @@ mod tests {
         std::env::set_var("LIGHTR_HOME", tmp.path().to_str().unwrap());
 
         let code = run("test-vz-id", &["true".to_string()]);
+        // Clear LIGHTR_HOME before releasing ENV_LOCK so this test's tempdir
+        // value cannot leak into reader tests that resolve the default
+        // `lightr_home()` after the lock is dropped (fix flake #52). Matches
+        // the set→call→remove-under-lock convention in compose/engine/inspect.
+        std::env::remove_var("LIGHTR_HOME");
         assert_eq!(code, 1, "exec on a vz run must exit 1");
     }
 }
