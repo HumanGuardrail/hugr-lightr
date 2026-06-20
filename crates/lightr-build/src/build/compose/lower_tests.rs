@@ -230,6 +230,32 @@ fn no_healthcheck_unchanged() {
     assert!(hc(&c).is_none(), "no healthcheck declared ⇒ None");
 }
 
+// ---- SKELETON-FREEZE: frozen-but-not-yet-lowered aspects are no-ops ----
+
+#[test]
+fn frozen_aspects_lower_without_error_and_change_nothing() {
+    // A service declaring EVERY frozen-but-not-yet-lowered field must still
+    // lower cleanly (the per-aspect stubs are honest no-ops) and produce the
+    // SAME runtime `Service` as the bare `image: x` service does today.
+    let bare = "services:\n  web:\n    image: x\n";
+    let full = "services:\n  web:\n    image: x\n    entrypoint: [\"/bin/init\"]\n    depends_on:\n      - db\n    deploy:\n      replicas: 3\n    networks:\n      - frontend\n    restart: always\n    extra_hosts:\n      - \"host:1.2.3.4\"\n    stop_grace_period: 10s\n    stop_signal: SIGINT\n    init: true\n    tty: true\n    cap_add:\n      - NET_ADMIN\n    cap_drop:\n      - ALL\n    privileged: true\n    container_name: my-web\n    working_dir: /app\n    user: \"1000\"\n";
+
+    let b = lower_yaml(bare, None);
+    let f = lower_yaml(full, None);
+
+    let bs = &b.services[0];
+    let fs = &f.services[0];
+    // The stub aspects touch no runtime field ⇒ byte-identical Service.
+    assert_eq!(bs.image_ref, fs.image_ref);
+    assert_eq!(bs.command, fs.command);
+    assert_eq!(bs.ports, fs.ports);
+    assert_eq!(bs.env, fs.env);
+    assert_eq!(bs.eager, fs.eager);
+    assert_eq!(bs.secrets, fs.secrets);
+    assert_eq!(bs.configs, fs.configs);
+    assert_eq!(bs.healthcheck, fs.healthcheck);
+}
+
 #[test]
 fn healthcheck_bad_duration_is_fail_closed() {
     let yaml = "services:\n  web:\n    image: x\n    healthcheck:\n      test: pgrep x\n      interval: 30x\n";

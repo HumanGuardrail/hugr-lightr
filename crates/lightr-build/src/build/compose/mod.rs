@@ -5,6 +5,10 @@ pub mod down;
 pub(crate) mod envfile;
 pub mod interp;
 pub(crate) mod lower;
+/// SKELETON-FREEZE: per-aspect lowering STUBS for compose service fields frozen
+/// in the model but not yet lowered (depends_on/deploy/networks/restart/...).
+/// Each is an honest no-op a feature WP fills. Consumed by `lower.rs`.
+pub(crate) mod lower_stubs;
 /// CMP-P0-MERGE: compose override deep-merge engine + merged parse entry point.
 pub mod merge;
 pub mod model;

@@ -13,6 +13,10 @@ use super::envfile::read_env_file;
 use super::model::{empty_service, parse_duration_secs, Compose, LoweredHealthcheck, Service};
 use super::ports::{parse_ports, ParsedPort};
 use super::spec::{ComposeSpec, Environment, Healthcheck, ServiceDef, StringOrList};
+// SKELETON-FREEZE: per-aspect stubs for the frozen-but-not-yet-lowered service
+// fields live in their own module so a feature WP fills exactly ONE stub body
+// without colliding on this file. The dispatcher (`lower_service`) calls each.
+use super::lower_stubs;
 
 /// Lower a deserialized spec into the runtime `Compose`, preserving service
 /// declaration order.
@@ -44,37 +48,119 @@ pub(crate) fn lower_with_base_dir(spec: ComposeSpec, base_dir: Option<&Path>) ->
     Ok(Compose { services })
 }
 
-fn lower_service(name: String, def: ServiceDef, base_dir: Option<&Path>) -> Result<Service> {
+/// Dispatcher: lower one service `def` into a runtime [`Service`] by calling each
+/// per-aspect `lower_<aspect>` helper in turn.
+///
+/// SKELETON-FREEZE: this is intentionally a flat list of one call per compose
+/// aspect. Aspects that ALREADY lower today (image/command/env/ports/eager/
+/// secrets/configs/healthcheck) live in this file; aspects that are frozen in
+/// the model but not yet lowered (depends_on/deploy/networks/restart/...) are
+/// honest no-op stubs in [`super::lower_stubs`]. A feature WP fills exactly ONE
+/// stub body and adds nothing here, so WPs stay disjoint — no collision on the
+/// dispatcher beyond the (already-present) call site.
+///
+/// Behavior-preserving: the active aspects below run in the SAME order and
+/// produce the byte-identical `Service` the legacy single-function path did; the
+/// stub calls do nothing.
+fn lower_service(name: String, mut def: ServiceDef, base_dir: Option<&Path>) -> Result<Service> {
     let mut svc = empty_service(name);
 
-    if let Some(image) = def.image {
-        svc.image_ref = image;
-    }
+    // --- active aspects (already lowered; behavior-preserving) ---
+    lower_image(&def, &mut svc);
+    lower_command_aspect(&def, &mut svc);
+    lower_env_aspect(&mut def, &mut svc, base_dir)?;
+    lower_ports_aspect(&def, &mut svc)?;
+    lower_eager(&def, &mut svc);
+    lower_secrets(&def, &mut svc);
+    lower_configs(&def, &mut svc);
+    lower_healthcheck_aspect(&def, &mut svc)?;
 
-    svc.command = def.command.map(lower_command);
-
-    svc.env = lower_env(def.env_file.as_ref(), def.environment, base_dir)?;
-
-    svc.ports = lower_ports(&def.ports)?;
-
-    svc.eager = def.x_lightr_eager.unwrap_or(false);
-
-    svc.secrets = lower_pairs(&def.secrets);
-    svc.configs = lower_pairs(&def.configs);
-
-    svc.healthcheck = lower_healthcheck(def.healthcheck)?;
+    // --- frozen-but-not-yet-lowered aspects (SKELETON-FREEZE stubs) ---
+    lower_stubs::lower_depends_on(&def, &mut svc);
+    lower_stubs::lower_deploy(&def, &mut svc);
+    lower_stubs::lower_networks(&def, &mut svc);
+    lower_stubs::lower_restart(&def, &mut svc);
+    lower_stubs::lower_spec_secrets(&def, &mut svc);
+    lower_stubs::lower_spec_configs(&def, &mut svc);
+    lower_stubs::lower_extra_hosts(&def, &mut svc);
+    lower_stubs::lower_stop_grace_period(&def, &mut svc);
+    lower_stubs::lower_stop_signal(&def, &mut svc);
+    lower_stubs::lower_init(&def, &mut svc);
+    lower_stubs::lower_tty(&def, &mut svc);
+    lower_stubs::lower_cap_add(&def, &mut svc);
+    lower_stubs::lower_cap_drop(&def, &mut svc);
+    lower_stubs::lower_privileged(&def, &mut svc);
+    lower_stubs::lower_container_name(&def, &mut svc);
+    lower_stubs::lower_working_dir(&def, &mut svc);
+    lower_stubs::lower_user(&def, &mut svc);
+    lower_stubs::lower_entrypoint(&def, &mut svc);
 
     Ok(svc)
 }
 
+/// `image`: the container image reference. Empty when the service declares only
+/// a `build:` (not lowered yet).
+fn lower_image(def: &ServiceDef, svc: &mut Service) {
+    if let Some(image) = &def.image {
+        svc.image_ref = image.clone();
+    }
+}
+
+/// `command` aspect: lower the service's `command` (string ⇒ `/bin/sh -c`
+/// wrapper, list ⇒ argv as-is) onto `svc.command`.
+fn lower_command_aspect(def: &ServiceDef, svc: &mut Service) {
+    svc.command = def.command.as_ref().map(lower_command);
+}
+
+/// `environment`/`env_file` aspect: fold env sources (env_file first, inline on
+/// top) onto `svc.env`. See [`lower_env`] for precedence. Takes `&mut def` to
+/// MOVE the `environment` block out (folding consumes the scalar map values via
+/// `EnvScalar::into_string`); `env_file` is borrowed (only its paths are read).
+fn lower_env_aspect(
+    def: &mut ServiceDef,
+    svc: &mut Service,
+    base_dir: Option<&Path>,
+) -> Result<()> {
+    svc.env = lower_env(def.env_file.as_ref(), def.environment.take(), base_dir)?;
+    Ok(())
+}
+
+/// `ports` aspect: lower the parsed compose ports onto `svc.ports`.
+fn lower_ports_aspect(def: &ServiceDef, svc: &mut Service) -> Result<()> {
+    svc.ports = lower_ports(&def.ports)?;
+    Ok(())
+}
+
+/// `x-lightr-eager` aspect: the Lightr eager-start extension.
+fn lower_eager(def: &ServiceDef, svc: &mut Service) {
+    svc.eager = def.x_lightr_eager.unwrap_or(false);
+}
+
+/// Lightr-extension `secrets` aspect: `name=ref` list ⇒ `svc.secrets`.
+fn lower_secrets(def: &ServiceDef, svc: &mut Service) {
+    svc.secrets = lower_pairs(&def.secrets);
+}
+
+/// Lightr-extension `configs` aspect: `name=ref` list ⇒ `svc.configs`.
+fn lower_configs(def: &ServiceDef, svc: &mut Service) {
+    svc.configs = lower_pairs(&def.configs);
+}
+
+/// `healthcheck` aspect: lower the full compose healthcheck onto
+/// `svc.healthcheck`. See [`lower_healthcheck`].
+fn lower_healthcheck_aspect(def: &ServiceDef, svc: &mut Service) -> Result<()> {
+    svc.healthcheck = lower_healthcheck(def.healthcheck.as_ref())?;
+    Ok(())
+}
+
 /// `command`: a bare string becomes a `/bin/sh -c` wrapper (legacy semantics);
 /// a list is taken as the argv as-is.
-fn lower_command(c: StringOrList) -> Vec<String> {
+fn lower_command(c: &StringOrList) -> Vec<String> {
     match c {
         StringOrList::String(s) => {
-            vec!["/bin/sh".to_string(), "-c".to_string(), s]
+            vec!["/bin/sh".to_string(), "-c".to_string(), s.clone()]
         }
-        StringOrList::List(v) => v,
+        StringOrList::List(v) => v.clone(),
     }
 }
 
@@ -203,7 +289,7 @@ fn lower_pairs(items: &[String]) -> Vec<(String, String)> {
 ///  * `disable: true` (the explicit compose toggle), or
 ///  * `test`/`cmd` is `NONE` (`["NONE"]` or the string `"NONE"`), or
 ///  * no command is present at all (back-compat with the legacy parser).
-fn lower_healthcheck(hc: Option<Healthcheck>) -> Result<Option<LoweredHealthcheck>> {
+fn lower_healthcheck(hc: Option<&Healthcheck>) -> Result<Option<LoweredHealthcheck>> {
     let Some(hc) = hc else {
         return Ok(None);
     };
@@ -211,7 +297,7 @@ fn lower_healthcheck(hc: Option<Healthcheck>) -> Result<Option<LoweredHealthchec
     if hc.disable == Some(true) {
         return Ok(None);
     }
-    let cmd = match hc.test.or(hc.cmd) {
+    let cmd = match hc.test.as_ref().or(hc.cmd.as_ref()) {
         // `test: NONE` disables the healthcheck.
         Some(t) => match lower_test(t) {
             None => return Ok(None),
@@ -222,19 +308,19 @@ fn lower_healthcheck(hc: Option<Healthcheck>) -> Result<Option<LoweredHealthchec
     if cmd.is_empty() {
         return Ok(None);
     }
-    let interval = duration_field(hc.interval, 30, "interval")?;
-    let timeout = duration_field(hc.timeout, 30, "timeout")?;
-    let start_period = duration_field(hc.start_period, 0, "start_period")?;
+    let interval = duration_field(hc.interval.as_ref(), 30, "interval")?;
+    let timeout = duration_field(hc.timeout.as_ref(), 30, "timeout")?;
+    let start_period = duration_field(hc.start_period.as_ref(), 0, "start_period")?;
     let retries = hc.retries.unwrap_or(3);
     Ok(Some((cmd, interval, timeout, start_period, retries)))
 }
 
 /// Parse an optional compose duration field, falling back to `default` when
 /// absent. A present-but-unparseable value is a fail-closed error.
-fn duration_field(v: Option<serde_yaml::Value>, default: u64, name: &str) -> Result<u64> {
+fn duration_field(v: Option<&serde_yaml::Value>, default: u64, name: &str) -> Result<u64> {
     match v {
         Some(v) => {
-            let s = value_to_str(&v);
+            let s = value_to_str(v);
             parse_duration_secs(&s)
                 .ok_or_else(|| LightrError::InvalidManifest(format!("bad healthcheck {name}: {s}")))
         }
@@ -246,7 +332,7 @@ fn duration_field(v: Option<serde_yaml::Value>, default: u64, name: &str) -> Res
 /// (`NONE` in either string or `["NONE"]` list form). Otherwise a list strips a
 /// leading `CMD`/`CMD-SHELL` and joins the rest with a space; a string is taken
 /// verbatim (quote-trimmed).
-fn lower_test(t: StringOrList) -> Option<String> {
+fn lower_test(t: &StringOrList) -> Option<String> {
     match t {
         StringOrList::String(s) => {
             let s = s.trim().trim_matches('"').to_string();
@@ -256,17 +342,15 @@ fn lower_test(t: StringOrList) -> Option<String> {
                 Some(s)
             }
         }
-        StringOrList::List(mut parts) => {
-            match parts.first().map(String::as_str) {
+        StringOrList::List(parts) => {
+            let rest: &[String] = match parts.first().map(String::as_str) {
                 // `["NONE"]` disables the healthcheck.
                 Some("NONE") => return None,
                 // exec/shell forms strip the leading directive.
-                Some("CMD") | Some("CMD-SHELL") => {
-                    parts.remove(0);
-                }
-                _ => {}
-            }
-            Some(parts.join(" "))
+                Some("CMD") | Some("CMD-SHELL") => &parts[1..],
+                _ => &parts[..],
+            };
+            Some(rest.join(" "))
         }
     }
 }
