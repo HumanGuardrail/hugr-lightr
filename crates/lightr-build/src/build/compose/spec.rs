@@ -166,9 +166,18 @@ impl EnvScalar {
     }
 }
 
-/// Service healthcheck. `test` is string-or-list (`["CMD", ...]` or a shell
-/// string); `interval`/`retries` are optional with Docker-faithful defaults
-/// applied at lowering time.
+/// Service healthcheck (CMP-P1-HEALTH-FULL — the full compose-spec form).
+///
+/// `test` is string-or-list:
+///  * list `["CMD", "curl", ...]` (exec form) / `["CMD-SHELL", "curl ..."]`
+///    (shell form) / `["NONE"]` (disable),
+///  * string `"CMD-SHELL ..."` / a bare shell string / `"NONE"` (disable).
+///
+/// `interval`/`timeout`/`start_period` are compose duration strings (`30s`,
+/// `1m30s`, a bare integer ⇒ seconds) parsed with `parse_duration_secs` at
+/// lowering time; `retries` is a count. `disable: true` is the explicit
+/// compose toggle that drops any healthcheck (== `test: NONE`). Every field is
+/// optional with Docker-faithful defaults applied at lowering time.
 #[derive(Debug, Default, Deserialize)]
 pub struct Healthcheck {
     #[serde(default)]
@@ -178,6 +187,17 @@ pub struct Healthcheck {
     pub cmd: Option<StringOrList>,
     #[serde(default)]
     pub interval: Option<Value>,
+    /// Per-probe timeout (compose `timeout`). Lowered to the runtime
+    /// `Healthcheck.timeout_s` (Docker default 30s when absent).
+    #[serde(default)]
+    pub timeout: Option<Value>,
+    /// Grace window after start (compose `start_period`). Lowered to the runtime
+    /// `Healthcheck.start_period_s` (Docker default 0s when absent).
+    #[serde(default)]
+    pub start_period: Option<Value>,
     #[serde(default)]
     pub retries: Option<u32>,
+    /// Compose `disable: true` ⇒ no healthcheck (equivalent to `test: NONE`).
+    #[serde(default)]
+    pub disable: Option<bool>,
 }

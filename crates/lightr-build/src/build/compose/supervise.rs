@@ -78,19 +78,21 @@ pub(crate) fn start_service_detached(
         child_env.push((format!("{prefix}_PORT"), container_port.to_string()));
     }
 
-    let hc = svc
-        .healthcheck
-        .as_ref()
-        .map(|(cmd, interval_s, retries)| Healthcheck {
-            cmd: cmd.clone(),
-            interval_s: *interval_s,
-            // WP-RC-4: compose's healthcheck carries only cmd/interval/retries;
-            // the new per-probe timeout + start-period take Docker's defaults
-            // (30s / 0s) until compose surfaces them. Compile-driven touch only.
-            timeout_s: 30,
-            start_period_s: 0,
-            retries: *retries,
-        });
+    // CMP-P1-HEALTH-FULL: compose now lowers the full healthcheck — cmd,
+    // interval, timeout, start_period, retries — straight into the runtime
+    // `Healthcheck` (the RC-4 fields are no longer hardcoded defaults).
+    let hc =
+        svc.healthcheck
+            .as_ref()
+            .map(
+                |(cmd, interval_s, timeout_s, start_period_s, retries)| Healthcheck {
+                    cmd: cmd.clone(),
+                    interval_s: *interval_s,
+                    timeout_s: *timeout_s,
+                    start_period_s: *start_period_s,
+                    retries: *retries,
+                },
+            );
 
     let handle = spawn_detached_engine(
         &spec,

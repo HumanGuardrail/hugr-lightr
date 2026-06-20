@@ -147,3 +147,96 @@ fn no_env_file_no_environment_is_empty() {
     let c = lower_yaml(yaml, None);
     assert!(c.services[0].env.is_empty());
 }
+
+// ---- CMP-P1-HEALTH-FULL: full compose healthcheck lowering ----
+
+/// The lowered healthcheck tuple of the single service.
+fn hc(c: &Compose) -> Option<LoweredHealthcheck> {
+    c.services[0].healthcheck.clone()
+}
+
+#[test]
+fn healthcheck_full_list_form_lowers_all_fields() {
+    // test list (CMD form) + all four timing/count fields as durations.
+    let yaml = "services:\n  web:\n    image: x\n    healthcheck:\n      test: [\"CMD\", \"curl\", \"-fsS\", \"localhost/health\"]\n      interval: 15s\n      timeout: 5s\n      start_period: 1m30s\n      retries: 5\n";
+    let c = lower_yaml(yaml, None);
+    assert_eq!(
+        hc(&c),
+        Some(("curl -fsS localhost/health".to_string(), 15, 5, 90, 5)),
+        "(cmd, interval_s, timeout_s, start_period_s, retries)"
+    );
+}
+
+#[test]
+fn healthcheck_full_string_form_lowers_all_fields() {
+    // test as a shell string; bare-integer durations ⇒ seconds.
+    let yaml = "services:\n  web:\n    image: x\n    healthcheck:\n      test: pgrep myproc\n      interval: 30\n      timeout: 10\n      start_period: 0\n      retries: 2\n";
+    let c = lower_yaml(yaml, None);
+    assert_eq!(hc(&c), Some(("pgrep myproc".to_string(), 30, 10, 0, 2)));
+}
+
+#[test]
+fn healthcheck_cmd_shell_list_form() {
+    // CMD-SHELL list form strips the directive and joins the rest.
+    let yaml = "services:\n  web:\n    image: x\n    healthcheck:\n      test: [\"CMD-SHELL\", \"exit 1\"]\n";
+    let c = lower_yaml(yaml, None);
+    let got = hc(&c).expect("healthcheck present");
+    assert_eq!(got.0, "exit 1");
+}
+
+#[test]
+fn healthcheck_docker_defaults_when_fields_absent() {
+    // Only a command ⇒ Docker-faithful defaults (30s / 30s / 0s / 3).
+    let yaml = "services:\n  web:\n    image: x\n    healthcheck:\n      test: pgrep x\n";
+    let c = lower_yaml(yaml, None);
+    assert_eq!(hc(&c), Some(("pgrep x".to_string(), 30, 30, 0, 3)));
+}
+
+#[test]
+fn healthcheck_disable_true_drops() {
+    // `disable: true` ⇒ no healthcheck even with a test present.
+    let yaml = "services:\n  web:\n    image: x\n    healthcheck:\n      test: [\"CMD\", \"true\"]\n      disable: true\n";
+    let c = lower_yaml(yaml, None);
+    assert!(hc(&c).is_none(), "disable: true must drop the healthcheck");
+}
+
+#[test]
+fn healthcheck_test_none_list_drops() {
+    let yaml = "services:\n  web:\n    image: x\n    healthcheck:\n      test: [\"NONE\"]\n";
+    let c = lower_yaml(yaml, None);
+    assert!(hc(&c).is_none(), "test: [NONE] must drop the healthcheck");
+}
+
+#[test]
+fn healthcheck_test_none_string_drops() {
+    let yaml = "services:\n  web:\n    image: x\n    healthcheck:\n      test: NONE\n";
+    let c = lower_yaml(yaml, None);
+    assert!(hc(&c).is_none(), "test: NONE must drop the healthcheck");
+}
+
+#[test]
+fn healthcheck_subset_back_compat() {
+    // The pre-CMP-P1 subset (cmd alias + interval + retries) still lowers, now
+    // with the RC-4 fields defaulted (timeout 30s, start_period 0s).
+    let yaml = "services:\n  web:\n    image: x\n    healthcheck:\n      cmd: pgrep myproc\n      interval: 30\n      retries: 2\n";
+    let c = lower_yaml(yaml, None);
+    assert_eq!(hc(&c), Some(("pgrep myproc".to_string(), 30, 30, 0, 2)));
+}
+
+#[test]
+fn no_healthcheck_unchanged() {
+    let yaml = "services:\n  web:\n    image: x\n";
+    let c = lower_yaml(yaml, None);
+    assert!(hc(&c).is_none(), "no healthcheck declared ⇒ None");
+}
+
+#[test]
+fn healthcheck_bad_duration_is_fail_closed() {
+    let yaml = "services:\n  web:\n    image: x\n    healthcheck:\n      test: pgrep x\n      interval: 30x\n";
+    let spec: ComposeSpec = serde_yaml::from_str(yaml).unwrap();
+    let err = match lower(spec) {
+        Ok(_) => panic!("expected bad-duration error"),
+        Err(e) => e,
+    };
+    assert!(format!("{err}").contains("bad healthcheck interval"));
+}

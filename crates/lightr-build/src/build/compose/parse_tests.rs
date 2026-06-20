@@ -69,9 +69,14 @@ fn parse_compose_secrets_configs_healthcheck() {
         vec![("app_conf".to_string(), "config/app".to_string())]
     );
     let hc = api.healthcheck.as_ref().expect("healthcheck parsed");
+    // CMP-P1-HEALTH-FULL widened the tuple to
+    // (cmd, interval_s, timeout_s, start_period_s, retries); the subset still
+    // lowers cmd/interval/retries identically, with the RC-4 defaults filled in.
     assert_eq!(hc.0, "curl -fsS localhost:8080/health");
     assert_eq!(hc.1, 15);
-    assert_eq!(hc.2, 5);
+    assert_eq!(hc.2, 30, "timeout_s defaults to 30s (RC-4)");
+    assert_eq!(hc.3, 0, "start_period_s defaults to 0s (RC-4)");
+    assert_eq!(hc.4, 5, "retries");
 }
 
 #[test]
@@ -79,9 +84,10 @@ fn parse_compose_healthcheck_string_form() {
     let yaml = "services:\n  svc:\n    image: i\n    healthcheck:\n      cmd: pgrep myproc\n      interval: 30\n      retries: 2\n";
     let c = parse_compose(yaml).unwrap();
     let hc = c.services[0].healthcheck.as_ref().expect("hc");
+    // Widened tuple (CMP-P1-HEALTH-FULL): retries moved to index 4.
     assert_eq!(hc.0, "pgrep myproc");
     assert_eq!(hc.1, 30);
-    assert_eq!(hc.2, 2);
+    assert_eq!(hc.4, 2, "retries");
 }
 
 #[test]
