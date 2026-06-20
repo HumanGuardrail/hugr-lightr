@@ -15,16 +15,26 @@ use std::path::Path;
 use super::args::{ArgOverrides, ArgState};
 use super::exec_fs::copy_dir_recursive;
 use super::memo::{load_meta, save_meta};
-use super::parse::Instr;
+use super::parse::{CmdForm, Instr};
 use super::vars::{interpolate, VarScope};
+
+/// The default SHELL for shell-form RUN/ENTRYPOINT/CMD (Docker's default
+/// `["/bin/sh","-c"]`). SHELL state is per-stage and resets to this at FROM.
+pub(super) fn default_shell() -> Vec<String> {
+    vec!["/bin/sh".to_string(), "-c".to_string()]
+}
 
 /// The per-step mutable+immutable state every instruction body reads/writes.
 ///
 /// Immutable for the whole build: `work_dir`, `store`, `context_dir`,
 /// `engine`, `escape`, `arg_overrides`. Mutated across steps: `scope`,
-/// `arg_state`, `accumulated_env`, `current_workdir`. The loop-only state
-/// (`prev_layer_root`, `cached_steps`, snapshot `name`) stays in `build()` and is
-/// not part of the per-instruction contract.
+/// `arg_state`, `accumulated_env`, `current_workdir`, `current_shell`. The
+/// loop-only state (`prev_layer_root`, `cached_steps`, snapshot `name`) stays in
+/// `build()` and is not part of the per-instruction contract.
+///
+/// `current_shell` (WP-DF-09) is the active SHELL for shell-form RUN (and
+/// shell-form ENTRYPOINT/CMD): set by the SHELL instruction, consumed by `run`,
+/// reset to `default_shell()` at every FROM (SHELL is per-stage in Docker).
 pub(super) struct BuildCtx<'a> {
     pub work_dir: &'a Path,
     pub store: &'a Store,
@@ -36,6 +46,7 @@ pub(super) struct BuildCtx<'a> {
     pub arg_state: &'a mut ArgState,
     pub accumulated_env: &'a mut Vec<(String, String)>,
     pub current_workdir: &'a mut String,
+    pub current_shell: &'a mut Vec<String>,
 }
 
 /// Interpolate every string in a slice against `scope`.
@@ -71,13 +82,34 @@ pub(super) fn from(ctx: &mut BuildCtx, instr: &Instr, image_ref: &str) -> Result
     // Stage boundary: global ARGs do NOT cross into the stage (Docker).
     ctx.arg_state
         .sync(instr, ctx.arg_overrides, &mut ctx.scope.args);
+    // SHELL is per-stage (WP-DF-09): a new stage resets to the default shell.
+    *ctx.current_shell = default_shell();
     Ok(())
 }
 
-/// `RUN`: execute argv with the native engine (no rootfs isolation), env from
-/// the accumulated ENV, cwd from the current WORKDIR.
-pub(super) fn run(ctx: &mut BuildCtx, argv: &[String]) -> Result<()> {
-    let argv = &interp_vec(argv, ctx.scope, ctx.escape)?;
+/// `RUN`: execute the command with the native engine (no rootfs isolation), env
+/// from the accumulated ENV, cwd from the current WORKDIR.
+///
+/// The argv is built from `form` at EXEC time (WP-DF-09), not the parse-baked
+/// argv, so the active SHELL applies:
+/// - **Exec form** `RUN ["a","b"]` — argv verbatim (SHELL does NOT apply, Docker).
+/// - **Shell form** `RUN cmd` — `current_shell ++ [cmd]` (e.g. `/bin/bash -c cmd`
+///   after `SHELL ["/bin/bash","-c"]`; default `/bin/sh -c cmd`).
+///
+/// Every token (the shell prefix's args from interpolation aside — the shell
+/// exe/flags come from a parsed JSON array and are used verbatim) of the command
+/// is interpolated against the scope as before.
+pub(super) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
+    let resolved = match form {
+        CmdForm::Exec(v) => interp_vec(v, ctx.scope, ctx.escape)?,
+        CmdForm::Shell(s) => {
+            let cmd = interpolate(s, ctx.scope, ctx.escape)?;
+            let mut argv = ctx.current_shell.clone();
+            argv.push(cmd);
+            argv
+        }
+    };
+    let argv = &resolved;
     let cwd = if *ctx.current_workdir == "/" || ctx.current_workdir.is_empty() {
         ctx.work_dir.to_path_buf()
     } else {
@@ -220,6 +252,15 @@ pub(super) fn label(ctx: &mut BuildCtx, pairs: &[(String, String)]) -> Result<()
 pub(super) fn arg(ctx: &mut BuildCtx, instr: &Instr) -> Result<()> {
     ctx.arg_state
         .sync(instr, ctx.arg_overrides, &mut ctx.scope.args);
+    Ok(())
+}
+
+/// `SHELL ["exe","arg",...]` (WP-DF-09): set the active shell used to wrap
+/// subsequent shell-form RUN (and shell-form ENTRYPOINT/CMD) in THIS stage.
+/// The tokens are interpolated against the scope (Docker interpolates build
+/// vars in SHELL's JSON array). SHELL state is per-stage — reset at FROM.
+pub(super) fn shell(ctx: &mut BuildCtx, shell: &[String]) -> Result<()> {
+    *ctx.current_shell = interp_vec(shell, ctx.scope, ctx.escape)?;
     Ok(())
 }
 

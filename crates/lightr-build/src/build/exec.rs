@@ -66,13 +66,24 @@ pub fn build(
     let mut prev_layer_root: Option<Digest> = None;
     let mut accumulated_env: Vec<(String, String)> = Vec::new();
     let mut current_workdir = String::from("/");
+    // Active SHELL for shell-form RUN (WP-DF-09): default `["/bin/sh","-c"]`,
+    // set by SHELL, reset at every FROM (per-stage). Folded into the RUN memo
+    // key (step_key) so a differing SHELL can never false-hit a cached layer.
+    let mut current_shell = exec_instr::default_shell();
     let mut cached_steps: u64 = 0;
     // Interpolation scope: `args` seeded by ARG (DF-08, via `arg_state`); `env`
     // seeded from the base after FROM + updated by ENV (ENV wins over ARG).
     let mut scope = VarScope::default();
 
     for step in &steps {
-        let key = step_key(prev_layer_root, step, context_dir, &scope, escape)?;
+        let key = step_key(
+            prev_layer_root,
+            step,
+            context_dir,
+            &scope,
+            escape,
+            &current_shell,
+        )?;
 
         // AC lookup
         if let Some(cached_val) = store.ac_get(&key)? {
@@ -94,6 +105,19 @@ pub fn build(
                 if let Instr::Workdir { path } = &step.instr {
                     current_workdir = interpolate(path, &scope, escape)?;
                 }
+                // Re-derive the active SHELL on the cache-hit path (WP-DF-09):
+                // FROM resets it (per-stage); SHELL sets it. This keeps a later
+                // RUN's key correct even when the SHELL/FROM step was a cache hit.
+                match &step.instr {
+                    Instr::From { .. } => current_shell = exec_instr::default_shell(),
+                    Instr::Shell { shell } => {
+                        current_shell = shell
+                            .iter()
+                            .map(|s| interpolate(s, &scope, escape))
+                            .collect::<Result<Vec<_>>>()?;
+                    }
+                    _ => {}
+                }
                 continue;
             }
         }
@@ -112,16 +136,20 @@ pub fn build(
             arg_state: &mut arg_state,
             accumulated_env: &mut accumulated_env,
             current_workdir: &mut current_workdir,
+            current_shell: &mut current_shell,
         };
         match &step.instr {
             Instr::From { image_ref, .. } => exec_instr::from(&mut ctx, &step.instr, image_ref)?,
-            Instr::Run { argv, .. } => exec_instr::run(&mut ctx, argv)?,
+            // RUN consumes the structured `form` (WP-DF-09): shell form is wrapped
+            // by the active SHELL at exec time, not the parse-baked `/bin/sh -c`.
+            Instr::Run { form, .. } => exec_instr::run(&mut ctx, form)?,
             Instr::Copy { src, dest, .. } => exec_instr::copy(&mut ctx, src, dest)?,
             Instr::Env { pairs } => exec_instr::env(&mut ctx, pairs)?,
             Instr::Workdir { path } => exec_instr::workdir(&mut ctx, path)?,
             Instr::Cmd { argv, .. } => exec_instr::cmd(&mut ctx, argv)?,
             Instr::Label { pairs } => exec_instr::label(&mut ctx, pairs)?,
             Instr::Arg { .. } => exec_instr::arg(&mut ctx, &step.instr)?,
+            Instr::Shell { shell } => exec_instr::shell(&mut ctx, shell)?,
             // WP-DF-01 parses these into the AST; execution is DF-02..15. Until
             // then they route to the SAME "unsupported instruction" error path
             // as before (fail-closed, behavior-preserving — these never built).
@@ -154,3 +182,8 @@ mod tests;
 #[cfg(test)]
 #[path = "exec_df05_tests.rs"]
 mod df05_tests;
+
+// WP-DF-09 SHELL end-to-end tests (sibling file, godfile cap).
+#[cfg(test)]
+#[path = "exec_df09_tests.rs"]
+mod df09_tests;

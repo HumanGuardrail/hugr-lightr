@@ -27,7 +27,7 @@ use lightr_core::{Digest, LightrError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use super::parse::{BuildStep, Instr};
+use super::parse::{BuildStep, CmdForm, Instr};
 use super::vars::{interpolate, VarScope};
 
 /// Sidecar `.lightr-image.json` stored at the layer root.
@@ -78,17 +78,27 @@ pub(crate) fn canonical_step_text(
 }
 
 /// Compute `step_key = BLAKE3(BUILD_KEY_DOMAIN | prev_root_bytes |
-/// post_interpolation_text | [for COPY: each file's digest])`.
+/// post_interpolation_text | [for shell-form RUN: the active SHELL] |
+/// [for COPY: each file's digest])`.
 ///
 /// `scope` + `escape` interpolate the instruction text BEFORE hashing (Docker
 /// resolves `${VAR}` at build time; the cache key must reflect the resolved
 /// text, never the raw text — else differing ENV/ARG collide on a stale layer).
+///
+/// `current_shell` (WP-DF-09) is the active SHELL. It is NOT part of a RUN's
+/// instruction text, yet it changes HOW a shell-form RUN executes — so two
+/// builds with a different SHELL but identical `RUN cmd` text would otherwise
+/// collide to the same key (a FALSE memo hit). The active shell is folded into
+/// the key for **shell-form RUN only** (exec-form RUN ignores SHELL, matching
+/// Docker — so it is NOT folded there, avoiding needless cache busts). Non-RUN
+/// instructions never fold it, so their keys are byte-identical to before.
 pub(crate) fn step_key(
     prev_layer_root: Option<Digest>,
     step: &BuildStep,
     context_dir: &Path,
     scope: &VarScope,
     escape: bool,
+    current_shell: &[String],
 ) -> Result<Digest> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(BUILD_KEY_DOMAIN);
@@ -97,6 +107,22 @@ pub(crate) fn step_key(
     // canonical instr bytes = the POST-INTERPOLATION line text
     let text = canonical_step_text(step, scope, escape)?;
     hasher.update(text.as_bytes());
+    // WP-DF-09: a SHELL-form RUN's key MUST depend on the active SHELL (it is
+    // the actual interpreter, but not part of the RUN text). Folded under a
+    // domain separator with NUL-delimited tokens, so different SHELL ⇒ different
+    // key ⇒ no false cache hit. Exec-form RUN (and all other instructions) do
+    // NOT fold it, so their keys are unchanged from before this WP.
+    if let Instr::Run {
+        form: CmdForm::Shell(_),
+        ..
+    } = &step.instr
+    {
+        hasher.update(b"\x00shell\x00");
+        for tok in current_shell {
+            hasher.update(tok.as_bytes());
+            hasher.update(b"\x00");
+        }
+    }
     // For COPY, hash each source's content into the key. Files contribute
     // their digest; DIRECTORIES contribute every contained file's
     // (relative-path | digest), sorted -- so editing any file inside a copied
@@ -185,136 +211,8 @@ impl Drop for TempDirGuard {
     }
 }
 
+// Tests live in a sibling file (`#[path]`) to keep this file under the 400-line
+// godfile cap after the WP-DF-09 SHELL-key additions (house convention).
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    // A scope from (arg, env) pairs, for keying tests.
-    fn scope(args: &[(&str, &str)], envs: &[(&str, &str)]) -> VarScope {
-        VarScope {
-            args: args
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            env: envs
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-        }
-    }
-
-    fn run_step(raw: &str) -> BuildStep {
-        // The instr variant is irrelevant for keying (the key hashes the
-        // interpolated raw text + COPY content); a RUN step keeps the test
-        // self-contained.
-        BuildStep {
-            instr: Instr::Run {
-                argv: vec!["/bin/sh".into(), "-c".into(), raw.into()],
-                form: super::super::parse::CmdForm::Shell(raw.into()),
-            },
-            raw: raw.to_string(),
-        }
-    }
-
-    #[test]
-    fn step_key_dir_copy_changes_when_contained_file_changes() {
-        // `COPY src/ /app` must invalidate the cache when a file INSIDE src/
-        // changes -- not just top-level files.
-        // NOTE: step_key now takes (scope, escape) — WP-DF-BUILDKEY. An empty
-        // scope leaves the COPY text verbatim, so this content-fingerprint
-        // assertion is unchanged in meaning (only the v2 tag changed the bytes).
-        let ctx = TempDir::new().unwrap();
-        std::fs::create_dir_all(ctx.path().join("src/nested")).unwrap();
-        std::fs::write(ctx.path().join("src/a.txt"), b"one").unwrap();
-        std::fs::write(ctx.path().join("src/nested/b.txt"), b"deep-one").unwrap();
-
-        let step = BuildStep {
-            instr: Instr::Copy {
-                src: vec!["src".to_string()],
-                dest: "/app".to_string(),
-                from: None,
-                chown: None,
-                chmod: None,
-            },
-            raw: "COPY src /app".to_string(),
-        };
-        let s = VarScope::default();
-
-        let k1 = step_key(None, &step, ctx.path(), &s, true).unwrap();
-
-        // change a NESTED file
-        std::fs::write(ctx.path().join("src/nested/b.txt"), b"deep-two").unwrap();
-        let k2 = step_key(None, &step, ctx.path(), &s, true).unwrap();
-        assert_ne!(
-            k1.0, k2.0,
-            "nested file change must change the COPY step key"
-        );
-
-        // adding a file changes the key too
-        std::fs::write(ctx.path().join("src/c.txt"), b"new").unwrap();
-        let k3 = step_key(None, &step, ctx.path(), &s, true).unwrap();
-        assert_ne!(k2.0, k3.0, "adding a file must change the COPY step key");
-
-        // identical content => identical key (determinism)
-        std::fs::remove_file(ctx.path().join("src/c.txt")).unwrap();
-        std::fs::write(ctx.path().join("src/nested/b.txt"), b"deep-one").unwrap();
-        let k4 = step_key(None, &step, ctx.path(), &s, true).unwrap();
-        assert_eq!(k1.0, k4.0, "restoring content must restore the key");
-    }
-
-    // ---- WP-DF-BUILDKEY: MEMO-CORRECTNESS at the key layer ----
-
-    #[test]
-    fn interp_var_value_change_changes_key_no_false_hit() {
-        // The SAME raw instruction `RUN echo ${X}` keyed under X=A vs X=B must
-        // produce DIFFERENT keys — else B would reuse A's cached layer (silent
-        // WRONG build). This is the core memoization-correctness invariant.
-        let ctx = TempDir::new().unwrap();
-        let step = run_step("RUN echo ${X}");
-
-        let sa = scope(&[], &[("X", "alpha")]);
-        let sb = scope(&[], &[("X", "beta")]);
-
-        let ka = step_key(None, &step, ctx.path(), &sa, true).unwrap();
-        let kb = step_key(None, &step, ctx.path(), &sb, true).unwrap();
-        assert_ne!(
-            ka.0, kb.0,
-            "differing ${{X}} values must yield differing keys (no false memo hit)"
-        );
-    }
-
-    #[test]
-    fn interp_same_inputs_same_key_memo_hit() {
-        // Identical (instruction, scope) ⇒ identical key ⇒ memo HIT.
-        let ctx = TempDir::new().unwrap();
-        let step = run_step("RUN echo ${X}-${Y}");
-        let s = scope(&[("Y", "two")], &[("X", "one")]);
-
-        let k1 = step_key(None, &step, ctx.path(), &s, true).unwrap();
-        let k2 = step_key(None, &step, ctx.path(), &s, true).unwrap();
-        assert_eq!(k1.0, k2.0, "identical inputs must yield an identical key");
-    }
-
-    #[test]
-    fn no_var_dockerfile_key_is_stable() {
-        // A line with no `${VAR}` keys identically regardless of scope, and is
-        // stable across runs (v2). Behavior-preserving modulo the v1→v2 bump.
-        let ctx = TempDir::new().unwrap();
-        let step = run_step("RUN echo hello");
-        let empty = VarScope::default();
-        let populated = scope(&[("X", "v")], &[("Y", "w")]);
-
-        let k1 = step_key(None, &step, ctx.path(), &empty, true).unwrap();
-        let k2 = step_key(None, &step, ctx.path(), &empty, true).unwrap();
-        let k3 = step_key(None, &step, ctx.path(), &populated, true).unwrap();
-        assert_eq!(k1.0, k2.0, "no-var key must be stable across runs");
-        assert_eq!(k1.0, k3.0, "no-var key must not depend on scope contents");
-    }
-
-    #[test]
-    fn v2_domain_tag_in_key() {
-        // Document + lock the one-time invalidation: the domain tag is v2.
-        assert_eq!(BUILD_KEY_DOMAIN, b"lightr/build/v2");
-    }
-}
+#[path = "memo_tests.rs"]
+mod tests;
