@@ -168,6 +168,9 @@ fn plan_run(
         // WP-RC-USER (NON-OWNED site, set None): `plan` doesn't take `-u`, and
         // user is RUNTIME (not a memo-key input) → `None` (prediction unchanged).
         user: None,
+        // WP-RC-RESTART (NON-OWNED site, set None): `plan` doesn't take `--restart`,
+        // and restart is RUNTIME (not a memo-key input) → `None` (prediction unchanged).
+        restart: None,
     };
 
     match predict(&spec, &store) {

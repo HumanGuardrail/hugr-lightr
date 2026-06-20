@@ -48,6 +48,7 @@ fn deep_memo_disabled_equals_run_memoized() {
         env_explicit: vec![],
         workdir: None,
         user: None,
+        restart: None,
     };
     let cfg = DeepMemoConfig { enabled: false };
 
@@ -126,6 +127,7 @@ fn deep_memo_enabled_fallback_correctness() {
         env_explicit: vec![],
         workdir: None,
         user: None,
+        restart: None,
     };
     let cfg_on = DeepMemoConfig { enabled: true };
 

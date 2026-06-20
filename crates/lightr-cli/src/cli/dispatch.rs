@@ -65,14 +65,25 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             // (workdir): it is now WIRED into the runtime child cwd (honored at
             // exec). WP-RC-USER REMOVED `-u`/`--user` (user): it is now WIRED into
             // the runtime child uid/gid (honored at exec, cfg(unix); honest
-            // non-root error). With no still-stubbed flag set, `run` behaves
-            // exactly as before (behavior-preserving).
+            // non-root error). WP-RC-RESTART REMOVED `--restart` (restart): it is
+            // now WIRED into the detached supervisor's re-spawn loop (the policy
+            // is validated below, then honored at exit). With no still-stubbed
+            // flag set, `run` behaves exactly as before (behavior-preserving).
+            //
+            // WP-RC-RESTART: validate the `--restart` policy string up-front
+            // (fail-closed: a bad policy is an honest exit 2, never silently
+            // ignored). The validated string is threaded to the handler as-is.
+            if let Some(ref p) = restart {
+                if let Err(e) = lightr_run::restart::RestartPolicy::parse(p) {
+                    eprintln!("lightr: {e}");
+                    return 2;
+                }
+            }
             let new_flag_set = name.is_some()
                 || rm
                 || !label.is_empty()
                 || entrypoint.is_some()
                 || hostname.is_some()
-                || restart.is_some()
                 || network.is_some()
                 || !network_alias.is_empty()
                 || !add_host.is_empty()
@@ -116,6 +127,10 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                     // WP-RC-USER: `-u`/`--user` → RunSpec.user (honored as the
                     // child's uid/gid at exec, cfg(unix)). `None` ⇒ current user.
                     user.as_deref(),
+                    // WP-RC-RESTART: `--restart` → RunSpec.restart (honored by the
+                    // detached supervisor's re-spawn loop). `None` ⇒ `no` (run
+                    // once + exit, as before). Already validated above.
+                    restart.as_deref(),
                     &health,
                 )
             }

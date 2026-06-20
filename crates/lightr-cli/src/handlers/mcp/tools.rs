@@ -180,6 +180,9 @@ pub(super) fn handle_tools_call(id: Value, params: &Value) -> Value {
                 // WP-RC-USER (NON-OWNED site, set None): the MCP run tool has no
                 // `-u` → `None` (current user; user is RUNTIME, not keyed).
                 user: None,
+                // WP-RC-RESTART (NON-OWNED site, set None): the MCP run tool has no
+                // `--restart` → `None` (run once; restart is RUNTIME, not keyed).
+                restart: None,
             };
             match run_memoized(&spec, &store) {
                 Ok(outcome) => {

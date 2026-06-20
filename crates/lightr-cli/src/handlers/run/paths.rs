@@ -123,6 +123,9 @@ pub(super) struct NativeRun<'a> {
     pub workdir: Option<String>,
     /// WP-RC-USER: `-u`/`--user` — honored as the child uid/gid (cfg unix). RUNTIME ONLY.
     pub user: Option<String>,
+    /// WP-RC-RESTART: `--restart` — honored by the detached supervisor's re-spawn
+    /// loop. `None` ⇒ `no` (run once + exit). RUNTIME ONLY (never keyed).
+    pub restart: Option<String>,
 }
 
 pub(super) fn run_native_memo(req: NativeRun) -> i32 {
@@ -145,6 +148,7 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         env_explicit,
         workdir,
         user,
+        restart,
     } = req;
     let input_paths: Vec<std::path::PathBuf> = if inputs.is_empty() {
         vec![cwd.clone()]
@@ -175,6 +179,7 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         env_explicit,
         workdir, // WP-RC-WORKDIR: honored as the child cwd (memo exec + supervisor).
         user,    // WP-RC-USER: honored as the child uid/gid (cfg unix; memo + supervisor).
+        restart, // WP-RC-RESTART: honored by the detached supervisor's re-spawn loop.
     };
 
     // Detach path: spawn detached and print the run id. WP-RC-4: when a
