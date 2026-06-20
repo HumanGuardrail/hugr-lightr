@@ -47,6 +47,13 @@ pub use run::mount::{parse_mount_long, parse_tmpfs, parse_v, MountKind, MountSpe
 // wiring WPs (LIFE-02/03 --name + verb name-resolution).
 pub use run::registry::{claim, name_validate, release, resolve};
 
+// lifecycle (SKELETON-FREEZE) — run-instance lifecycle PRIMITIVES consumed by
+// the container-verb handlers (LIFE-02..20: rm/kill/start/restart/wait/stop).
+// Each verb resolves an id via `registry::resolve` then calls one primitive, so
+// the verbs stay disjoint (no shared-file collisions, no duplicated run-dir
+// logic). NOT dead-code: lightr-cli's verb handlers are the consumers.
+pub use run::lifecycle::{remove_run, respawn_run, run_status, signal_run, wait_run, RunStatus};
+
 // memo
 pub use run::memo::{predict, run_memoized, run_memoized_with};
 
