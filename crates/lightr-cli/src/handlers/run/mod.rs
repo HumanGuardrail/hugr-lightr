@@ -197,13 +197,11 @@ pub fn run(
     cpus: Option<&str>,
     secrets_raw: &[String],
     configs_raw: &[String],
-    // WP-RC-1: user `-e`/`--env` (KEY=VAL | KEY-inherit) + `--env-file`. Resolved
-    // into the KEYED `env_explicit` channel (R-KEY). The pre-existing long `--env`
-    // (env_keys, discovery channel) is a SEPARATE mechanism, untouched here.
+    // WP-RC-1: `-e`/`--env-file` → KEYED `env_explicit` (R-KEY); long `--env` = `env_keys` discovery.
     env_set: &[String],
     env_file: Option<&str>,
     // RUNTIME-ONLY docker-parity flags (never keyed; `None` ⇒ today's behaviour).
-    // WP-RC-WORKDIR `-w` (Docker WORKDIR; `None` ⇒ run in `dir`): child's cwd at exec.
+    // WP-RC-WORKDIR `-w` (Docker WORKDIR; `None` ⇒ `dir`; CLI > image WORKDIR — WP-DF-IMGCFG).
     workdir: Option<&str>,
     // WP-RC-USER `-u` (`None` ⇒ current user): native child uid/gid (cfg(unix)).
     user: Option<&str>,
@@ -243,9 +241,7 @@ pub fn run(
         }
     }
 
-    // WP-RC-1: resolve `-e`/`--env-file` into the KEYED env_explicit channel
-    // (R-KEY). `--env-file` first, then `-e` overrides; `KEY`-only inherits from
-    // this process's env. Empty ⇒ empty Vec ⇒ key byte-identical to before.
+    // WP-RC-1: `-e`/`--env-file` → KEYED env_explicit (R-KEY); file then `-e` overrides; `KEY`-only inherits process env; empty ⇒ key byte-identical.
     let env_explicit = match env::resolve_env_explicit_from_process(env_set, env_file) {
         Ok(pairs) => pairs,
         Err(code) => return code,
@@ -256,12 +252,8 @@ pub fn run(
     let use_engine_path = engine_kind != EngineKind::Native || rootfs_ref.is_some();
 
     // ── WP-RC-4: lower the --health-* flags to a Healthcheck ───────────────────
-    // The healthcheck is a SUPERVISOR-owned watchdog: it only runs for detached
-    // (`-d`) runs (the supervisor probes on the interval and writes the verdict
-    // to <run_dir>/health for `ps`). For a non-detached run we have no
-    // supervisor, so a configured `--health-cmd` is honestly reported as
-    // supervisor-only rather than silently dropped — fail-open on the run itself
-    // (the command still runs), fail-loud on the unmet expectation.
+    // Healthcheck = supervisor watchdog (detached `-d` only); non-detached
+    // `--health-cmd` is fail-loud supervisor-only, never silently dropped.
     let healthcheck = health.build();
     if healthcheck.is_some() && !detach {
         eprintln!(
@@ -280,10 +272,9 @@ pub fn run(
             eprintln!("lightr: -p/--publish requires -d (a published service runs detached)");
             return 2;
         }
-        // 2. Publishing is wired for (a) the native detached path and (b) the vz
-        //    detached container path (WP-NET2: `--engine vz --rootfs <img>`, host→
-        //    guest forward). Every other engine (ns/wsl) + vz-without-rootfs is
-        //    still Phase 2 — an honest error, never a silently dropped port.
+        // 2. Publishing is wired for the native detached path + the vz detached
+        //    container path (WP-NET2: `--engine vz --rootfs <img>`); other engines
+        //    + vz-without-rootfs are Phase 2 — an honest error, never a dropped port.
         let native = engine_kind == EngineKind::Native && rootfs_ref.is_none();
         let vz_container = engine_kind == EngineKind::Vz && rootfs_ref.is_some();
         if !native && !vz_container {
@@ -371,7 +362,16 @@ pub fn run(
     }
 
     if use_engine_path {
-        return paths::run_engine(engine_kind, rootfs_ref, &store, &cwd, command, limits);
+        // WP-DF-IMGCFG: run_engine honors the rootfs image config (CLI > image).
+        return paths::run_engine(
+            engine_kind,
+            rootfs_ref,
+            &store,
+            &cwd,
+            command,
+            limits,
+            workdir,
+        );
     }
 
     // ── Memoized path (native + no rootfs — unchanged R0/R1 behaviour) ────────
