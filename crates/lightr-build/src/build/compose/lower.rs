@@ -8,6 +8,7 @@
 use lightr_core::{LightrError, Result};
 
 use super::model::{empty_service, parse_duration_secs, Compose, Service};
+use super::ports::{parse_ports, ParsedPort};
 use super::spec::{ComposeSpec, Environment, Healthcheck, ServiceDef, StringOrList};
 
 /// Lower a deserialized spec into the runtime `Compose`, preserving service
@@ -81,32 +82,25 @@ fn lower_environment(env: Environment) -> Vec<(String, String)> {
     out
 }
 
-/// `ports`: legacy short-syntax only — a `"HOST:CONTAINER"` string parsed to a
-/// `(u16, u16)` pair. Entries without a `:` are ignored; malformed numbers are
-/// a fail-closed error.
-fn lower_ports(ports: &[serde_yaml::Value]) -> Result<Vec<(u16, u16)>> {
-    let mut out = Vec::new();
-    for p in ports {
-        let item = match p {
-            serde_yaml::Value::String(s) => s.clone(),
-            serde_yaml::Value::Number(n) => n.to_string(),
-            // Long-syntax (map) ports are not representable in `Compose` yet.
-            _ => continue,
-        };
-        let item = item.trim().trim_matches('"');
-        if let Some((h, c)) = item.split_once(':') {
-            let host: u16 = h
-                .trim()
-                .parse()
-                .map_err(|_| LightrError::InvalidManifest(format!("bad port: {item}")))?;
-            let cont: u16 = c
-                .trim()
-                .parse()
-                .map_err(|_| LightrError::InvalidManifest(format!("bad port: {item}")))?;
-            out.push((host, cont));
-        }
-    }
-    Ok(out)
+/// `ports`: the full compose grammar (CMP-P0-PORTS-FULL). The string/long-map
+/// parsing + range expansion + proto/host_ip resolution lives in `ports.rs`;
+/// here we lower each [`ParsedPort`] down to the `(host, container)` pair the
+/// runtime `Service`/`Compose` type carries today.
+///
+/// The runtime `Service.ports` is `Vec<(u16, u16)>` (TCP-only, no proto/host_ip
+/// — that model lives in `model.rs`, not owned by this WP). So at this boundary
+/// we drop proto + host_ip, and — preserving the legacy parser, which IGNORED
+/// short entries without a `:` (i.e. container-only) — we SKIP auto-assign
+/// (`published == None`) entries. The full proto/host_ip-carrying `ParsedPort`
+/// stays available for the WP that widens the runtime model.
+///
+/// Behavior-preserving: a plain `"H:C"` file still lowers to exactly `(H, C)`.
+fn lower_ports(ports: &[super::spec::PortSpec]) -> Result<Vec<(u16, u16)>> {
+    let parsed = parse_ports(ports)?;
+    Ok(parsed
+        .into_iter()
+        .filter_map(|p: ParsedPort| p.published.map(|h| (h, p.target)))
+        .collect())
 }
 
 /// Legacy `name=ref` list lowering for secrets/configs.
