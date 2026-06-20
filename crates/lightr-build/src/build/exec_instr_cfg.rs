@@ -4,7 +4,11 @@
 //! filesystem state (the layer snapshot in `exec.rs` persists the sidecar).
 //!
 //! Re-exported from `exec_instr` so `exec.rs` calls them as `exec_instr::*`.
-use lightr_core::Result;
+//!
+//! SKELETON-FREEZE consolidation: `WORKDIR` and `CMD` (also pure image-config
+//! records) joined this file so the per-instruction config edits stay disjoint
+//! from the file-placement / build-var groups. Behavior-preserving.
+use lightr_core::{LightrError, Result};
 
 use super::{interp_vec, BuildCtx, ImageConfig};
 use crate::build::vars::interpolate;
@@ -66,6 +70,34 @@ pub(in crate::build) fn volume(ctx: &mut BuildCtx, paths: &[String]) -> Result<(
             cfg.volume.push(p);
         }
     }
+    cfg.save(ctx.work_dir)?;
+    Ok(())
+}
+
+/// `WORKDIR`: set the current workdir, ensure it exists in the work dir, AND
+/// record it into the image config (Docker: WORKDIR is the container's default
+/// cwd, carried in the image config so `run` honors it). The recorded value is
+/// the post-interpolation path — the same one used as the build cwd.
+pub(in crate::build) fn workdir(ctx: &mut BuildCtx, path: &str) -> Result<()> {
+    let path = interpolate(path, ctx.scope, ctx.escape)?;
+    *ctx.current_workdir = path.clone();
+    let abs = if path.starts_with('/') {
+        ctx.work_dir.join(path.trim_start_matches('/'))
+    } else {
+        ctx.work_dir.join(&path)
+    };
+    std::fs::create_dir_all(&abs).map_err(LightrError::Io)?;
+    let mut cfg = ImageConfig::load(ctx.work_dir);
+    cfg.workdir = Some(path);
+    cfg.save(ctx.work_dir)?;
+    Ok(())
+}
+
+/// `CMD`: record the (interpolated) default argv into the image config.
+pub(in crate::build) fn cmd(ctx: &mut BuildCtx, argv: &[String]) -> Result<()> {
+    let argv = interp_vec(argv, ctx.scope, ctx.escape)?;
+    let mut cfg = ImageConfig::load(ctx.work_dir);
+    cfg.cmd = Some(argv);
     cfg.save(ctx.work_dir)?;
     Ok(())
 }
