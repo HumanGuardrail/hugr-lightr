@@ -21,6 +21,9 @@ pub(crate) mod ports;
 pub mod project;
 pub mod spec;
 pub mod supervise;
+/// CMP-P0-DEPENDS: `depends_on` topo-order (Kahn) + condition-wait helpers split
+/// out of `supervise.rs` for godfile headroom. Consumed by `supervise.rs`.
+pub(crate) mod supervise_deps;
 pub mod up;
 
 pub use down::compose_down;
