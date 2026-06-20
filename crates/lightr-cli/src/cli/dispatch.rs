@@ -142,7 +142,13 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
         Cmd::Cp { src, dest } => handlers::cp::run(&src, &dest),
         Cmd::Stats { target } => handlers::stats::run(target.as_deref()),
         Cmd::Top { target } => handlers::top::run(&target),
+        #[cfg(unix)]
         Cmd::Network { subcmd } => handlers::network::run(subcmd),
+        #[cfg(not(unix))]
+        Cmd::Network { .. } => stub(
+            "network",
+            "unsupported on this host (Windows runtime is the WSL ring)",
+        ),
         Cmd::Volume { subcmd } => handlers::volume::run(subcmd),
         Cmd::Gc {
             force,
