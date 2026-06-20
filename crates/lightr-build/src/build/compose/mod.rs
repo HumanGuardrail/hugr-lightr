@@ -2,6 +2,8 @@
 pub mod down;
 pub mod interp;
 pub(crate) mod lower;
+/// CMP-P0-MERGE: compose override deep-merge engine + merged parse entry point.
+pub mod merge;
 pub mod model;
 pub mod parse;
 /// CMP-P0-PORTS-FULL: the full compose `ports` grammar parser (short + long,
@@ -13,6 +15,7 @@ pub mod up;
 
 pub use down::compose_down;
 pub use interp::{interpolate_compose, scope_from_project_dir};
+pub use merge::{deep_merge, parse_compose_merged, OVERRIDE_FILENAMES};
 pub use model::{Compose, ComposeHandle, Service, ServiceSpec, StackSpec};
 pub use parse::{parse_compose, parse_compose_with_scope};
 pub use spec::{ComposeSpec, EnvScalar, Environment, Healthcheck, ServiceDef, StringOrList};
