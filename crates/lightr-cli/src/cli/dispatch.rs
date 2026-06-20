@@ -5,6 +5,7 @@
 use crate::cli::cmd::{Cli, Cmd, ComposeCmd, EngineCmd, OciCmd, Shell, SuperviseCmd};
 use crate::emit_event;
 use crate::handlers;
+use crate::handlers::stub::stub;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Dispatch
@@ -34,28 +35,70 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             health_cmd,
             health_interval,
             health_retries,
+            // ── Docker-parity run flags (CLI-surface freeze) ──────────────────
+            name,
+            rm,
+            workdir,
+            user,
+            env_set,
+            env_file,
+            label,
+            entrypoint,
+            hostname,
+            restart,
+            network,
+            network_alias,
+            add_host,
+            dns,
+            volume,
+            tmpfs,
             command,
-        } => handlers::run::run(
-            &dir,
-            &input,
-            &env,
-            &command,
-            json,
-            explain,
-            detach,
-            &publish,
-            &mount,
-            &engine,
-            rootfs.as_deref(),
-            deep_memo,
-            memory.as_deref(),
-            cpus.as_deref(),
-            &secret,
-            &config,
-            health_cmd.as_deref(),
-            health_interval,
-            health_retries,
-        ),
+        } => {
+            // Fail-closed: if ANY new docker-parity run flag is set, honest
+            // error naming WP-RUNFLAGS — NEVER silently ignore a flag. With no
+            // new flag set, `run` behaves exactly as before (behavior-preserving).
+            let new_flag_set = name.is_some()
+                || rm
+                || workdir.is_some()
+                || user.is_some()
+                || !env_set.is_empty()
+                || env_file.is_some()
+                || !label.is_empty()
+                || entrypoint.is_some()
+                || hostname.is_some()
+                || restart.is_some()
+                || network.is_some()
+                || !network_alias.is_empty()
+                || !add_host.is_empty()
+                || !dns.is_empty()
+                || !volume.is_empty()
+                || !tmpfs.is_empty();
+            if new_flag_set {
+                stub("run (docker-parity flags)", "WP-RUNFLAGS")
+            } else {
+                handlers::run::run(
+                    &dir,
+                    &input,
+                    &env,
+                    &command,
+                    json,
+                    explain,
+                    detach,
+                    &publish,
+                    &mount,
+                    &engine,
+                    rootfs.as_deref(),
+                    deep_memo,
+                    memory.as_deref(),
+                    cpus.as_deref(),
+                    &secret,
+                    &config,
+                    health_cmd.as_deref(),
+                    health_interval,
+                    health_retries,
+                )
+            }
+        }
         Cmd::Engine { subcmd } => match subcmd {
             EngineCmd::Ls => handlers::engine::ls(json),
             EngineCmd::InstallPack { dir } => handlers::engine::install_pack(&dir),
@@ -66,6 +109,17 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             OciCmd::Push { store_ref, target } => {
                 handlers::oci::push_image(&store_ref, &target, json)
             }
+            OciCmd::Tag { src, target } => handlers::oci::tag(&src, &target),
+            OciCmd::Save { store_ref, output } => {
+                handlers::oci::save(&store_ref, output.as_deref())
+            }
+            OciCmd::Load { input } => handlers::oci::load(input.as_deref()),
+            OciCmd::Images { json: oci_json } => handlers::oci::images(oci_json),
+            OciCmd::Rmi { targets, force } => handlers::oci::rmi(&targets, force),
+            OciCmd::History {
+                target,
+                json: oci_json,
+            } => handlers::oci::history(&target, oci_json),
         },
         Cmd::Bench { vs_docker, check } => handlers::bench::run(vs_docker, check, json),
         Cmd::Inspect { id } => handlers::inspect::run(&id, json),
@@ -78,6 +132,18 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
         } => handlers::logs::run(&id, stderr, both, follow),
         Cmd::Stop { id, grace } => handlers::stop::run(&id, grace),
         Cmd::Exec { id, command } => handlers::exec::run(&id, &command),
+        // ── Docker-parity container-lifecycle verbs (CLI-surface freeze) ───────
+        Cmd::Rm { targets, force } => handlers::rm::run(&targets, force),
+        Cmd::Kill { targets, signal } => handlers::kill::run(&targets, signal.as_deref()),
+        Cmd::Start { targets } => handlers::start::run(&targets),
+        Cmd::Restart { targets, grace } => handlers::restart::run(&targets, grace),
+        Cmd::Wait { targets } => handlers::wait::run(&targets),
+        Cmd::Rename { target, new_name } => handlers::rename::run(&target, &new_name),
+        Cmd::Cp { src, dest } => handlers::cp::run(&src, &dest),
+        Cmd::Stats { target } => handlers::stats::run(target.as_deref()),
+        Cmd::Top { target } => handlers::top::run(&target),
+        Cmd::Network { subcmd } => handlers::network::run(subcmd),
+        Cmd::Volume { subcmd } => handlers::volume::run(subcmd),
         Cmd::Gc {
             force,
             min_age,
