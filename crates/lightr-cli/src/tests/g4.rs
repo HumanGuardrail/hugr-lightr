@@ -102,11 +102,13 @@ fn compose_up_minimal() {
                 file,
                 project_name,
                 eager,
+                profile,
                 ttl,
             } => {
                 assert_eq!(file, "compose.yml", "default compose file");
                 assert!(project_name.is_none(), "no -p by default");
                 assert!(!eager, "eager is false by default");
+                assert!(profile.is_empty(), "no --profile by default");
                 assert_eq!(*ttl, 3600, "default TTL is 3600");
             }
             _ => panic!("expected Up"),
@@ -173,6 +175,20 @@ fn compose_up_project_name_flag() {
             },
             _ => panic!("expected Compose"),
         }
+    }
+}
+
+#[test]
+fn compose_up_profile_flag_repeatable() {
+    let cli = parse(&["compose", "up", "--profile", "dev", "--profile", "debug"]);
+    match &cli.cmd {
+        Cmd::Compose { subcmd } => match subcmd {
+            ComposeCmd::Up { profile, .. } => {
+                assert_eq!(profile, &vec!["dev".to_string(), "debug".to_string()]);
+            }
+            _ => panic!("expected Up"),
+        },
+        _ => panic!("expected Compose"),
     }
 }
 

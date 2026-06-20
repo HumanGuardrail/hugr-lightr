@@ -22,6 +22,8 @@ use lightr_store::Store;
 
 use crate::exit::die_lightr;
 
+mod compose;
+
 // ── ref name sanitizer for `docker pull` ──────────────────────────────────────
 
 /// Sanitize a docker image reference into a valid lightr ref name.
@@ -42,7 +44,7 @@ pub fn sanitize_docker_ref(image: &str) -> String {
 
 // ── Transparency helper ───────────────────────────────────────────────────────
 
-fn note_translation(lightr_verb: &str, lightr_args: &[&str]) {
+pub(super) fn note_translation(lightr_verb: &str, lightr_args: &[&str]) {
     let args_str = lightr_args.join(" ");
     if args_str.is_empty() {
         eprintln!("lightr docker: → lightr {lightr_verb}");
@@ -288,83 +290,7 @@ fn translate_inspect(args: &[String], json: bool) -> i32 {
 }
 
 // ── docker compose translation ────────────────────────────────────────────────
-
-fn translate_compose(args: &[String], json: bool) -> i32 {
-    if args.is_empty() {
-        eprintln!("lightr docker: compose: missing subcommand");
-        return 2;
-    }
-    match args[0].as_str() {
-        "up" => {
-            // Parse compose up flags from remaining args
-            let rest = &args[1..];
-            let mut compose_file = "compose.yml".to_string();
-            let mut project: Option<String> = None;
-            let mut eager = false;
-            let mut ttl: u64 = 3600;
-            let mut i = 0;
-            while i < rest.len() {
-                match rest[i].as_str() {
-                    "-f" | "--file" => {
-                        i += 1;
-                        if i < rest.len() {
-                            compose_file = rest[i].clone();
-                        }
-                    }
-                    "-p" | "--project-name" => {
-                        i += 1;
-                        if i < rest.len() {
-                            project = Some(rest[i].clone());
-                        }
-                    }
-                    "--eager" => eager = true,
-                    "--ttl" => {
-                        i += 1;
-                        if i < rest.len() {
-                            ttl = rest[i].parse().unwrap_or(3600);
-                        }
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-            note_translation("compose", &["up", "-f", &compose_file]);
-            crate::handlers::compose::up(&compose_file, project.as_deref(), eager, ttl, json)
-        }
-        "down" => {
-            let rest = &args[1..];
-            let mut compose_file: Option<String> = None;
-            let mut project: Option<String> = None;
-            let mut i = 0;
-            while i < rest.len() {
-                match rest[i].as_str() {
-                    "-f" | "--file" => {
-                        i += 1;
-                        if i < rest.len() {
-                            compose_file = Some(rest[i].clone());
-                        }
-                    }
-                    "-p" | "--project-name" => {
-                        i += 1;
-                        if i < rest.len() {
-                            project = Some(rest[i].clone());
-                        }
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-            note_translation("compose", &["down"]);
-            crate::handlers::compose::down(compose_file.as_deref(), project.as_deref())
-        }
-        sub => {
-            eprintln!(
-                "lightr docker: compose: unsupported subcommand '{sub}' — supported: up|down"
-            );
-            2
-        }
-    }
-}
+// Moved to `compose.rs` (godfile headroom); see `compose::translate_compose`.
 
 // ── Main dispatch ─────────────────────────────────────────────────────────────
 
@@ -386,7 +312,7 @@ pub fn run(args: &[String], json: bool, explain: bool) -> i32 {
         "images" => translate_images(json),
         "ps" => translate_ps(json),
         "inspect" => translate_inspect(rest, json),
-        "compose" => translate_compose(rest, json),
+        "compose" => compose::translate_compose(rest, json),
         other => {
             eprintln!(
                 "lightr docker: unsupported '{other}' — supported: build|run|pull|images|ps|inspect|compose"
