@@ -61,6 +61,15 @@ pub struct Service {
     /// for a service with no `depends_on` (behavior-preserving — supervisor
     /// start order is then the declaration order, exactly as before).
     pub depends_on: Vec<DepEdge>,
+    /// CMP-LOWER-RUNCFG: compose `working_dir`, lowered into `RunSpec.workdir`
+    /// (WP-RC-WORKDIR). `None` ⇒ run in the service cwd (today's behavior).
+    pub working_dir: Option<String>,
+    /// CMP-LOWER-RUNCFG: compose `user`, lowered into `RunSpec.user`
+    /// (WP-RC-USER). `None` ⇒ run as the current user (today's behavior).
+    pub user: Option<String>,
+    /// CMP-LOWER-RUNCFG: compose `restart`, lowered into `RunSpec.restart`
+    /// (WP-RC-RESTART). `None` ⇒ `no` policy (today's behavior).
+    pub restart: Option<String>,
 }
 
 pub struct Compose {
@@ -117,6 +126,17 @@ pub struct ServiceSpec {
     /// stack specs (no `depends_on` field) loading as empty (= today's order).
     #[serde(default)]
     pub depends_on: Vec<DepEdge>,
+    /// CMP-LOWER-RUNCFG: compose `working_dir` → `RunSpec.workdir`. `#[serde(
+    /// default)]` keeps pre-existing stack specs (no field) loading as `None`.
+    #[serde(default)]
+    pub working_dir: Option<String>,
+    /// CMP-LOWER-RUNCFG: compose `user` → `RunSpec.user`. serde-default = None.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// CMP-LOWER-RUNCFG: compose `restart` → `RunSpec.restart`. serde-default =
+    /// None.
+    #[serde(default)]
+    pub restart: Option<String>,
 }
 
 pub struct ComposeHandle {
@@ -137,6 +157,9 @@ pub(crate) fn empty_service(name: String) -> Service {
         configs: Vec::new(),
         healthcheck: None,
         depends_on: Vec::new(),
+        working_dir: None,
+        user: None,
+        restart: None,
     }
 }
 

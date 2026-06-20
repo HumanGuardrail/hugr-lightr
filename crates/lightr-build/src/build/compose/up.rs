@@ -74,6 +74,11 @@ pub fn compose_up(
             configs: s.configs.clone(),
             healthcheck: s.healthcheck.clone(),
             depends_on: s.depends_on.clone(),
+            // CMP-LOWER-RUNCFG: carry the lowered run-config through the on-disk
+            // spec so the supervisor can set them on the spawned RunSpec.
+            working_dir: s.working_dir.clone(),
+            user: s.user.clone(),
+            restart: s.restart.clone(),
         })
         .collect();
 

@@ -21,6 +21,9 @@ fn svc_with_deps(name: &str, deps: Vec<(&str, DepCondition)>) -> ServiceSpec {
         configs: Vec::new(),
         healthcheck: None,
         depends_on: deps.into_iter().map(|(n, c)| (n.to_string(), c)).collect(),
+        working_dir: None,
+        user: None,
+        restart: None,
     }
 }
 
@@ -192,4 +195,46 @@ fn dep_run_dir_reads_live_spec() {
     assert_eq!(dep_run_dir(stack.path(), "web"), None);
     // An unknown service is None.
     assert_eq!(dep_run_dir(stack.path(), "nope"), None);
+}
+
+// --- CMP-LOWER-RUNCFG: working_dir/user/restart reach the spawned RunSpec ---
+
+#[test]
+fn run_config_fields_survive_spec_roundtrip_into_runspec() {
+    // The supervisor reads each ServiceSpec back from spec.json, then
+    // `start_service_detached` sets `RunSpec.workdir/user/restart` from the
+    // ServiceSpec via `svc.<field>.clone()`. Assert the on-disk round-trip keeps
+    // the fields so the RunSpec literal carries them (= the exact values fed to
+    // the run side's WP-RC-WORKDIR/USER/RESTART honoring).
+    let mut svc = svc_with_deps("web", vec![]);
+    svc.working_dir = Some("/app".to_string());
+    svc.user = Some("1000:1000".to_string());
+    svc.restart = Some("on-failure:3".to_string());
+    let spec = StackSpec {
+        ttl_secs: 60,
+        created_at_unix: 0,
+        project: "default".to_string(),
+        supervisor_pid: None,
+        services: vec![svc],
+    };
+    let bytes = serde_json::to_vec_pretty(&spec).unwrap();
+    let back: StackSpec = serde_json::from_slice(&bytes).unwrap();
+    let s = &back.services[0];
+    // These are exactly the sources the start_service_detached RunSpec literal
+    // clones into workdir/user/restart.
+    assert_eq!(s.working_dir.as_deref(), Some("/app"));
+    assert_eq!(s.user.as_deref(), Some("1000:1000"));
+    assert_eq!(s.restart.as_deref(), Some("on-failure:3"));
+}
+
+#[test]
+fn run_config_absent_roundtrips_to_none() {
+    // Behavior-preserving: a pre-CMP-LOWER-RUNCFG spec.json (no fields) loads as
+    // None ⇒ the RunSpec literal keeps today's None placeholders.
+    let legacy = r#"{"ttl_secs":60,"created_at_unix":0,"project":"default","supervisor_pid":null,"services":[{"name":"web","image_ref":"","command":["/bin/true"],"ports":[],"env":[],"eager":true,"run_dir":null}]}"#;
+    let back: StackSpec = serde_json::from_str(legacy).unwrap();
+    let s = &back.services[0];
+    assert!(s.working_dir.is_none());
+    assert!(s.user.is_none());
+    assert!(s.restart.is_none());
 }

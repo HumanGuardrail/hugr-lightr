@@ -72,9 +72,14 @@ pub(super) fn lower_networks(def: &ServiceDef, _svc: &mut Service) {
 }
 
 /// `restart` (top-level restart policy string, e.g. `always`/`on-failure`).
-/// Stub — the supervisor restart policy is not driven from here yet.
-pub(super) fn lower_restart(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.restart;
+///
+/// CMP-LOWER-RUNCFG: copies the compose `restart:` string verbatim onto
+/// `svc.restart`; the supervisor threads it into `RunSpec.restart`, honored by
+/// the detached re-spawn loop (WP-RC-RESTART). Absent ⇒ `None` ⇒ `no` policy
+/// (run once, today's behavior). The policy STRING is transcribed as-is; its
+/// parsing/semantics are the run side's law.
+pub(super) fn lower_restart(def: &ServiceDef, svc: &mut Service) {
+    svc.restart = def.restart.clone();
 }
 
 /// `secrets` (full compose-spec form: refs into the top-level `secrets:` block).
@@ -140,15 +145,24 @@ pub(super) fn lower_container_name(def: &ServiceDef, _svc: &mut Service) {
     let _ = &def.container_name;
 }
 
-/// `working_dir`: process working directory. Stub — not set on the runtime
-/// `Service` yet.
-pub(super) fn lower_working_dir(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.working_dir;
+/// `working_dir`: process working directory.
+///
+/// CMP-LOWER-RUNCFG: copies the compose `working_dir:` string onto
+/// `svc.working_dir`; the supervisor threads it into `RunSpec.workdir`
+/// (WP-RC-WORKDIR — resolved against the service cwd). Absent ⇒ `None` ⇒ run in
+/// the service cwd (today's behavior).
+pub(super) fn lower_working_dir(def: &ServiceDef, svc: &mut Service) {
+    svc.working_dir = def.working_dir.clone();
 }
 
-/// `user`: run-as user/uid. Stub — not set on the runtime `Service` yet.
-pub(super) fn lower_user(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.user;
+/// `user`: run-as user/uid.
+///
+/// CMP-LOWER-RUNCFG: copies the compose `user:` string onto `svc.user`; the
+/// supervisor threads it into `RunSpec.user` (WP-RC-USER — `uid[:gid]` or
+/// `name[:group]`, applied cfg(unix) before exec). Absent ⇒ `None` ⇒ run as the
+/// current user (today's behavior).
+pub(super) fn lower_user(def: &ServiceDef, svc: &mut Service) {
+    svc.user = def.user.clone();
 }
 
 /// `entrypoint`: override the image entrypoint. Stub — only `command` is lowered
