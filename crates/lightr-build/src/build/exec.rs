@@ -6,6 +6,17 @@ use std::path::Path;
 
 use super::memo::{load_meta, save_meta, step_key, TempDirGuard};
 use super::parse::Instr;
+use super::vars::{interpolate, VarScope};
+
+/// Interpolate one string against `scope` (Dockerfile escape directive `escape`).
+fn interp(s: &str, scope: &VarScope, escape: bool) -> Result<String> {
+    interpolate(s, scope, escape)
+}
+
+/// Interpolate every string in a slice against `scope`.
+fn interp_vec(v: &[String], scope: &VarScope, escape: bool) -> Result<Vec<String>> {
+    v.iter().map(|s| interp(s, scope, escape)).collect()
+}
 
 /// Materialize a snapshot (identified by its manifest digest) into `dest`.
 /// Clears `dest` first so we get a clean layer.
@@ -90,6 +101,13 @@ pub struct BuildReport {
 ///   isolation -- RUN runs in the working tree directly.
 /// - Memoization: each step has a content-derived key; AC hits replay the
 ///   cached layer without executing.
+/// - Build-time `${VAR}` interpolation (WP-DF-BUILDKEY): each instruction's text
+///   args are interpolated against a `VarScope` BEFORE executing/keying. The
+///   scope's `env` is seeded from the base image's config ENV (after FROM) and
+///   updated by each `ENV` instruction; `args` (ARG → DF-08) and SHELL (DF-09)
+///   extend it later (hooks below). The memo key hashes the POST-INTERPOLATION
+///   text (memo key v2) — so differing ENV/ARG values never collide on a stale
+///   layer.
 pub fn build(
     context_dir: &Path,
     dockerfile: &Path,
@@ -97,10 +115,14 @@ pub fn build(
     engine: lightr_engine::EngineKind,
     store: &Store,
 ) -> Result<BuildReport> {
-    use super::parse::parse_dockerfile;
+    use super::parse::parse_dockerfile_full;
 
     let text = std::fs::read_to_string(dockerfile).map_err(LightrError::Io)?;
-    let steps = parse_dockerfile(&text)?;
+    let (directives, steps) = parse_dockerfile_full(&text)?;
+    // The Dockerfile `# escape=` directive (default backslash) controls `\$`
+    // literal-escape during interpolation, matching the parser's continuation
+    // escape char.
+    let escape = directives.escape.unwrap_or('\\') == '\\';
     let total = steps.len() as u64;
 
     let guard = TempDirGuard::new()?;
@@ -110,9 +132,13 @@ pub fn build(
     let mut accumulated_env: Vec<(String, String)> = Vec::new();
     let mut current_workdir = String::from("/");
     let mut cached_steps: u64 = 0;
+    // The interpolation scope threaded through the build. `args` stays empty here
+    // (ARG → DF-08 seeds it); `env` is seeded from the base image after FROM and
+    // updated by ENV. SHELL (DF-09) is a later hook.
+    let mut scope = VarScope::default();
 
     for step in &steps {
-        let key = step_key(prev_layer_root, step, context_dir)?;
+        let key = step_key(prev_layer_root, step, context_dir, &scope, escape)?;
 
         // AC lookup
         if let Some(cached_val) = store.ac_get(&key)? {
@@ -125,8 +151,12 @@ pub fn build(
                 cached_steps += 1;
                 let meta = load_meta(work_dir);
                 accumulated_env = meta.env.clone();
+                // Keep the interpolation scope in sync with the replayed layer's
+                // accumulated ENV (so subsequent steps interpolate correctly even
+                // when earlier ENV/FROM steps were cache hits).
+                scope.env = accumulated_env.iter().cloned().collect();
                 if let Instr::Workdir { path } = &step.instr {
-                    current_workdir = path.clone();
+                    current_workdir = interp(path, &scope, escape)?;
                 }
                 continue;
             }
@@ -134,6 +164,10 @@ pub fn build(
 
         match &step.instr {
             Instr::From { image_ref, .. } => {
+                // FROM ref interpolation is multi-stage's concern (DF-03); the
+                // ref rarely uses build-time vars, but interpolating it here is
+                // trivial and matches Docker (ARG-before-FROM → DF-08 hook).
+                let image_ref = interp(image_ref, &scope, escape)?;
                 for entry in std::fs::read_dir(work_dir).map_err(LightrError::Io)? {
                     let entry = entry.map_err(LightrError::Io)?;
                     let p = entry.path();
@@ -144,10 +178,18 @@ pub fn build(
                     }
                 }
                 if image_ref != "scratch" {
-                    lightr_index::hydrate(work_dir, store, image_ref)?;
+                    lightr_index::hydrate(work_dir, store, &image_ref)?;
                 }
+                // Seed the interpolation scope from the base image's config ENV.
+                // The hydrated base carries lightr's `.lightr-image.json` sidecar
+                // (env/cmd/labels) for lightr-built bases; absent (e.g. scratch
+                // or an OCI base without the sidecar) → empty, per the design.
+                let base = load_meta(work_dir);
+                accumulated_env = base.env.clone();
+                scope.env = accumulated_env.iter().cloned().collect();
             }
             Instr::Run { argv, .. } => {
+                let argv = &interp_vec(argv, &scope, escape)?;
                 let cwd = if current_workdir == "/" || current_workdir.is_empty() {
                     work_dir.to_path_buf()
                 } else {
@@ -190,6 +232,12 @@ pub fn build(
                 }
             }
             Instr::Copy { src, dest, .. } => {
+                // Interpolate COPY paths (+ --chown/--chmod are flag fields not
+                // used by this executor yet; DF-04 wires them). Paths into the
+                // CONTEXT use the interpolated src; the key already hashed the
+                // interpolated text + the content of these resolved sources.
+                let src = &interp_vec(src, &scope, escape)?;
+                let dest = &interp(dest, &scope, escape)?;
                 let dest_path = if dest.starts_with('/') {
                     work_dir.join(dest.trim_start_matches('/'))
                 } else {
@@ -222,30 +270,38 @@ pub fn build(
                 }
             }
             Instr::Env { key, val } => {
+                // ENV updates the scope: interpolate V with the CURRENT scope,
+                // then set scope.env[K] (Docker build-time semantics). The key
+                // is NOT interpolated (Docker treats ENV/ARG names literally).
+                let val = interp(val, &scope, escape)?;
                 accumulated_env.retain(|(k, _)| k != key);
                 accumulated_env.push((key.clone(), val.clone()));
+                scope.env.insert(key.clone(), val);
                 let mut meta = load_meta(work_dir);
                 meta.env = accumulated_env.clone();
                 save_meta(work_dir, &meta)?;
             }
             Instr::Workdir { path } => {
+                let path = interp(path, &scope, escape)?;
                 current_workdir = path.clone();
                 let abs = if path.starts_with('/') {
                     work_dir.join(path.trim_start_matches('/'))
                 } else {
-                    work_dir.join(path)
+                    work_dir.join(&path)
                 };
                 std::fs::create_dir_all(&abs).map_err(LightrError::Io)?;
             }
             Instr::Cmd { argv, .. } => {
+                let argv = interp_vec(argv, &scope, escape)?;
                 let mut meta = load_meta(work_dir);
-                meta.cmd = Some(argv.clone());
+                meta.cmd = Some(argv);
                 save_meta(work_dir, &meta)?;
             }
             Instr::Label { key, val } => {
+                let val = interp(val, &scope, escape)?;
                 let mut meta = load_meta(work_dir);
                 meta.labels.retain(|(k, _)| k != key);
-                meta.labels.push((key.clone(), val.clone()));
+                meta.labels.push((key.clone(), val));
                 save_meta(work_dir, &meta)?;
             }
             // WP-DF-01 parses these into the AST; execution is DF-02..15. Until
