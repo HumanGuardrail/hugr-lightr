@@ -107,6 +107,130 @@ pub enum OciCmd {
         /// Target registry reference (e.g. ghcr.io/owner/repo:tag)
         target: String,
     },
+    /// Add a ref alias to an image (docker tag)
+    Tag {
+        /// Source image ref
+        src: String,
+        /// New target ref alias
+        target: String,
+    },
+    /// Export an image to a tar archive (docker save)
+    Save {
+        /// Stored ref to export
+        store_ref: String,
+        /// Output tar path (default: stdout)
+        #[arg(short = 'o', long)]
+        output: Option<String>,
+    },
+    /// Import an image from a tar archive (docker load)
+    Load {
+        /// Input tar path (default: stdin)
+        #[arg(short = 'i', long)]
+        input: Option<String>,
+    },
+    /// List stored images (docker images)
+    Images {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove one or more images (docker rmi)
+    Rmi {
+        /// Image refs to remove
+        targets: Vec<String>,
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
+    /// Show the layer history of an image (docker history)
+    History {
+        /// Image ref
+        target: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// NetworkCmd sub-enum (CLI-surface freeze — docker network parity)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum NetworkCmd {
+    /// Create a network (docker network create)
+    Create {
+        /// Network name
+        name: String,
+        /// Network driver
+        #[arg(short = 'd', long)]
+        driver: Option<String>,
+    },
+    /// List networks (docker network ls)
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove one or more networks (docker network rm)
+    Rm {
+        /// Network names to remove
+        targets: Vec<String>,
+    },
+    /// Display detailed information on a network (docker network inspect)
+    Inspect {
+        /// Network name
+        target: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Connect a container to a network (docker network connect)
+    Connect {
+        /// Network name
+        network: String,
+        /// Container target
+        container: String,
+    },
+    /// Disconnect a container from a network (docker network disconnect)
+    Disconnect {
+        /// Network name
+        network: String,
+        /// Container target
+        container: String,
+    },
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// VolumeCmd sub-enum (CLI-surface freeze — docker volume parity)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum VolumeCmd {
+    /// Create a volume (docker volume create)
+    Create {
+        /// Volume name
+        name: Option<String>,
+    },
+    /// List volumes (docker volume ls)
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove one or more volumes (docker volume rm)
+    Rm {
+        /// Volume names to remove
+        targets: Vec<String>,
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
+    /// Display detailed information on a volume (docker volume inspect)
+    Inspect {
+        /// Volume name
+        target: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove all unused volumes (docker volume prune)
+    Prune {
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
