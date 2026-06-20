@@ -9,6 +9,8 @@
 //! handled by the model. Fail-closed on malformed YAML.
 use lightr_core::{LightrError, Result};
 
+use super::super::vars::VarScope;
+use super::interp::interpolate_compose;
 use super::lower::lower;
 use super::model::Compose;
 use super::spec::ComposeSpec;
@@ -40,6 +42,23 @@ pub fn parse_compose(yaml: &str) -> Result<Compose> {
     let spec: ComposeSpec = serde_yaml::from_str(yaml)
         .map_err(|e| LightrError::InvalidManifest(format!("compose parse error: {e}")))?;
     lower(spec)
+}
+
+/// Parse a docker-compose YAML file, INTERPOLATING `${VAR}` references against
+/// `scope` first (compose interpolates the whole document before parsing).
+///
+/// Equivalent to [`parse_compose`] but with compose-spec variable substitution
+/// applied to the raw text: `${VAR}` / `${VAR:-default}` / `${VAR:?err}` /
+/// `$VAR`, with `$$` → literal `$`. `scope` carries process-env-over-`.env`
+/// precedence (build it via [`super::interp::scope_from_project_dir`] at the
+/// CLI call site, or directly in tests to stay parallel-safe). Fail-closed: a
+/// triggered `${VAR:?msg}` or an unclosed `${` is an honest error.
+///
+/// Behavior-preserving: a document with no `${...}` interpolates to itself and
+/// parses identically to [`parse_compose`].
+pub fn parse_compose_with_scope(yaml: &str, scope: &VarScope) -> Result<Compose> {
+    let interpolated = interpolate_compose(yaml, scope)?;
+    parse_compose(&interpolated)
 }
 
 #[cfg(test)]
