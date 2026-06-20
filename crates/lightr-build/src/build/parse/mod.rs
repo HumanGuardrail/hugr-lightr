@@ -22,7 +22,7 @@ pub use ast::{BuildStep, CmdForm, Directives, Healthcheck, HealthcheckOpts, Inst
 
 use instr::{
     cmd_argv, cmd_form, non_empty, parse_add, parse_arg, parse_copy, parse_from, parse_healthcheck,
-    parse_kv, parse_onbuild, parse_paths, parse_shell,
+    parse_kv_pairs, parse_onbuild, parse_paths, parse_shell,
 };
 use lightr_core::{LightrError, Result};
 
@@ -171,8 +171,8 @@ fn parse_instruction(line: &str) -> Result<Instr> {
             argv: cmd_argv(rest),
             form: cmd_form(rest),
         }),
-        "LABEL" => parse_kv(rest).map(|(key, val)| Instr::Label { key, val }),
-        "ENV" => parse_kv(rest).map(|(key, val)| Instr::Env { key, val }),
+        "LABEL" => parse_kv_pairs(rest).map(|pairs| Instr::Label { pairs }),
+        "ENV" => parse_kv_pairs(rest).map(|pairs| Instr::Env { pairs }),
         "EXPOSE" => Ok(Instr::Expose {
             ports: rest.split_ascii_whitespace().map(str::to_string).collect(),
         }),
@@ -207,3 +207,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests_instr.rs"]
 mod tests_instr;
+
+#[cfg(test)]
+#[path = "tests_df05.rs"]
+mod tests_df05;

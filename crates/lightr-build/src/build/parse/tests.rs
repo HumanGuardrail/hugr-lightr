@@ -44,8 +44,7 @@ LABEL version=1.0
     assert_eq!(
         steps[3].instr,
         Instr::Env {
-            key: "FOO".into(),
-            val: "bar".into()
+            pairs: vec![("FOO".into(), "bar".into())]
         }
     );
     assert_eq!(
@@ -64,8 +63,7 @@ LABEL version=1.0
     assert_eq!(
         steps[6].instr,
         Instr::Label {
-            key: "version".into(),
-            val: "1.0".into()
+            pairs: vec![("version".into(), "1.0".into())]
         }
     );
 }
