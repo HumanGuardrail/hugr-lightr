@@ -95,37 +95,8 @@ fn copy_requires_src_dest() {
     assert!(parse_dockerfile("COPY onlyone").is_err());
 }
 
-// ---- ENV / LABEL / ARG -----------------------------------------------------
-
-#[test]
-fn env_kv_and_space_forms() {
-    assert_eq!(
-        parse("ENV A=1")[0].instr,
-        Instr::Env {
-            key: "A".into(),
-            val: "1".into()
-        }
-    );
-    assert_eq!(
-        parse("ENV KEY value with spaces")[0].instr,
-        Instr::Env {
-            key: "KEY".into(),
-            val: "value with spaces".into()
-        }
-    );
-}
-
-#[test]
-fn label_dotted_key() {
-    if let Instr::Label { key, val } =
-        &parse("LABEL org.opencontainers.image.version=1.2.3")[0].instr
-    {
-        assert_eq!(key, "org.opencontainers.image.version");
-        assert_eq!(val, "1.2.3");
-    } else {
-        panic!("expected Label");
-    }
-}
+// ---- ARG -------------------------------------------------------------------
+// (ENV/LABEL multi-pair + quoting tests live in `tests_df05.rs` — WP-DF-05.)
 
 #[test]
 fn arg_with_and_without_default() {

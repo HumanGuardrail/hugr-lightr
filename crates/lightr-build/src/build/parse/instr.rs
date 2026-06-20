@@ -150,21 +150,138 @@ pub(super) fn parse_healthcheck(rest: &str) -> Result<Instr> {
     })
 }
 
-pub(super) fn parse_kv(rest: &str) -> Result<(String, String)> {
-    if rest.trim().is_empty() {
+/// Parse the ENV/LABEL argument tail into one OR MANY `(key, value)` pairs
+/// (WP-DF-05), Docker-faithful:
+///
+/// - **Legacy form** `ENV KEY value` — the FIRST token has no `=`, so the
+///   WHOLE remaining tail (after the key) is a single value (spaces kept,
+///   un-quoted). Preserves the pre-WP-DF-05 single-pair behavior exactly.
+/// - **Multi-pair form** `ENV A=1 B=2 C=3` — the first token contains `=`, so
+///   every whitespace-separated `KEY=VALUE` token is one pair.
+/// - **Quoting** `ENV A="x y" B='z'` — single/double quotes group a value that
+///   contains spaces; the quotes are stripped from the stored value. Inside a
+///   double-quoted value `\"` and `\\` are escapes (Docker); single quotes are
+///   literal. No `${VAR}` interpolation here — that happens at exec time.
+///
+/// A multi-pair token without `=` is malformed (fail-closed); an empty tail is
+/// an error (a key is required).
+pub(super) fn parse_kv_pairs(rest: &str) -> Result<Vec<(String, String)>> {
+    let t = rest.trim();
+    if t.is_empty() {
         return Err(LightrError::InvalidManifest(
             "LABEL/ENV requires a key".to_string(),
         ));
     }
-    if let Some((k, v)) = rest.split_once('=') {
-        Ok((k.trim().to_string(), v.trim().to_string()))
-    } else {
-        let (k, v) = rest
+
+    let tokens = tokenize_quoted(t)?;
+    // `tokenize_quoted` yields at least one token for a non-empty input. The
+    // first token decides the form: legacy (no `=`) vs multi-pair (`=` present).
+    let first_has_eq = tokens
+        .first()
+        .map(|tok| matches!(tok.find('='), Some(i) if i > 0))
+        .unwrap_or(false);
+
+    if !first_has_eq {
+        // Legacy `KEY value`: split the RAW (un-tokenized) tail on the first
+        // whitespace so the value keeps spaces verbatim and is NOT subject to
+        // per-token quote handling (Docker's legacy value = rest of the line).
+        let (k, v) = t
             .split_once(|c: char| c.is_ascii_whitespace())
             .map(|(a, b)| (a.trim(), b.trim()))
-            .unwrap_or((rest, ""));
-        Ok((k.to_string(), v.to_string()))
+            .unwrap_or((t, ""));
+        return Ok(vec![(k.to_string(), v.to_string())]);
     }
+
+    // Multi-pair `KEY=VALUE [KEY2=VALUE2 ...]`: every token must contain `=`.
+    let mut pairs = Vec::with_capacity(tokens.len());
+    for tok in &tokens {
+        let Some((k, v)) = tok.split_once('=') else {
+            return Err(LightrError::InvalidManifest(format!(
+                "ENV/LABEL: expected KEY=VALUE, got: {tok}"
+            )));
+        };
+        let key = k.trim();
+        if key.is_empty() {
+            return Err(LightrError::InvalidManifest(
+                "ENV/LABEL: empty key in KEY=VALUE".to_string(),
+            ));
+        }
+        pairs.push((key.to_string(), v.to_string()));
+    }
+    Ok(pairs)
+}
+
+/// Split a string into tokens on UNQUOTED whitespace, honoring `'…'` and `"…"`
+/// quoting (quotes removed from the result). Inside double quotes `\"` and `\\`
+/// are escapes; single quotes are literal (POSIX/Docker). Quotes that abut
+/// other text join into the same token (`A="x y"` is one token). An
+/// unterminated quote is fail-closed.
+fn tokenize_quoted(s: &str) -> Result<Vec<String>> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut has_tok = false;
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_ascii_whitespace() => {
+                if has_tok {
+                    tokens.push(std::mem::take(&mut cur));
+                    has_tok = false;
+                }
+            }
+            '\'' => {
+                has_tok = true;
+                let mut closed = false;
+                for q in chars.by_ref() {
+                    if q == '\'' {
+                        closed = true;
+                        break;
+                    }
+                    cur.push(q);
+                }
+                if !closed {
+                    return Err(LightrError::InvalidManifest(format!(
+                        "ENV/LABEL: unterminated single quote in: {s}"
+                    )));
+                }
+            }
+            '"' => {
+                has_tok = true;
+                let mut closed = false;
+                while let Some(q) = chars.next() {
+                    match q {
+                        '"' => {
+                            closed = true;
+                            break;
+                        }
+                        '\\' => match chars.next() {
+                            Some(e @ ('"' | '\\')) => cur.push(e),
+                            Some(other) => {
+                                cur.push('\\');
+                                cur.push(other);
+                            }
+                            None => break,
+                        },
+                        other => cur.push(other),
+                    }
+                }
+                if !closed {
+                    return Err(LightrError::InvalidManifest(format!(
+                        "ENV/LABEL: unterminated double quote in: {s}"
+                    )));
+                }
+            }
+            other => {
+                has_tok = true;
+                cur.push(other);
+            }
+        }
+    }
+    if has_tok {
+        tokens.push(cur);
+    }
+    Ok(tokens)
 }
 
 /// VOLUME: JSON array form OR whitespace-separated paths.

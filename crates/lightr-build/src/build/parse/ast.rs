@@ -66,12 +66,16 @@ pub enum Instr {
     Cmd { argv: Vec<String>, form: CmdForm },
     /// `ENTRYPOINT <cmd>`.
     Entrypoint { argv: Vec<String>, form: CmdForm },
-    /// `LABEL k=v` (one pair per parsed instruction occurrence).
-    Label { key: String, val: String },
+    /// `LABEL k=v [k2=v2 ...]` — one OR MANY pairs in a single instruction
+    /// (WP-DF-05). The legacy `LABEL k v` whole-rest-is-value form yields a
+    /// single pair. Order preserved as written (Docker keeps insertion order).
+    Label { pairs: Vec<(String, String)> },
     /// `EXPOSE <port>[/<proto>] ...` — raw port spec tokens, faithful.
     Expose { ports: Vec<String> },
-    /// `ENV k=v` (one pair per parsed instruction occurrence).
-    Env { key: String, val: String },
+    /// `ENV k=v [k2=v2 ...]` — one OR MANY pairs in a single instruction
+    /// (WP-DF-05). The legacy `ENV k v` whole-rest-is-value form yields a
+    /// single pair. Order preserved as written (Docker keeps insertion order).
+    Env { pairs: Vec<(String, String)> },
     /// `ADD [--chown=] [--chmod=] <src>... <dest>`.
     Add {
         src: Vec<String>,
