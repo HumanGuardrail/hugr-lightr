@@ -171,11 +171,14 @@ jobs:
   vz-build:
     name: vz feature build (macOS)
     runs-on: macos-14
-    # GitHub-hosted macOS bills ~10x — run vz-build ONLY on push to main (1x per
-    # merge), not on every PR. Moves to the self-hosted macOS runner ($0) once
-    # registered. continue-on-error keeps it non-blocking either way.
+    # PAUSED to conserve the limited GitHub Actions credit: GitHub-hosted macOS
+    # bills ~10x (~$0.80/run) and this fired on every merge. vz is owner-gated
+    # (the 2-VM E2E is box-gated; the Swift-shim build is validated locally on the
+    # founder Intel Mac per-WP), so pausing loses no autonomous coverage. RE-ENABLE
+    # by restoring `if: github.event_name == 'push'` when doing vz work or once the
+    # self-hosted macOS runner ($0) is registered. continue-on-error either way.
     continue-on-error: true
-    if: ${{ github.event_name == 'push' }}
+    if: ${{ false }}
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain (honor rust-toolchain.toml)
