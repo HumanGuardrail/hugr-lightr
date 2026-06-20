@@ -111,8 +111,23 @@ pub fn spawn_detached_engine(
         // for graceful termination, before the SIGKILL fallback. `None` for runs
         // with no `--stop-signal` ⇒ SIGTERM as before. RUNTIME ONLY — never keyed.
         stop_signal: spec.stop_signal.clone(),
-        // R-SPECDISK freeze-gate fields: defaults until the Wave-A/B WPs
-        // populate them (no behaviour change here).
+        // RC-SEAM-FREEZE: thread the RC carry-fields through to spec.json so the
+        // detached supervisor reads them back and the apply seam honors them. All
+        // default (None/empty/false) until a future RC WP sets one from its CLI
+        // flag — RUNTIME ONLY, never keyed; behaviour-preserving here.
+        hostname: spec.hostname.clone(),
+        labels: spec.labels.clone(),
+        cap_add: spec.cap_add.clone(),
+        cap_drop: spec.cap_drop.clone(),
+        privileged: spec.privileged,
+        tty: spec.tty,
+        init: spec.init,
+        read_only: spec.read_only,
+        oom_score_adj: spec.oom_score_adj,
+        pids_limit: spec.pids_limit,
+        shm_size: spec.shm_size,
+        // R-SPECDISK freeze-gate fields not owned by the RC seam: defaults until
+        // the Wave-A/B WPs populate them (no behaviour change here).
         ..Default::default()
     };
     write_spec_json(&dir, &spec_on_disk)?;

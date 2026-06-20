@@ -15,6 +15,7 @@ mod memo;
 mod memo_key;
 mod memo_key_runtime_excl;
 mod mount;
+mod rc_seam_thread;
 mod secrets_tests;
 mod spawn_ps;
 mod types_tests;

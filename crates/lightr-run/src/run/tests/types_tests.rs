@@ -44,6 +44,67 @@ fn spec_on_disk_vz_roundtrip_preserves_engine_and_rootfs() {
     assert_eq!(back.ports, vec![(18080, 80)]);
 }
 
+// RC-SEAM-FREEZE: a spec.json written before the new RC carry-fields existed
+// still parses, with each new field at its no-op default (back-compat).
+#[test]
+fn spec_on_disk_legacy_json_defaults_rc_seam_fields() {
+    let legacy = r#"{
+        "cwd": "/w", "command": ["sleep","1"], "env_keys": [],
+        "mounts": [], "detached": true, "created_at_unix": 1
+    }"#;
+    let spec: SpecOnDisk = serde_json::from_str(legacy).expect("legacy spec parses");
+    assert!(
+        spec.cap_add.is_empty() && spec.cap_drop.is_empty(),
+        "caps ⇒ empty"
+    );
+    assert!(
+        !spec.privileged && !spec.tty && !spec.init && !spec.read_only,
+        "bools ⇒ false"
+    );
+    assert!(spec.oom_score_adj.is_none(), "oom_score_adj ⇒ None");
+    assert!(spec.pids_limit.is_none(), "pids_limit ⇒ None");
+    assert!(spec.shm_size.is_none(), "shm_size ⇒ None");
+    assert!(
+        spec.hostname.is_none() && spec.labels.is_empty(),
+        "hostname/labels ⇒ default"
+    );
+}
+
+/// The new RC carry-fields write/read round-trip through spec.json unchanged —
+/// what the detached supervisor reads back to drive the apply seam.
+#[test]
+fn spec_on_disk_rc_seam_fields_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = SpecOnDisk {
+        cwd: "/w".to_string(),
+        command: vec!["sh".to_string()],
+        detached: true,
+        created_at_unix: 1,
+        hostname: Some("host-a".to_string()),
+        labels: vec![("k".to_string(), "v".to_string())],
+        cap_add: vec!["NET_ADMIN".to_string()],
+        cap_drop: vec!["MKNOD".to_string()],
+        privileged: true,
+        tty: true,
+        init: true,
+        read_only: true,
+        oom_score_adj: Some(-500),
+        pids_limit: Some(64),
+        shm_size: Some(67_108_864),
+        ..Default::default()
+    };
+    write_spec_json(dir.path(), &spec).expect("write");
+    let back = read_spec_on_disk(dir.path()).expect("read");
+    assert_eq!(back.hostname.as_deref(), Some("host-a"));
+    assert_eq!(back.labels, vec![("k".to_string(), "v".to_string())]);
+    assert_eq!(back.cap_add, vec!["NET_ADMIN".to_string()]);
+    assert_eq!(back.cap_drop, vec!["MKNOD".to_string()]);
+    assert!(back.privileged && back.tty && back.init && back.read_only);
+    assert_eq!(back.oom_score_adj, Some(-500));
+    assert_eq!(back.pids_limit, Some(64));
+    assert_eq!(back.shm_size, Some(67_108_864));
+}
+
 // ── WP-RC-WORKDIR: effective_cwd + resolve_workdir ─────────────────────────
 
 /// `RunSpec::effective_cwd`: no `-w` ⇒ `cwd` unchanged (behavior-preserving);

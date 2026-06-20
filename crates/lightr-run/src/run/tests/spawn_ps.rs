@@ -187,6 +187,7 @@ fn exec_in_cwd_correctness() {
         user: None,
         restart: None,
         stop_signal: None,
+        ..Default::default()
     };
 
     let handle = spawn_detached(&spec, &store).expect("spawn_detached");

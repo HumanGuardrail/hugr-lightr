@@ -2,6 +2,7 @@
 //! All public items are re-exported at the crate root via `lib.rs`.
 
 mod ac;
+mod apply_cfg;
 mod ctl;
 pub mod deepmemo;
 pub mod exec;

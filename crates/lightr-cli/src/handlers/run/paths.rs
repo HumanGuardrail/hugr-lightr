@@ -250,6 +250,9 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         user,        // WP-RC-USER: honored as the child uid/gid (cfg unix; memo + supervisor).
         restart,     // WP-RC-RESTART: honored by the detached supervisor's re-spawn loop.
         stop_signal, // WP-RC-STOPSIGNAL: honored by `lightr stop`/restart-stop.
+        // RC-SEAM-FREEZE (NON-OWNED site): the native run path does not yet parse
+        // the new RC flags → no-op defaults (RUNTIME-ONLY, never keyed).
+        ..Default::default()
     };
 
     // Detach path: spawn detached and print the run id. WP-RC-4: when a

@@ -124,6 +124,9 @@ pub(crate) fn start_service_detached(
         user: svc.user.clone(),
         restart: svc.restart.clone(),
         stop_signal: None, // WP-RC-STOPSIGNAL (NON-OWNED): compose stop_signal lowering is WP-RUNFLAGS' job.
+        // RC-SEAM-FREEZE (NON-OWNED site): compose lowering of the new RC fields is
+        // a future WP's job → no-op defaults here (RUNTIME-ONLY, never keyed).
+        ..Default::default()
     };
 
     let mut child_env: Vec<(String, String)> = svc.env.clone();

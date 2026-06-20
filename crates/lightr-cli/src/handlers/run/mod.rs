@@ -214,6 +214,9 @@ pub fn run(
             user: user.map(String::from),
             restart: restart.map(String::from),
             stop_signal: stop_signal.map(String::from),
+            // RC-SEAM-FREEZE (NON-OWNED site): the vz detached path does not yet
+            // parse the new RC flags → no-op defaults (RUNTIME-ONLY, never keyed).
+            ..Default::default()
         };
         return match spawn_detached_engine(
             &spec,

@@ -81,6 +81,9 @@ fn spawn_child(
         .stderr(std::process::Stdio::from(stderr_log));
     // WP-RC-USER: honor `-u`/`--user` (cfg(unix); None ⇒ current user).
     super::spawn::apply_user(&mut cmd, spec.user.as_deref())?;
+    // RC-SEAM-FREEZE: per-field runtime-config appliers from the persisted spec
+    // (all no-ops today — behaviour-preserving; a future RC WP fills one slot).
+    super::apply_cfg::apply_run_config_ondisk(spec, &mut cmd);
 
     let child = cmd.spawn().map_err(LightrError::Io)?;
     let pid = child.id() as i32;
