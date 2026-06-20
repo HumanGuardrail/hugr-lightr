@@ -68,8 +68,25 @@ pub struct Service {
     /// (WP-RC-USER). `None` ⇒ run as the current user (today's behavior).
     pub user: Option<String>,
     /// CMP-LOWER-RUNCFG: compose `restart`, lowered into `RunSpec.restart`
-    /// (WP-RC-RESTART). `None` ⇒ `no` policy (today's behavior).
+    /// (WP-RC-RESTART). `None` ⇒ `no` policy (today's behavior). CMP-P1-DEPLOY:
+    /// `deploy.restart_policy.condition` OVERRIDES this when both are set
+    /// (compose precedence — `lower_deploy` writes the mapped policy here).
     pub restart: Option<String>,
+    /// CMP-P1-DEPLOY: `deploy.resources.limits.memory`, parsed to bytes with the
+    /// SAME grammar as `lightr run --memory` (`ResourceLimits::parse`). `None` ⇒
+    /// unlimited (today's behavior). NOTE: carried through the on-disk spec but
+    /// not yet ENFORCED on the detached compose spawn path — the limits channel
+    /// (`spawn_detached_engine` / `SpecOnDisk`) lives in `lightr-run`, which this
+    /// WP does not own; honest once-note at the spawn site (follow-up WP).
+    pub mem_limit_bytes: Option<u64>,
+    /// CMP-P1-DEPLOY: `deploy.resources.limits.cpus`, parsed to milli-CPUs with
+    /// the SAME grammar as `lightr run --cpus` (1000 = one core). See
+    /// [`Service::mem_limit_bytes`] for the not-yet-enforced caveat.
+    pub cpu_limit_millis: Option<u64>,
+    /// CMP-P1-DEPLOY: `deploy.replicas` when > 1. OUT OF SCOPE for this WP
+    /// (multi-instance spawn is a separate WP); carried only so the spawn site
+    /// can emit an honest "not yet honored" note instead of silently ignoring it.
+    pub replicas: Option<u32>,
     /// CMP-P1-PROFILES: the service's `profiles: [...]` list (verbatim from the
     /// compose file). A service with a NON-EMPTY list is started only when one of
     /// these profiles is ACTIVE (`--profile`/`COMPOSE_PROFILES`); an EMPTY list
@@ -140,9 +157,24 @@ pub struct ServiceSpec {
     #[serde(default)]
     pub user: Option<String>,
     /// CMP-LOWER-RUNCFG: compose `restart` → `RunSpec.restart`. serde-default =
-    /// None.
+    /// None. CMP-P1-DEPLOY: holds the deploy.restart_policy-derived policy when
+    /// the deploy block sets one (it wins over a top-level `restart:`).
     #[serde(default)]
     pub restart: Option<String>,
+    /// CMP-P1-DEPLOY: `deploy.resources.limits.memory` in bytes (parsed like
+    /// `lightr run --memory`). serde-default = None (pre-existing specs load
+    /// unchanged). Carried to the supervisor; not yet enforced on the detached
+    /// path (limits channel is in `lightr-run`, a follow-up WP).
+    #[serde(default)]
+    pub mem_limit_bytes: Option<u64>,
+    /// CMP-P1-DEPLOY: `deploy.resources.limits.cpus` in milli-CPUs (parsed like
+    /// `lightr run --cpus`). serde-default = None. Same not-yet-enforced caveat.
+    #[serde(default)]
+    pub cpu_limit_millis: Option<u64>,
+    /// CMP-P1-DEPLOY: `deploy.replicas` (when > 1). serde-default = None.
+    /// OUT OF SCOPE — carried only for the honest "not yet honored" note.
+    #[serde(default)]
+    pub replicas: Option<u32>,
 }
 
 pub struct ComposeHandle {
@@ -166,6 +198,9 @@ pub(crate) fn empty_service(name: String) -> Service {
         working_dir: None,
         user: None,
         restart: None,
+        mem_limit_bytes: None,
+        cpu_limit_millis: None,
+        replicas: None,
         profiles: Vec::new(),
     }
 }
