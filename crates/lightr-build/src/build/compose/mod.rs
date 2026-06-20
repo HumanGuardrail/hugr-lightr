@@ -12,6 +12,9 @@ pub mod parse;
 /// CMP-P0-PORTS-FULL: the full compose `ports` grammar parser (short + long,
 /// ranges, proto, host_ip). Consumed by `lower.rs`.
 pub(crate) mod ports;
+/// CMP-P1-PROJECT: compose project-name resolution (cli>env>name>basename) +
+/// Docker-grammar sanitization. Consumed by the CLI compose handler + `up.rs`.
+pub mod project;
 pub mod spec;
 pub mod supervise;
 pub mod up;
@@ -20,7 +23,8 @@ pub use down::compose_down;
 pub use interp::{interpolate_compose, scope_from_project_dir};
 pub use merge::{deep_merge, parse_compose_merged, OVERRIDE_FILENAMES};
 pub use model::{Compose, ComposeHandle, Service, ServiceSpec, StackSpec};
-pub use parse::{parse_compose, parse_compose_with_scope};
+pub use parse::{parse_compose, parse_compose_project_name, parse_compose_with_scope};
+pub use project::{dir_basename, resolve_project_name, sanitize_project_name, DEFAULT_PROJECT};
 pub use spec::{ComposeSpec, EnvScalar, Environment, Healthcheck, ServiceDef, StringOrList};
 pub use supervise::compose_supervise;
 pub use up::compose_up;

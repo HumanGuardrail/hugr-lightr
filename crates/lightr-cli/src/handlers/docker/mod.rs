@@ -290,6 +290,7 @@ fn translate_compose(args: &[String], json: bool) -> i32 {
             // Parse compose up flags from remaining args
             let rest = &args[1..];
             let mut compose_file = "compose.yml".to_string();
+            let mut project: Option<String> = None;
             let mut eager = false;
             let mut ttl: u64 = 3600;
             let mut i = 0;
@@ -299,6 +300,12 @@ fn translate_compose(args: &[String], json: bool) -> i32 {
                         i += 1;
                         if i < rest.len() {
                             compose_file = rest[i].clone();
+                        }
+                    }
+                    "-p" | "--project-name" => {
+                        i += 1;
+                        if i < rest.len() {
+                            project = Some(rest[i].clone());
                         }
                     }
                     "--eager" => eager = true,
@@ -313,11 +320,12 @@ fn translate_compose(args: &[String], json: bool) -> i32 {
                 i += 1;
             }
             note_translation("compose", &["up", "-f", &compose_file]);
-            crate::handlers::compose::up(&compose_file, eager, ttl, json)
+            crate::handlers::compose::up(&compose_file, project.as_deref(), eager, ttl, json)
         }
         "down" => {
             let rest = &args[1..];
             let mut compose_file: Option<String> = None;
+            let mut project: Option<String> = None;
             let mut i = 0;
             while i < rest.len() {
                 match rest[i].as_str() {
@@ -327,12 +335,18 @@ fn translate_compose(args: &[String], json: bool) -> i32 {
                             compose_file = Some(rest[i].clone());
                         }
                     }
+                    "-p" | "--project-name" => {
+                        i += 1;
+                        if i < rest.len() {
+                            project = Some(rest[i].clone());
+                        }
+                    }
                     _ => {}
                 }
                 i += 1;
             }
             note_translation("compose", &["down"]);
-            crate::handlers::compose::down(compose_file.as_deref())
+            crate::handlers::compose::down(compose_file.as_deref(), project.as_deref())
         }
         sub => {
             eprintln!(

@@ -61,6 +61,21 @@ pub fn parse_compose_with_scope(yaml: &str, scope: &VarScope) -> Result<Compose>
     parse_compose(&interpolated)
 }
 
+/// CMP-P1-PROJECT: extract the compose file's top-level `name:` field, if any.
+///
+/// Used by project-name resolution (precedence rung 3). Returns `None` for an
+/// empty document or a file with no `name:`. Lenient like [`parse_compose`]:
+/// unknown keys are ignored. A malformed document is an honest error so the
+/// caller fails closed rather than silently dropping the field.
+pub fn parse_compose_project_name(yaml: &str) -> Result<Option<String>> {
+    if yaml.trim().is_empty() {
+        return Ok(None);
+    }
+    let spec: ComposeSpec = serde_yaml::from_str(yaml)
+        .map_err(|e| LightrError::InvalidManifest(format!("compose parse error: {e}")))?;
+    Ok(spec.name)
+}
+
 #[cfg(test)]
 #[path = "parse_tests.rs"]
 mod tests;

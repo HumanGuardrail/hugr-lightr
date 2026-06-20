@@ -14,6 +14,10 @@ pub enum ComposeCmd {
         /// Compose file to read
         #[arg(short = 'f', long, default_value = "compose.yml")]
         file: String,
+        /// Project name (namespaces the stack). Precedence: this flag >
+        /// COMPOSE_PROJECT_NAME > the file's `name:` > the directory basename.
+        #[arg(short = 'p', long = "project-name")]
+        project_name: Option<String>,
         /// Start all services immediately (override lazy)
         #[arg(long)]
         eager: bool,
@@ -26,6 +30,10 @@ pub enum ComposeCmd {
         /// Compose file (used to identify the stack; resolved by newest stack dir)
         #[arg(short = 'f', long)]
         file: Option<String>,
+        /// Project name to tear down (same precedence as `up`). Scopes the
+        /// teardown so `down -p A` never touches project B.
+        #[arg(short = 'p', long = "project-name")]
+        project_name: Option<String>,
     },
 }
 
