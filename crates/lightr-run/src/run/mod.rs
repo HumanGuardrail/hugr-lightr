@@ -7,6 +7,7 @@ pub mod deepmemo;
 pub mod exec;
 pub mod logs;
 pub mod memo;
+pub mod mount;
 pub mod paths;
 pub mod ps;
 pub mod spawn;

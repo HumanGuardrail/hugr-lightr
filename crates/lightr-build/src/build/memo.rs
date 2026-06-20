@@ -1,4 +1,25 @@
 //! Build memoization: ImageMeta sidecar, step key, COPY hashing, TempDirGuard.
+//!
+//! # R-KEY partition (parity-contract.md §0) — DOCUMENTED here; behaviour is the WPs'
+//!
+//! The freeze-gate only DOCUMENTS the BUILD-key partition; `step_key` below is
+//! UNCHANGED (the WPs implement the new inputs). BUILD-domain key inputs the
+//! campaign enforces:
+//!
+//! - **IN the build key:** prev-layer root, the instruction's canonical text,
+//!   COPY source content digests, and (WP-DF-13) the POST-INTERPOLATION
+//!   instruction text + workdir/user/entrypoint-when-set + image ENV.
+//! - **OUT of the build key:** runtime-only knobs (caps, ports, labels at RUN
+//!   time) — those live in the RUN domain (see lightr-run/src/run/memo.rs).
+//!
+//! ## Per-domain v2 rule (LEAD ARBITRATION)
+//!
+//! The domain tag is bumped PER-KEY-DOMAIN, ONLY when that key's input format
+//! changes. The BUILD key STAYS `lightr/build/v1` until **WP-DF-13**, which
+//! bumps it to `lightr/build/v2` when post-interpolation text +
+//! workdir/user/entrypoint enter the key. The RUN key is independent and stays
+//! `lightr/run/v1`. Each bump is a documented one-time Action-Cache
+//! invalidation. The freeze-gate does NOT bump anything.
 use lightr_core::{Digest, LightrError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

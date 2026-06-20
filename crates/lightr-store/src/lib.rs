@@ -9,6 +9,7 @@ pub mod store;
 
 // Re-export the public surface that was previously flat in lib.rs.
 pub use store::cow::CowRung;
+pub use store::imgmeta::{ImageDescriptor, ImageManifestRecord};
 pub use store::lock::{GcGuard, WriteGuard};
 
 /// The lightr content-addressed store.
@@ -154,6 +155,25 @@ impl Store {
     /// (fail-soft to the minimal config, never an error).
     pub fn image_config_get(&self, name: &str) -> Result<Option<Vec<u8>>> {
         store::imgmeta::image_config_get(&self.root, name)
+    }
+
+    /// R-IMGREC (parity-contract.md §0): store the faithful image manifest
+    /// record for `name` (push-fidelity), length-prefixed + content-addressed.
+    /// The gc mark-walk extension keeping retained blobs reachable is WP-IMG-01.
+    pub fn image_manifest_put(
+        &self,
+        name: &str,
+        rec: &store::imgmeta::ImageManifestRecord,
+    ) -> Result<()> {
+        store::imgmeta::image_manifest_put(&self.root, name, rec)
+    }
+
+    /// R-IMGREC: read the faithful image manifest record for `name`, if any.
+    pub fn image_manifest_get(
+        &self,
+        name: &str,
+    ) -> Result<Option<store::imgmeta::ImageManifestRecord>> {
+        store::imgmeta::image_manifest_get(&self.root, name)
     }
 
     // ── AC ───────────────────────────────────────────────────────────────────

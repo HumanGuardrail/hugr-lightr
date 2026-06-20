@@ -87,6 +87,9 @@ pub fn spawn_detached_engine(
         engine: engine.as_str().to_string(),
         rootfs_ref: rootfs_ref.map(|s| s.to_string()),
         env: env.to_vec(),
+        // R-SPECDISK freeze-gate fields: defaults until the Wave-A/B WPs
+        // populate them (no behaviour change here).
+        ..Default::default()
     };
     write_spec_json(&dir, &spec_on_disk)?;
 

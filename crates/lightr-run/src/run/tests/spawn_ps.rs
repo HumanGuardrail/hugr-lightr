@@ -55,6 +55,7 @@ fn start_supervised(
         engine: "native".to_string(),
         rootfs_ref: None,
         env: vec![],
+        ..Default::default()
     };
     write_spec_json(&run_dir, &spec_on_disk).unwrap();
 
@@ -245,6 +246,7 @@ fn supervisor_health_flips_unhealthy() {
         engine: "native".to_string(),
         rootfs_ref: None,
         env: vec![],
+        ..Default::default()
     };
     write_spec_json(&run_dir, &spec_on_disk).unwrap();
     healthcheck::save_for(
@@ -320,6 +322,7 @@ fn ps_enrich_fields() {
         engine: "native".to_string(),
         rootfs_ref: None,
         env: vec![],
+        ..Default::default()
     };
     write_spec_json(&run_dir_a, &spec_a).unwrap();
     // Write exited status so ps picks it up without a real supervisor.
@@ -340,6 +343,7 @@ fn ps_enrich_fields() {
         engine: "vz".to_string(),
         rootfs_ref: Some("my-rootfs".to_string()),
         env: vec![],
+        ..Default::default()
     };
     write_spec_json(&run_dir_b, &spec_b).unwrap();
     fs::write(run_dir_b.join("status"), "exited 0").unwrap();

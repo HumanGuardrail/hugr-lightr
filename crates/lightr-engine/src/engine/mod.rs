@@ -11,7 +11,7 @@ pub mod wsl;
 pub use kind::{EngineCaps, EngineKind};
 pub use native::NativeEngine;
 pub use probe::{pack_status, probe};
-pub use spec::ExecSpec;
+pub use spec::{ExecSpec, MountKind, ResolvedMount};
 
 use lightr_core::{LightrError, Result};
 
