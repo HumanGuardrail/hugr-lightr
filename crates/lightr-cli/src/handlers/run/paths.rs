@@ -22,10 +22,9 @@ use crate::exit::die_lightr;
 use super::{parse_publish, RunJson};
 
 // ── vz-memo path (the product's core moat) ───────────────────────────────────
-// A `vz` container job with a rootfs that is NOT detached is MEMOIZABLE
-// exactly like the native path: the 1st run boots the VM + captures
-// {exit, stdout, stderr}; an identical 2nd run is a HIT that replays them
-// from the Action Cache with NO VM boot.
+// A non-detached `vz` rootfs run is MEMOIZABLE like the native path (see the
+// module doc): 1st run boots the VM + captures {exit,stdout,stderr}; an
+// identical 2nd run is a HIT replayed from the AC with NO VM boot.
 pub(super) fn run_vz_memo(
     engine_kind: EngineKind,
     ref_name: &str,
@@ -263,10 +262,12 @@ pub(super) struct NativeRun<'a> {
     pub deep_memo: bool,
     pub limits: ResourceLimits,
     /// WP-RC-4: an optional healthcheck for the DETACHED native path. `None` for
-    /// every non-`-d` run (and when no `--health-cmd` is given), so the
-    /// foreground path is byte-identical to before. The supervisor owns the
-    /// watchdog; this only hands it the config.
+    /// every non-`-d` run (and when no `--health-cmd` is given), so the foreground
+    /// path is byte-identical to before; the supervisor owns the watchdog.
     pub healthcheck: Option<Healthcheck>,
+    /// WP-RC-1 (R-KEY): user `-e`/`--env-file` env, resolved pairs — the ONLY env
+    /// in the run memo key. Empty for no-`-e` runs (key/behaviour unchanged).
+    pub env_explicit: Vec<(String, String)>,
 }
 
 pub(super) fn run_native_memo(req: NativeRun) -> i32 {
@@ -286,6 +287,7 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         deep_memo,
         limits,
         healthcheck,
+        env_explicit,
     } = req;
     let input_paths: Vec<std::path::PathBuf> = if inputs.is_empty() {
         vec![cwd.clone()]
@@ -313,6 +315,7 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         secrets,
         configs,
         ports,
+        env_explicit,
     };
 
     // Detach path: spawn detached and print the run id. WP-RC-4: when a

@@ -31,6 +31,7 @@ fn make_spec(cwd: &std::path::Path, command: Vec<&str>) -> RunSpec {
         secrets: vec![],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     }
 }
 
@@ -146,6 +147,7 @@ fn key_changes_when_selected_env_changes() {
         secrets: vec![],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     };
     let k1 = build_key(&spec1).expect("k1");
 
@@ -181,6 +183,7 @@ fn predict_miss_run_hit() {
         secrets: vec![],
         configs: vec![],
         ports: vec![],
+        env_explicit: vec![],
     };
 
     let (key1, hit1) = predict(&spec, &store).expect("predict1");
@@ -193,4 +196,126 @@ fn predict_miss_run_hit() {
     let (key2, hit2) = predict(&spec, &store).expect("predict2");
     assert_eq!(key1, key2, "key must be stable");
     assert!(hit2, "predict after run must be hit");
+}
+
+// =======================================================================
+// WP-RC-1 (R-KEY): env_explicit is KEYED; discovery env is NOT.
+// =======================================================================
+
+// MEMO LAW: a run with NO `-e`/`--env-file` (empty env_explicit) keys
+// byte-identically to the pre-WP-RC-1 key — behavior-preserving.
+#[test]
+fn empty_env_explicit_preserves_key() {
+    let (_home, _env_guard) = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::write(cwd.join("f.txt"), b"data").unwrap();
+
+    let mut spec = make_spec(cwd, vec!["/bin/echo", "x"]);
+    spec.env_explicit = vec![];
+    let k1 = build_key(&spec).expect("k1");
+
+    // A second spec with an explicitly-empty env_explicit must match.
+    let spec2 = make_spec(cwd, vec!["/bin/echo", "x"]);
+    let k2 = build_key(&spec2).expect("k2");
+    assert_eq!(
+        k1.0, k2.0,
+        "empty env_explicit must not change the key (behavior-preserving)"
+    );
+}
+
+// MEMO LAW (the core no-false-hit guarantee): two specs differing ONLY in
+// `env_explicit` (a different `-e` value) MUST produce DIFFERENT keys, so a
+// changed `-e` can never replay a stale cached result.
+#[test]
+fn differing_env_explicit_busts_key() {
+    let (_home, _env_guard) = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::write(cwd.join("f.txt"), b"data").unwrap();
+
+    let mut spec_a = make_spec(cwd, vec!["/bin/echo", "x"]);
+    spec_a.env_explicit = vec![("FOO".to_string(), "bar".to_string())];
+
+    let mut spec_b = make_spec(cwd, vec!["/bin/echo", "x"]);
+    spec_b.env_explicit = vec![("FOO".to_string(), "baz".to_string())];
+
+    let ka = build_key(&spec_a).expect("ka");
+    let kb = build_key(&spec_b).expect("kb");
+    assert_ne!(
+        ka.0, kb.0,
+        "a different -e VALUE must bust the run key (no false hit)"
+    );
+
+    // A different KEY (not just value) must also bust it.
+    let mut spec_c = make_spec(cwd, vec!["/bin/echo", "x"]);
+    spec_c.env_explicit = vec![("OTHER".to_string(), "bar".to_string())];
+    let kc = build_key(&spec_c).expect("kc");
+    assert_ne!(ka.0, kc.0, "a different -e KEY must bust the run key");
+
+    // And a non-empty env_explicit must differ from the empty (no-flag) key.
+    let spec_empty = make_spec(cwd, vec!["/bin/echo", "x"]);
+    let ke = build_key(&spec_empty).expect("ke");
+    assert_ne!(
+        ka.0, ke.0,
+        "adding -e must bust the key vs a no-flag run (no false hit)"
+    );
+}
+
+// env_explicit order on the CLI must NOT change the key (the fold sorts), so
+// `-e A=1 -e B=2` and `-e B=2 -e A=1` are the same cached run.
+#[test]
+fn env_explicit_order_independent() {
+    let (_home, _env_guard) = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::write(cwd.join("f.txt"), b"data").unwrap();
+
+    let mut spec_ab = make_spec(cwd, vec!["/bin/echo", "x"]);
+    spec_ab.env_explicit = vec![
+        ("A".to_string(), "1".to_string()),
+        ("B".to_string(), "2".to_string()),
+    ];
+    let mut spec_ba = make_spec(cwd, vec!["/bin/echo", "x"]);
+    spec_ba.env_explicit = vec![
+        ("B".to_string(), "2".to_string()),
+        ("A".to_string(), "1".to_string()),
+    ];
+
+    let kab = build_key(&spec_ab).expect("kab");
+    let kba = build_key(&spec_ba).expect("kba");
+    assert_eq!(
+        kab.0, kba.0,
+        "env_explicit CLI order must not change the key (the fold sorts)"
+    );
+}
+
+// LEAD ARBITRATION env-split: the DISCOVERY `env` channel is UNKEYED. `RunSpec`
+// carries no discovery-`env` field at all (it lives on `SpecOnDisk` for the
+// detached path) — so the run key is structurally independent of discovery env.
+// This guards that the only env-shaped key contribution is env_explicit: a spec
+// with env_explicit set differs from one without, while the discovery channel
+// (modelled by env_keys whose values are absent) does not collide with it.
+#[test]
+fn discovery_env_stays_unkeyed_vs_explicit() {
+    let (_home, _env_guard) = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::write(cwd.join("f.txt"), b"data").unwrap();
+
+    // Baseline: no env at all.
+    let base = make_spec(cwd, vec!["/bin/echo", "x"]);
+    let k_base = build_key(&base).expect("k_base");
+
+    // env_explicit set ⇒ key MUST change (it is keyed).
+    let mut explicit = make_spec(cwd, vec!["/bin/echo", "x"]);
+    explicit.env_explicit = vec![("FOO".to_string(), "bar".to_string())];
+    let k_explicit = build_key(&explicit).expect("k_explicit");
+    assert_ne!(
+        k_base.0, k_explicit.0,
+        "env_explicit is keyed: it must change the key"
+    );
+
+    // The env_explicit fold uses a `\x03env_explicit\0` domain tag, so it can
+    // never be confused with the env_keys (`=`/`\x01`) fold — distinct channels.
 }

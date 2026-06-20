@@ -36,6 +36,7 @@ use serde::Serialize;
 
 use crate::exit::die_lightr;
 
+mod env;
 mod paths;
 
 #[cfg(test)]
@@ -194,6 +195,11 @@ pub fn run(
     cpus: Option<&str>,
     secrets_raw: &[String],
     configs_raw: &[String],
+    // WP-RC-1: user `-e`/`--env` (KEY=VAL | KEY-inherit) + `--env-file`. Resolved
+    // into the KEYED `env_explicit` channel (R-KEY). The pre-existing long `--env`
+    // (env_keys, discovery channel) is a SEPARATE mechanism, untouched here.
+    env_set: &[String],
+    env_file: Option<&str>,
     // WP-RC-4: healthcheck flags, now WIRED (was parsed & discarded). Lowered to
     // a Healthcheck and run by the detached supervisor's watchdog. Never a
     // memo-key input (runtime probe, §0).
@@ -226,6 +232,14 @@ pub fn run(
             Err(code) => return code,
         }
     }
+
+    // WP-RC-1: resolve `-e`/`--env-file` into the KEYED env_explicit channel
+    // (R-KEY). `--env-file` first, then `-e` overrides; `KEY`-only inherits from
+    // this process's env. Empty ⇒ empty Vec ⇒ key byte-identical to before.
+    let env_explicit = match env::resolve_env_explicit_from_process(env_set, env_file) {
+        Ok(pairs) => pairs,
+        Err(code) => return code,
+    };
 
     // Decide path: native + no rootfs ⇒ memoized path (unchanged R0/R1 behaviour).
     // Any other combination ⇒ engine path (NOT memoized, per §4).
@@ -323,6 +337,7 @@ pub fn run(
             secrets,
             configs,
             ports,
+            env_explicit,
         };
         return match spawn_detached_engine(
             &spec,
@@ -361,5 +376,6 @@ pub fn run(
         deep_memo,
         limits,
         healthcheck,
+        env_explicit,
     })
 }

@@ -2,15 +2,14 @@
 //! validate_mount_target, assemble_key, build_key, run_memoized,
 //! run_memoized_with, predict.
 //!
-//! # R-KEY partition (parity-contract.md §0) — DOCUMENTED here; behaviour is the WPs'
+//! # R-KEY partition (parity-contract.md §0)
 //!
-//! The freeze-gate only DOCUMENTS the partition; key computation is UNCHANGED
-//! (the WPs implement it). The RUN-key domain partition the campaign enforces:
+//! The RUN-key domain partition the campaign enforces (env_explicit fold WIRED
+//! by WP-RC-1 — `contribute_env_explicit`):
 //!
-//! - **IN the run key:** explicit env (`env_explicit`, folded `key=value\0`),
-//!   image ENV, CAS-ref content, ro-bind fingerprint. (Build-only inputs —
-//!   workdir/user/entrypoint-when-set + post-interpolation instruction text —
-//!   are keyed in the BUILD domain, not here.)
+//! - **IN the run key:** explicit env (`env_explicit`, folded `key=value\0` —
+//!   WP-RC-1), image ENV, CAS-ref content, ro-bind fingerprint. (Build-only
+//!   inputs — workdir/user/entrypoint + interp text — key in the BUILD domain.)
 //! - **OUT of the run key (runtime):** caps, restart, health, ports, labels,
 //!   network, tty, workdir/user/hostname at RUN time, and the discovery `env`
 //!   channel (LEAD ARBITRATION env-split: `env` is UNKEYED; only `env_explicit`
@@ -37,6 +36,28 @@ use super::types::{RunOutcome, RunSpec};
 // Mount target validation
 // ---------------------------------------------------------------------------
 
+/// WP-RC-1 (R-KEY): fold the user's explicit env (`env_explicit`) into the run
+/// key — the ONLY env channel in the key (the discovery `env` stays UNKEYED;
+/// `env_keys` is a separate var-NAME mechanism). Pairs are sorted so CLI order
+/// never changes the key, but a different KEY/VALUE always does (no false hit).
+/// A `\x03env_explicit\0` domain tag prefixes the block so it can't collide
+/// with the `env_keys` folds above; an EMPTY slice writes nothing, so a run
+/// with no `-e`/`--env-file` keys byte-identically to before (behavior-preserved).
+fn contribute_env_explicit(hasher: &mut blake3::Hasher, env_explicit: &[(String, String)]) {
+    if env_explicit.is_empty() {
+        return;
+    }
+    let mut sorted = env_explicit.to_vec();
+    sorted.sort();
+    hasher.update(b"\x03env_explicit\0");
+    for (k, v) in &sorted {
+        hasher.update(k.as_bytes());
+        hasher.update(b"=");
+        hasher.update(v.as_bytes());
+        hasher.update(b"\0");
+    }
+}
+
 pub(super) fn validate_mount_target(t: &str) -> Result<()> {
     use std::path::Path;
     let p = Path::new(t);
@@ -60,19 +81,14 @@ pub(super) fn validate_mount_target(t: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Key assembly — exact order per contract:
 //   update(b"lightr/run/v1\0")
-//   for each input (spec.inputs; if empty use [spec.cwd]) in GIVEN order:
-//       canonicalize against cwd
-//       scan(path, &mut Index::load_for(path)?)
-//       update(rel-path-as-given bytes + b"\0" + manifest.digest().0)
-//   for each arg in spec.command:
-//       update((arg.len() as u64).to_le_bytes() + arg bytes)
-//   env: collect spec.env_keys sorted, for each present in std::env:
-//       update(key + b"=" + value + b"\0")
-//       absent keys: update(key + b"\x01")
-//   update(std::env::consts::OS + "-" + std::env::consts::ARCH)
-//   mounts: for each mount in order:
-//       validate target (reject "..")
-//       update(ref_name bytes + [0x02] + mount-ref's CURRENT root digest bytes)
+//   inputs (spec.inputs; if empty use [spec.cwd]) in GIVEN order: canonicalize
+//     vs cwd, scan, update(rel-path bytes + b"\0" + manifest.digest().0)
+//   args: for each in spec.command: update(len.to_le_bytes() + arg bytes)
+//   env_keys (sorted): present → update(key + b"=" + value + b"\0");
+//     absent → update(key + b"\x01")
+//   env_explicit (WP-RC-1): contribute_env_explicit (sorted, \x03-tagged block)
+//   triple: update(OS + "-" + ARCH)
+//   mounts (in order): validate target, update(ref_name + [0x02] + root digest)
 //   key = finalize
 // ---------------------------------------------------------------------------
 
@@ -135,6 +151,10 @@ pub(super) fn assemble_key(spec: &RunSpec, store: &Store, hydrate_mounts: bool) 
             hasher.update(b"\x01");
         }
     }
+
+    // WP-RC-1 (R-KEY): explicit env, folded after the discovery `env_keys` and
+    // before the triple; empty ⇒ no-op (behavior-preserving).
+    contribute_env_explicit(&mut hasher, &spec.env_explicit);
 
     // Target triple: OS-ARCH
     let triple = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
@@ -222,6 +242,10 @@ pub(super) fn build_key(spec: &RunSpec) -> Result<Digest> {
             hasher.update(b"\x01");
         }
     }
+
+    // WP-RC-1 (R-KEY): explicit env — must match `assemble_key` exactly so the
+    // fast path and the store path agree. Empty ⇒ no-op (behavior-preserving).
+    contribute_env_explicit(&mut hasher, &spec.env_explicit);
 
     let triple = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     hasher.update(triple.as_bytes());

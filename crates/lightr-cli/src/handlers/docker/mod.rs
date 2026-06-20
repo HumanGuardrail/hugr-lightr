@@ -173,6 +173,10 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             None,
             &[],
             &[],
+            // WP-RC-1: the docker-translation path does not yet translate
+            // `-e`/`--env-file` (its own follow-up); no explicit env here.
+            &[],
+            None,
             // WP-RC-4: the docker-translation path configures no healthcheck.
             &crate::handlers::run::HealthFlags::default(),
         )
@@ -208,6 +212,10 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             None,
             &[],
             &[],
+            // WP-RC-1: the docker-translation path does not yet translate
+            // `-e`/`--env-file` (its own follow-up); no explicit env here.
+            &[],
+            None,
             // WP-RC-4: the docker-translation path configures no healthcheck.
             &crate::handlers::run::HealthFlags::default(),
         )
