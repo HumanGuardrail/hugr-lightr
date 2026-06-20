@@ -11,6 +11,7 @@ pub mod store;
 pub use store::cow::CowRung;
 pub use store::imgmeta::{ImageDescriptor, ImageManifestRecord};
 pub use store::lock::{GcGuard, WriteGuard};
+pub use store::volume::{self, VolumeInfo, DRIVER_LOCAL};
 
 /// The lightr content-addressed store.
 pub struct Store {
