@@ -15,5 +15,8 @@ pub use compose::{
 };
 pub use exec::{build, step_reads_clock_or_net, BuildReport};
 pub use imgcfg::{effective_argv, ImageConfig};
-pub use parse::{parse_dockerfile, BuildStep, Instr};
+pub use parse::{
+    parse_dockerfile, parse_dockerfile_full, BuildStep, CmdForm, Directives, Healthcheck,
+    HealthcheckOpts, Instr,
+};
 pub use vars::{interpolate, VarScope};
