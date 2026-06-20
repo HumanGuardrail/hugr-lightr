@@ -5,6 +5,7 @@ mod import_tests;
 mod integrity_tests;
 mod pull_tests;
 mod push_tests;
+mod retain_tests;
 
 use crate::oci::util::sha256_hex_of;
 use flate2::{write::GzEncoder, Compression};

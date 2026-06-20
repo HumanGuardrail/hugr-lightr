@@ -33,14 +33,12 @@ pub struct PushReport {
 pub(super) struct OciDescriptor {
     #[serde(default)]
     pub(super) digest: String,
-    // media_type is parsed but only used for content-type routing in pull();
-    // the field is retained for future use and schema completeness.
-    #[allow(dead_code)]
+    // media_type drives content-type routing in pull() and is retained verbatim
+    // in the WP-IMG-01 ImageManifestRecord descriptor (faithful push fidelity).
     #[serde(rename = "mediaType", default)]
     pub(super) media_type: String,
-    // size is part of the OCI descriptor schema and is deserialized for
-    // completeness; actual integrity is verified via sha256 hash, not size.
-    #[allow(dead_code)]
+    // size is the OCI descriptor's declared length; retained in the WP-IMG-01
+    // descriptor. Content integrity is verified via sha256, not size.
     #[serde(default)]
     pub(super) size: u64,
     #[serde(default)]
