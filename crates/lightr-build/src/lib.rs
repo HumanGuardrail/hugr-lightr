@@ -54,8 +54,9 @@
 mod build;
 
 pub use build::{
-    build, compose_down, compose_supervise, compose_up, effective_argv, interpolate, parse_compose,
-    parse_dockerfile, parse_dockerfile_full, step_reads_clock_or_net, BuildReport, BuildStep,
+    build, compose_down, compose_supervise, compose_up, effective_argv, interpolate,
+    interpolate_compose, parse_compose, parse_compose_with_scope, parse_dockerfile,
+    parse_dockerfile_full, scope_from_project_dir, step_reads_clock_or_net, BuildReport, BuildStep,
     CmdForm, Compose, ComposeHandle, ComposeServiceHealthcheck, ComposeSpec, Directives, EnvScalar,
     Environment, Healthcheck, HealthcheckOpts, ImageConfig, Instr, Service, ServiceDef,
     ServiceSpec, StackSpec, StringOrList, VarScope,
