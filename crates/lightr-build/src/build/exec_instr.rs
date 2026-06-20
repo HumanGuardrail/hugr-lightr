@@ -55,7 +55,9 @@ pub(super) use env_instr::{arg, env, label};
 // in a sibling file (godfile cap), re-exported here.
 #[path = "exec_instr_cfg.rs"]
 mod cfg;
-pub(super) use cfg::{cmd, entrypoint, expose, stopsignal, user, volume, workdir};
+pub(super) use cfg::{
+    cmd, entrypoint, expose, healthcheck, onbuild, stopsignal, user, volume, workdir,
+};
 
 /// The default SHELL for shell-form RUN/ENTRYPOINT/CMD (Docker's default
 /// `["/bin/sh","-c"]`). SHELL state is per-stage and resets to this at FROM.
