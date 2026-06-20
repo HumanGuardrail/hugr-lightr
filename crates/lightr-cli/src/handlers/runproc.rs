@@ -114,11 +114,12 @@ pub fn query_top(_pid: i32) -> Vec<TopRow> {
     Vec::new()
 }
 
-// ── pure parsers (cross-platform, directly tested) ─────────────────────────
+// ── pure ps-line parsers (unix-only — consumed by the unix `ps` path) ───────
 
 /// Parse a `ps -o pid,pcpu,pmem,rss,comm` data line. Whitespace-split on the
 /// first four columns; `comm` is the remainder (a path may contain spaces only
 /// in pathological cases — `comm` is the basename/exec path, joined verbatim).
+#[cfg(unix)]
 pub fn parse_stats_line(line: &str) -> Option<ProcStat> {
     let mut it = line.split_whitespace();
     let pid = it.next()?.parse::<i32>().ok()?;
@@ -137,6 +138,7 @@ pub fn parse_stats_line(line: &str) -> Option<ProcStat> {
 
 /// Parse a `ps -o pid,user,time,command` data line. First three columns are
 /// fixed; `command` (which contains spaces) is the remainder.
+#[cfg(unix)]
 pub fn parse_top_line(line: &str) -> Option<TopRow> {
     let mut it = line.split_whitespace();
     let pid = it.next()?.parse::<i32>().ok()?;
@@ -157,6 +159,7 @@ pub fn parse_top_line(line: &str) -> Option<TopRow> {
 /// `ps` formats floats per the C locale of the host, which on some systems uses
 /// a comma decimal separator (`0,0`). Normalize before parsing so we never drop
 /// a valid sample to a parse error.
+#[cfg(unix)]
 fn parse_locale_f64(s: &str) -> Option<f64> {
     s.replace(',', ".").parse::<f64>().ok()
 }
@@ -180,6 +183,8 @@ pub fn short_id(id: &str) -> String {
     id.chars().take(12).collect()
 }
 
-#[cfg(test)]
+// Tests cover the unix-only ps-line parsers + the cross-platform formatters;
+// gated to unix since the parsers are cfg(unix) (formatters are covered here too).
+#[cfg(all(test, unix))]
 #[path = "runproc_tests.rs"]
 mod tests;
