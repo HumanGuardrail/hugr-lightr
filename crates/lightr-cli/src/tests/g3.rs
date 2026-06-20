@@ -212,6 +212,8 @@ fn run_bad_engine_string_rejected_at_handler() {
         None,
         &[],
         &[],
+        &[],  // env_set (WP-RC-1)
+        None, // env_file (WP-RC-1)
         &crate::handlers::run::HealthFlags::default(),
     );
     assert_eq!(code, 2, "bad engine string must exit 2");

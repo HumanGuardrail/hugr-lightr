@@ -66,6 +66,10 @@ pub(crate) fn start_service_detached(
         secrets: to_store_files(&svc.secrets),
         configs: to_store_files(&svc.configs),
         ports: Vec::new(),
+        // WP-RC-1 (R-KEY): compose service env is the UNKEYED DISCOVERY channel
+        // (env_keys + child_env below) — it must NOT enter env_explicit, the
+        // keyed user `-e`/`--env-file` channel. Left empty by design.
+        env_explicit: Vec::new(),
     };
 
     let mut child_env: Vec<(String, String)> = svc.env.clone();
