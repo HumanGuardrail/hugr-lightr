@@ -173,9 +173,8 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             None,
             &[],
             &[],
-            None,
-            30,
-            3,
+            // WP-RC-4: the docker-translation path configures no healthcheck.
+            &crate::handlers::run::HealthFlags::default(),
         )
     } else if is_known_ref {
         // is_known_ref && cmd_args.is_empty()
@@ -209,9 +208,8 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             None,
             &[],
             &[],
-            None,
-            30,
-            3,
+            // WP-RC-4: the docker-translation path configures no healthcheck.
+            &crate::handlers::run::HealthFlags::default(),
         )
     }
 }

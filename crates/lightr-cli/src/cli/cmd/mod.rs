@@ -109,12 +109,22 @@ pub(crate) enum Cmd {
         /// Healthcheck command (probed when detached) — F-309
         #[arg(long, value_name = "CMD")]
         health_cmd: Option<String>,
-        /// Healthcheck interval in seconds — F-309
+        /// Healthcheck interval in seconds (docker --health-interval) — F-309
         #[arg(long, default_value_t = 30)]
         health_interval: u64,
-        /// Healthcheck retries before Unhealthy — F-309
+        /// Healthcheck per-probe timeout in seconds (docker --health-timeout) — WP-RC-4
+        #[arg(long, default_value_t = 30)]
+        health_timeout: u64,
+        /// Grace window after start before failures count (docker
+        /// --health-start-period), in seconds — WP-RC-4
+        #[arg(long, default_value_t = 0)]
+        health_start_period: u64,
+        /// Healthcheck retries before Unhealthy (docker --health-retries) — F-309
         #[arg(long, default_value_t = 3)]
         health_retries: u32,
+        /// Disable any healthcheck for this run (docker --no-healthcheck) — WP-RC-4
+        #[arg(long)]
+        no_healthcheck: bool,
         // ── Docker-parity run flags (CLI-surface freeze; behavior per WP-RUNFLAGS) ──
         /// Assign a name to the container (docker --name)
         #[arg(long)]
