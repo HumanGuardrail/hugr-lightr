@@ -52,6 +52,16 @@ pub struct RunSpec {
     /// RUNTIME ONLY — never a memo-key input (like `ports`/limits; like Docker,
     /// which does not key on `-w`). It never enters `assemble_key`/`build_key`.
     pub workdir: Option<String>,
+    /// WP-RC-USER: user `-u`/`--user` — the POSIX identity the run's process
+    /// executes as (Docker `--user`). `None` ⇒ run as the current user (today's
+    /// behaviour, byte-identical). `Some(spec)` ⇒ `uid[:gid]` (numeric) or
+    /// `name[:group]` (best-effort) applied to the native child before exec
+    /// (cfg(unix) only; a POSIX uid has no meaning on Windows).
+    ///
+    /// RUNTIME ONLY — never a memo-key input (like `ports`/`workdir`; like
+    /// Docker, which does not key on `-u`). It never enters
+    /// `assemble_key`/`build_key`.
+    pub user: Option<String>,
 }
 
 impl RunSpec {

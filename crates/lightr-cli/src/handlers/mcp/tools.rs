@@ -177,6 +177,9 @@ pub(super) fn handle_tools_call(id: Value, params: &Value) -> Value {
                 // WP-RC-WORKDIR: the MCP run tool has no `-w` → `None` (runs in
                 // cwd; workdir is RUNTIME, not a memo-key input).
                 workdir: None,
+                // WP-RC-USER (NON-OWNED site, set None): the MCP run tool has no
+                // `-u` → `None` (current user; user is RUNTIME, not keyed).
+                user: None,
             };
             match run_memoized(&spec, &store) {
                 Ok(outcome) => {

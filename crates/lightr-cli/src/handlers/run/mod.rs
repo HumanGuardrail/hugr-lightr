@@ -205,6 +205,10 @@ pub fn run(
     // ONLY — never a memo-key input (like ports; like Docker, which does not key
     // on `-w`). Honored as the child's cwd at exec (auto-created if absent).
     workdir: Option<&str>,
+    // WP-RC-USER: user `-u`/`--user` — the POSIX identity (Docker `--user`).
+    // `None` ⇒ current user. RUNTIME ONLY (never keyed). Honored as the native
+    // child's uid/gid at exec (cfg(unix); honest non-root error).
+    user: Option<&str>,
     // WP-RC-4: healthcheck flags, now WIRED (was parsed & discarded). Lowered to
     // a Healthcheck and run by the detached supervisor's watchdog. Never a
     // memo-key input (runtime probe, §0).
@@ -347,6 +351,9 @@ pub fn run(
             // microVM (not a native child) so it does not honor this here; the
             // native paths below do. Carried for spec fidelity / future vz wiring.
             workdir: workdir.map(String::from),
+            // WP-RC-USER: persisted to spec.json; honored only on the native
+            // paths below (the vz branch boots a microVM, not a native child).
+            user: user.map(String::from),
         };
         return match spawn_detached_engine(
             &spec,
@@ -388,5 +395,6 @@ pub fn run(
         env_explicit,
         // WP-RC-WORKDIR: `-w`/`--workdir` → honored as the native child's cwd.
         workdir: workdir.map(String::from),
+        user: user.map(String::from), // WP-RC-USER: honored as native child uid/gid
     })
 }

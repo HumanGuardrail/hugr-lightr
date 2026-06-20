@@ -44,9 +44,9 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
     // only the child process moves into the workdir.
     let run_cwd = super::spawn::resolve_workdir(&cwd, spec.workdir.as_deref())?;
 
-    // Spawn child
-    let mut child = std::process::Command::new(&spec.command[0])
-        .args(&spec.command[1..])
+    // Build child command
+    let mut cmd = std::process::Command::new(&spec.command[0]);
+    cmd.args(&spec.command[1..])
         .current_dir(&run_cwd)
         // WP-DISC: explicit per-child env (compose service discovery
         // <PEER>_HOST/<PEER>_PORT + the service's own env), plumbed through
@@ -54,9 +54,14 @@ pub fn supervise(dir: &std::path::Path) -> Result<i32> {
         // plain `lightr run -d` (byte-identical to before).
         .envs(spec.env.iter().cloned())
         .stdout(std::process::Stdio::from(stdout_log))
-        .stderr(std::process::Stdio::from(stderr_log))
-        .spawn()
-        .map_err(LightrError::Io)?;
+        .stderr(std::process::Stdio::from(stderr_log));
+    // WP-RC-USER: honor `-u`/`--user` (persisted to spec.json at spawn) as the
+    // detached child's POSIX identity (cfg(unix); None ⇒ no-op = current user,
+    // byte-identical to before; honest error otherwise/on windows).
+    super::spawn::apply_user(&mut cmd, spec.user.as_deref())?;
+
+    // Spawn child
+    let mut child = cmd.spawn().map_err(LightrError::Io)?;
 
     let child_pid = child.id() as i32;
 

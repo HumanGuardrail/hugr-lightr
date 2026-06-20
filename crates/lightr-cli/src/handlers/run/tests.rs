@@ -66,6 +66,7 @@ fn publish_without_detach_exits_2() {
         &[],  // env_set (WP-RC-1)
         None, // env_file (WP-RC-1)
         None, // workdir (WP-RC-WORKDIR)
+        None, // user (WP-RC-USER)
         &HealthFlags::default(),
     );
     assert_eq!(code, 2, "-p without -d must exit 2");
@@ -95,6 +96,7 @@ fn publish_on_engine_path_exits_2() {
         &[],  // env_set (WP-RC-1)
         None, // env_file (WP-RC-1)
         None, // workdir (WP-RC-WORKDIR)
+        None, // user (WP-RC-USER)
         &HealthFlags::default(),
     );
     assert_eq!(code, 2, "-p on the engine path must exit 2 (Phase 2)");
@@ -245,6 +247,7 @@ fn dash_e_runs_not_stubbed() {
         &["FOO=bar".to_string()], // env_set (WP-RC-1) — must NOT be stubbed
         None,                     // env_file
         None,                     // workdir (WP-RC-WORKDIR)
+        None,                     // user (WP-RC-USER)
         &HealthFlags::default(),
     );
     std::env::remove_var("LIGHTR_HOME");
@@ -299,6 +302,7 @@ fn dash_w_runs_not_stubbed_and_honored() {
         &[],            // env_set
         None,           // env_file
         Some("sub/wd"), // workdir (WP-RC-WORKDIR) — must NOT be stubbed
+        None,           // user (WP-RC-USER)
         &HealthFlags::default(),
     );
     std::env::remove_var("LIGHTR_HOME");
@@ -319,5 +323,69 @@ fn dash_w_runs_not_stubbed_and_honored() {
     assert_eq!(
         observed, expected,
         "the child must run with cwd == the resolved workdir"
+    );
+}
+
+// ── WP-RC-USER: `-u`/`--user` is WIRED (no longer the WP-RUNFLAGS stub) ──────
+
+/// A native run WITH `-u <current uid>` set actually RUNS (exit 0), proving
+/// `-u` was removed from the dispatch stub guard and flows through to
+/// RunSpec.user → honored as the child's uid (cfg(unix)). We use the CURRENT uid
+/// (read via `id -u`) so the kernel needs NO privilege to set it — this is the
+/// behavior-preserving honor path. (Pre-WP-RC-USER the guard returned the
+/// WP-RUNFLAGS stub, exit 1, the instant `-u` was set.) cfg(unix) so the windows
+/// gate — where `-u` is an honest error — never sees these bindings.
+#[cfg(unix)]
+#[test]
+fn dash_u_current_uid_runs_not_stubbed() {
+    let _env_guard = crate::test_lock::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    std::env::set_var("LIGHTR_HOME", tmp.path());
+
+    let work = tmp.path().join("work");
+    std::fs::create_dir_all(&work).expect("mkdir work");
+
+    // Read THIS process's uid so setting it requires no privilege (the faithful
+    // behavior-preserving path). `id -u` avoids a libc dependency for the test.
+    let uid = String::from_utf8(
+        std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .expect("id -u")
+            .stdout,
+    )
+    .expect("uid utf8");
+    let uid = uid.trim().to_string();
+
+    let code = run(
+        work.to_str().unwrap(),
+        &[],
+        &[],
+        &["true".to_string()],
+        false, // json
+        false, // explain
+        false, // detach
+        &[],   // publish
+        &[],   // mounts
+        "native",
+        None,       // rootfs
+        false,      // deep_memo
+        None,       // memory
+        None,       // cpus
+        &[],        // secrets
+        &[],        // configs
+        &[],        // env_set
+        None,       // env_file
+        None,       // workdir
+        Some(&uid), // user (WP-RC-USER) — must NOT be stubbed
+        &HealthFlags::default(),
+    );
+    std::env::remove_var("LIGHTR_HOME");
+
+    assert_eq!(
+        code, 0,
+        "a run with -u <current uid> must execute (exit 0), not the stub (exit 1)"
     );
 }

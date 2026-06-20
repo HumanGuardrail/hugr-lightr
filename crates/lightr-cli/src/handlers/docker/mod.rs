@@ -173,11 +173,10 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             None,
             &[],
             &[],
-            // WP-RC-1/WORKDIR: docker shim doesn't translate `-e`/`--env-file`/`-w` yet.
-            &[],
-            None,
-            None,
-            // WP-RC-4: the docker-translation path configures no healthcheck.
+            &[],  // env_set untranslated by the docker shim
+            None, // env_file
+            None, // workdir
+            None, // user (WP-RC-USER)
             &crate::handlers::run::HealthFlags::default(),
         )
     } else if is_known_ref {
@@ -212,11 +211,10 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             None,
             &[],
             &[],
-            // WP-RC-1/WORKDIR: docker shim doesn't translate `-e`/`--env-file`/`-w` yet.
-            &[],
-            None,
-            None,
-            // WP-RC-4: the docker-translation path configures no healthcheck.
+            &[],  // env_set untranslated by the docker shim
+            None, // env_file
+            None, // workdir
+            None, // user (WP-RC-USER)
             &crate::handlers::run::HealthFlags::default(),
         )
     }

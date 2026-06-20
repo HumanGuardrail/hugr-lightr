@@ -96,6 +96,11 @@ pub fn spawn_detached_engine(
         // `None` for runs with no `-w` ⇒ child runs in `cwd`, as before. RUNTIME
         // ONLY — never a memo-key input (detached runs aren't memoized anyway).
         workdir: spec.workdir.clone(),
+        // WP-RC-USER: persist `-u`/`--user` so the detached supervisor honors it
+        // as the native child's POSIX identity (`supervise` reads it back, sets
+        // uid/gid before exec). `None` for runs with no `-u` ⇒ child runs as the
+        // current user, as before. RUNTIME ONLY — never a memo-key input.
+        user: spec.user.clone(),
         // R-SPECDISK freeze-gate fields: defaults until the Wave-A/B WPs
         // populate them (no behaviour change here).
         ..Default::default()
@@ -169,5 +174,78 @@ pub(super) fn resolve_workdir(
             std::fs::create_dir_all(&dir).map_err(LightrError::Io)?;
             Ok(dir)
         }
+    }
+}
+
+/// WP-RC-USER: honor `-u`/`--user` on a native child `Command` before exec.
+///
+/// `user = None` ⇒ NO-OP (the child runs as the current user, byte-identical to
+/// before — behavior-preserving). `Some(spec)` is parsed as `uid[:gid]`
+/// (numeric — the faithful path) or `name[:group]` (best-effort numeric: a
+/// purely-numeric component is taken as an id; a NON-numeric name can't be
+/// resolved without the container's `/etc/passwd`, so it is an HONEST error
+/// rather than a silent fallback).
+///
+/// On unix, a parsed uid/gid is applied via `CommandExt::uid`/`gid`. Setting a
+/// uid/gid different from the current process's requires root; lightr's native
+/// runtime is NOT a root daemon (unlike Docker's), so the actual privilege check
+/// is deferred to the kernel at `spawn`/exec, which fails with `EPERM` — an
+/// HONEST error surfaced to the caller (never silently ignored).
+///
+/// On windows, a POSIX uid/gid has no meaning: `Some(_)` is an HONEST error and
+/// `None` is the unchanged no-op. The parsed `cmd`/`uid`/`gid` bindings are
+/// consumed under both cfgs (no unused-variable warning on the windows gate).
+pub(super) fn apply_user(cmd: &mut std::process::Command, user: Option<&str>) -> Result<()> {
+    let spec = match user {
+        None => return Ok(()),
+        Some(s) => s,
+    };
+
+    // Parse `id[:group]`. An empty spec is rejected (honest, not a silent no-op).
+    if spec.is_empty() {
+        return Err(LightrError::InvalidRef(
+            "invalid --user value: empty".to_string(),
+        ));
+    }
+    let (uid_part, gid_part) = match spec.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (spec, None),
+    };
+
+    let parse_id = |part: &str, which: &str| -> Result<u32> {
+        part.parse::<u32>().map_err(|_| {
+            LightrError::InvalidRef(format!(
+                "invalid --user {which} {part:?}: name resolution needs the container's \
+                 /etc/passwd — use a numeric uid[:gid] (the faithful native path)"
+            ))
+        })
+    };
+
+    let uid = parse_id(uid_part, "uid")?;
+    let gid = match gid_part {
+        Some(g) => Some(parse_id(g, "gid")?),
+        None => None,
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.uid(uid);
+        if let Some(gid) = gid {
+            cmd.gid(gid);
+        }
+        // The EPERM (setting a different uid as non-root) surfaces at spawn/exec
+        // as an honest io::Error — lightr native is not a root daemon.
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        // POSIX uid/gid has no meaning on windows. Consume the bindings so the
+        // windows clippy gate sees no unused variables, and fail HONESTLY.
+        let _ = (cmd, uid, gid);
+        Err(LightrError::InvalidRef(
+            "--user (POSIX uid/gid) is not supported on this host".to_string(),
+        ))
     }
 }
