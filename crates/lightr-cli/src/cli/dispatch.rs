@@ -244,8 +244,9 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                 file,
                 project_name,
                 eager,
+                profile,
                 ttl,
-            } => handlers::compose::up(&file, project_name.as_deref(), eager, ttl, json),
+            } => handlers::compose::up(&file, project_name.as_deref(), eager, &profile, ttl, json),
             ComposeCmd::Down { file, project_name } => {
                 handlers::compose::down(file.as_deref(), project_name.as_deref())
             }
