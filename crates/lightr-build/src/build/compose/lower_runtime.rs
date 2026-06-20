@@ -43,20 +43,34 @@ pub(super) fn lower_stop_signal(def: &ServiceDef, _svc: &mut Service) {
     let _ = &def.stop_signal;
 }
 
-/// `init`: run a PID-1 reaper inside the container. Stub — not wired yet.
-pub(super) fn lower_init(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.init;
+/// `init`: run a PID-1 reaper inside the container.
+///
+/// WP-CMP-CONFIG-LOWER: copies the compose `init:` bool onto `svc.init`; the
+/// supervisor threads it into `RunSpec.init` (RC-SEAM). Absent ⇒ `false` ⇒ no
+/// init process (today's behavior).
+pub(super) fn lower_init(def: &ServiceDef, svc: &mut Service) {
+    svc.init = def.init.unwrap_or(false);
 }
 
-/// `tty`: allocate a TTY. Stub — not wired yet.
-pub(super) fn lower_tty(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.tty;
+/// `tty`: allocate a TTY.
+///
+/// WP-CMP-CONFIG-LOWER: copies the compose `tty:` bool onto `svc.tty`; the
+/// supervisor threads it into `RunSpec.tty` (RC-SEAM). Absent ⇒ `false` ⇒ no
+/// TTY (today's behavior).
+pub(super) fn lower_tty(def: &ServiceDef, svc: &mut Service) {
+    svc.tty = def.tty.unwrap_or(false);
 }
 
-/// `container_name`: explicit container name override. Stub — Lightr derives the
-/// runtime name from the project + service today.
-pub(super) fn lower_container_name(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.container_name;
+/// `container_name`: explicit container name override.
+///
+/// WP-CMP-CONFIG-LOWER: copies the compose `container_name:` string onto
+/// `svc.container_name`; the supervisor uses it as the run-dir name at the spawn
+/// site (`prepare_service_cwd`). Absent ⇒ `None` ⇒ Lightr derives the run name
+/// from the service name (today's behavior). The compose service NAME
+/// (depends_on edges, discovery keys, peer matching) is unchanged — only the
+/// materialized run dir is renamed.
+pub(super) fn lower_container_name(def: &ServiceDef, svc: &mut Service) {
+    svc.container_name = def.container_name.clone();
 }
 
 /// `working_dir`: process working directory.

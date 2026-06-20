@@ -155,6 +155,15 @@ pub fn compose_up(
             mem_limit_bytes: s.mem_limit_bytes,
             cpu_limit_millis: s.cpu_limit_millis,
             replicas: s.replicas,
+            // WP-CMP-CONFIG-LOWER: carry the lowered runtime config (init/tty/
+            // privileged/cap_add/cap_drop/container_name) through the on-disk
+            // spec so the supervisor can set them on the spawned RunSpec.
+            init: s.init,
+            tty: s.tty,
+            privileged: s.privileged,
+            cap_add: s.cap_add.clone(),
+            cap_drop: s.cap_drop.clone(),
+            container_name: s.container_name.clone(),
         })
         .collect();
 

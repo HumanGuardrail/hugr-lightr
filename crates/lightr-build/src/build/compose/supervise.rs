@@ -20,7 +20,11 @@ pub(crate) use super::supervise_deps::{dep_condition_met, dep_run_dir};
 /// Prepare a clean per-service run directory and, if the service declares an
 /// `image_ref`, hydrate that ref's filesystem into it.
 pub(crate) fn prepare_service_cwd(svc: &ServiceSpec, store: &Store) -> Result<PathBuf> {
-    let cwd = std::env::temp_dir().join(format!("lightr-svc-{}", svc.name));
+    // WP-CMP-CONFIG-LOWER: an explicit `container_name:` overrides the run-dir
+    // name; absent ⇒ the service name (today's behavior). Only the materialized
+    // dir is renamed — depends_on/discovery still key on `svc.name`.
+    let run_name = svc.container_name.as_deref().unwrap_or(&svc.name);
+    let cwd = std::env::temp_dir().join(format!("lightr-svc-{run_name}"));
     if cwd.exists() {
         std::fs::remove_dir_all(&cwd).map_err(LightrError::Io)?;
     }
@@ -124,8 +128,16 @@ pub(crate) fn start_service_detached(
         user: svc.user.clone(),
         restart: svc.restart.clone(),
         stop_signal: None, // WP-RC-STOPSIGNAL (NON-OWNED): compose stop_signal lowering is WP-RUNFLAGS' job.
-        // RC-SEAM-FREEZE (NON-OWNED site): compose lowering of the new RC fields is
-        // a future WP's job → no-op defaults here (RUNTIME-ONLY, never keyed).
+        // WP-CMP-CONFIG-LOWER: the RC-SEAM RunSpec fields lowered from the compose
+        // service (init/tty/privileged/cap_add/cap_drop). All RUNTIME-ONLY (never
+        // keyed). Absent on the service ⇒ false/empty here ⇒ today's behavior.
+        init: svc.init,
+        tty: svc.tty,
+        privileged: svc.privileged,
+        cap_add: svc.cap_add.clone(),
+        cap_drop: svc.cap_drop.clone(),
+        // RC-SEAM-FREEZE (NON-OWNED site): remaining new RC fields (hostname/
+        // labels/read_only/...) are future WPs' jobs → no-op defaults here.
         ..Default::default()
     };
 
