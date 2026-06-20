@@ -111,3 +111,36 @@ fn stop_signal_excluded_from_key() {
     let k1 = build_key(&spec_with_sig).expect("k1").0;
     assert_eq!(k0, k1, "stop_signal must NOT affect the memo key");
 }
+
+// RC-SEAM-FREEZE: every new RC carry-field is RUNTIME (Docker keys on none of
+// them). A spec differing ONLY in these fields must key IDENTICALLY — proving
+// the freeze left the memo key UNTOUCHED.
+#[test]
+fn rc_seam_carry_fields_excluded_from_key() {
+    let (_home, _env_guard) = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path();
+    fs::write(cwd.join("f.txt"), b"data").unwrap();
+
+    let base = make_spec(cwd, vec!["/bin/echo", "x"]);
+    let k_base = build_key(&base).expect("k_base").0;
+
+    let mut full = make_spec(cwd, vec!["/bin/echo", "x"]);
+    full.hostname = Some("h".to_string());
+    full.labels = vec![("k".to_string(), "v".to_string())];
+    full.cap_add = vec!["NET_ADMIN".to_string()];
+    full.cap_drop = vec!["MKNOD".to_string()];
+    full.privileged = true;
+    full.tty = true;
+    full.init = true;
+    full.read_only = true;
+    full.oom_score_adj = Some(-500);
+    full.pids_limit = Some(64);
+    full.shm_size = Some(67_108_864);
+
+    let k_full = build_key(&full).expect("k_full").0;
+    assert_eq!(
+        k_base, k_full,
+        "the RC-seam carry-fields must NOT affect the memo key (all RUNTIME-only)"
+    );
+}

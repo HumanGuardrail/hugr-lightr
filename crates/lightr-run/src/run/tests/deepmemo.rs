@@ -50,6 +50,7 @@ fn deep_memo_disabled_equals_run_memoized() {
         user: None,
         restart: None,
         stop_signal: None,
+        ..Default::default()
     };
     let cfg = DeepMemoConfig { enabled: false };
 
@@ -130,6 +131,7 @@ fn deep_memo_enabled_fallback_correctness() {
         user: None,
         restart: None,
         stop_signal: None,
+        ..Default::default()
     };
     let cfg_on = DeepMemoConfig { enabled: true };
 

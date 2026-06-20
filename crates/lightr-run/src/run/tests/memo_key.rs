@@ -36,6 +36,7 @@ pub(super) fn make_spec(cwd: &std::path::Path, command: Vec<&str>) -> RunSpec {
         user: None,
         restart: None,
         stop_signal: None,
+        ..Default::default()
     }
 }
 
@@ -124,6 +125,7 @@ fn key_changes_when_selected_env_changes() {
         user: None,
         restart: None,
         stop_signal: None,
+        ..Default::default()
     };
     let k1 = build_key(&spec1).expect("k1");
 
@@ -164,6 +166,7 @@ fn predict_miss_run_hit() {
         user: None,
         restart: None,
         stop_signal: None,
+        ..Default::default()
     };
 
     let (key1, hit1) = predict(&spec, &store).expect("predict1");
