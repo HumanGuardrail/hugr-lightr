@@ -177,6 +177,15 @@ impl Store {
         store::imgmeta::image_manifest_get(&self.root, name)
     }
 
+    /// WP-IMG-03 (`oci tag`): copy the image sidecars (config + manifest) from
+    /// `src` to `dst`, sharing the underlying CAS blobs (no object duplication).
+    /// Each family is copied only if `src` has it (no-op otherwise); a corrupt
+    /// `src` sidecar is skipped (fail-soft). Last-write-wins on `dst`. Lets a
+    /// later faithful `oci push` of the alias reproduce the original image.
+    pub fn copy_image_sidecars(&self, src: &str, dst: &str) -> Result<()> {
+        store::imgmeta::copy_image_sidecars(&self.root, src, dst)
+    }
+
     /// WP-IMG-09 (R-IMGREC): every CAS digest kept alive by the image sidecars
     /// (`imgmanifest` record blobs + their config/layer descriptors + `imgmeta`
     /// config blobs). The gc mark-walk marks these reachable so it never reaps
