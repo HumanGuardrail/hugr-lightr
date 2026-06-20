@@ -3,6 +3,8 @@
 pub(crate) mod args;
 pub mod compose;
 pub(crate) mod exec;
+// Filesystem/CAS helpers split out of exec.rs (behavior-preserving, <400 LOC).
+pub(crate) mod exec_fs;
 // R-IMGCFG (parity-contract.md §0): ImageConfig sidecar + shared effective_argv.
 pub mod imgcfg;
 pub(crate) mod memo;
@@ -17,7 +19,8 @@ pub use compose::{
     ComposeSpec, EnvScalar, Environment, Healthcheck as ComposeServiceHealthcheck, Service,
     ServiceDef, ServiceSpec, StackSpec, StringOrList, OVERRIDE_FILENAMES,
 };
-pub use exec::{build, step_reads_clock_or_net, BuildReport};
+pub use exec::{build, BuildReport};
+pub use exec_fs::step_reads_clock_or_net;
 pub use imgcfg::{effective_argv, ImageConfig};
 pub use parse::{
     parse_dockerfile, parse_dockerfile_full, BuildStep, CmdForm, Directives, Healthcheck,
