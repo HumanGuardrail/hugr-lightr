@@ -83,6 +83,14 @@ pub(super) fn run_vz_memo(
             net: false,   // vz-memo path is non-detached + non-networked
             net_fd: None, // no mesh NIC on the memo path (ADR-0018)
             net_mac: None,
+            mounts: &[],
+            env: &[],
+            workdir: None,
+            user: None,
+            hostname: None,
+            add_host: &[],
+            dns: &[],
+            mesh_ip: None,
         };
         // Suppress the guest CONSOLE (kernel boot log + the exit marker) from
         // the host's stdout on a memo MISS: the command's real stdout/stderr
@@ -213,6 +221,14 @@ pub(super) fn run_engine(
         net: false,   // synchronous CLI engine path; networked vz is detached (supervisor)
         net_fd: None, // mesh NIC is wired by the supervisor path (ADR-0018), not here
         net_mac: None,
+        mounts: &[],
+        env: &[],
+        workdir: None,
+        user: None,
+        hostname: None,
+        add_host: &[],
+        dns: &[],
+        mesh_ip: None,
     };
 
     let code = match engine.run(&spec) {

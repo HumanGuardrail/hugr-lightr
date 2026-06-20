@@ -100,6 +100,63 @@ pub(super) struct MountOnDisk {
     pub target: String,
 }
 
+// R-MOUNT / R-SPECDISK (parity-contract.md §0): the go-forward, proto/kind-tagged
+// on-disk mount shape. Mirrors `run::mount::MountKind`. The legacy `MountOnDisk`
+// above stays for read back-compat; `MountOnDisk2` is what new spec.json writes.
+// `#[serde(tag = "kind")]` makes it a tagged enum on disk. PARSING/RESOLUTION
+// behaviour is WP-VOL-1's job — this only freezes the serialized SHAPE.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub(super) enum MountOnDisk2 {
+    CasRef {
+        ref_name: String,
+        target: String,
+        #[serde(default)]
+        readonly: bool,
+    },
+    HostBind {
+        source: String,
+        target: String,
+        #[serde(default)]
+        readonly: bool,
+    },
+    NamedVolume {
+        source: String,
+        target: String,
+        #[serde(default)]
+        readonly: bool,
+    },
+    AnonVolume {
+        target: String,
+        #[serde(default)]
+        readonly: bool,
+    },
+    Tmpfs {
+        target: String,
+        #[serde(default)]
+        opts: Vec<String>,
+    },
+}
+
+// R-SPECDISK (parity-contract.md §0): proto-tagged published-port shape. The
+// legacy `ports: Vec<(u16,u16)>` stays for read back-compat (TCP-only); `ports2`
+// carries the protocol so UDP can land without a second format bump. Behaviour
+// (binding UDP) is a Networking-axis WP's job.
+#[derive(Serialize, Deserialize)]
+pub(super) struct PortOnDisk {
+    pub host: u16,
+    pub container: u16,
+    /// `"tcp"` (default) or `"udp"`.
+    #[serde(default = "default_proto")]
+    pub proto: String,
+}
+
+/// Serde default for [`PortOnDisk::proto`] — TCP, matching the legacy
+/// `ports: Vec<(u16,u16)>` channel which was TCP-only.
+pub fn default_proto() -> String {
+    "tcp".to_string()
+}
+
 #[derive(Serialize, Deserialize)]
 pub(super) struct SpecOnDisk {
     pub cwd: String,
@@ -131,12 +188,97 @@ pub(super) struct SpecOnDisk {
     /// memoized anyway.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+
+    // ── R-SPECDISK (parity-contract.md §0) — additive Docker-parity fields. ──
+    // ALL `#[serde(default)]` for back-compat with spec.json written before the
+    // freeze-gate. The existing `env`/`mounts`/`ports` above are UNTOUCHED. The
+    // population + behaviour of every field below is a Wave-A/B WP's job; the
+    // freeze-gate only lands the SHAPE.
+    //
+    // LEAD ARBITRATION (env-split): `env` above stays the UNKEYED discovery
+    // channel; `env_explicit` below (user `-e`/`--env-file`) is the ONLY env
+    // that enters the memo key (R-KEY). Two distinct channels — never merged.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub rm: bool,
+    #[serde(default)]
+    pub restart: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<(String, String)>,
+    #[serde(default)]
+    pub workdir: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub entrypoint: Option<Vec<String>>,
+    /// User `-e`/`--env-file` env — the ONLY env in the memo key (R-KEY).
+    #[serde(default)]
+    pub env_explicit: Vec<(String, String)>,
+    #[serde(default)]
+    pub stop_signal: Option<String>,
+    #[serde(default)]
+    pub network: Option<String>,
+    #[serde(default)]
+    pub network_alias: Vec<String>,
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub add_host: Vec<(String, String)>,
+    #[serde(default)]
+    pub dns: Vec<String>,
+    /// Go-forward tagged mount shape (R-MOUNT). Legacy `mounts` above stays for
+    /// read back-compat.
+    #[serde(default)]
+    pub mounts2: Vec<MountOnDisk2>,
+    /// Go-forward proto-tagged port shape. Legacy `ports` above stays for read
+    /// back-compat (TCP-only).
+    #[serde(default)]
+    pub ports2: Vec<PortOnDisk>,
 }
 
 /// Serde default for [`SpecOnDisk::engine`] — the native supervisor branch, so a
 /// pre-WP-NET2 spec.json (no `engine` field) keeps its original behaviour.
 pub fn default_engine() -> String {
     "native".to_string()
+}
+
+// R-SPECDISK (parity-contract.md §0): a manual `Default` whose field values
+// MATCH the serde defaults exactly (notably `engine = "native"`, NOT the empty
+// string a derive would give). This lets every existing `SpecOnDisk { … }`
+// construction site append `..Default::default()` for the additive freeze-gate
+// fields without touching any field it already sets — zero behaviour change.
+impl Default for SpecOnDisk {
+    fn default() -> Self {
+        SpecOnDisk {
+            cwd: String::new(),
+            command: Vec::new(),
+            env_keys: Vec::new(),
+            mounts: Vec::new(),
+            detached: false,
+            created_at_unix: 0,
+            ports: Vec::new(),
+            engine: default_engine(),
+            rootfs_ref: None,
+            env: Vec::new(),
+            name: None,
+            rm: false,
+            restart: None,
+            labels: Vec::new(),
+            workdir: None,
+            user: None,
+            entrypoint: None,
+            env_explicit: Vec::new(),
+            stop_signal: None,
+            network: None,
+            network_alias: Vec::new(),
+            hostname: None,
+            add_host: Vec::new(),
+            dns: Vec::new(),
+            mounts2: Vec::new(),
+            ports2: Vec::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

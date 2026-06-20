@@ -1,6 +1,30 @@
 //! Memo key assembly and memoized run entry points:
 //! validate_mount_target, assemble_key, build_key, run_memoized,
 //! run_memoized_with, predict.
+//!
+//! # R-KEY partition (parity-contract.md §0) — DOCUMENTED here; behaviour is the WPs'
+//!
+//! The freeze-gate only DOCUMENTS the partition; key computation is UNCHANGED
+//! (the WPs implement it). The RUN-key domain partition the campaign enforces:
+//!
+//! - **IN the run key:** explicit env (`env_explicit`, folded `key=value\0`),
+//!   image ENV, CAS-ref content, ro-bind fingerprint. (Build-only inputs —
+//!   workdir/user/entrypoint-when-set + post-interpolation instruction text —
+//!   are keyed in the BUILD domain, not here.)
+//! - **OUT of the run key (runtime):** caps, restart, health, ports, labels,
+//!   network, tty, workdir/user/hostname at RUN time, and the discovery `env`
+//!   channel (LEAD ARBITRATION env-split: `env` is UNKEYED; only `env_explicit`
+//!   is keyed).
+//! - **NON-memoizable (force-MISS, no AC write):** rw-bind, named, anon, tmpfs
+//!   mounts.
+//!
+//! ## Per-domain v2 rule (LEAD ARBITRATION)
+//!
+//! The domain tag is bumped PER-KEY-DOMAIN, and ONLY when that key's input
+//! format changes. The RUN key STAYS `lightr/run/v1` (env format unchanged by
+//! the freeze-gate). The BUILD key bumps to `lightr/build/v2` at WP-DF-13 (when
+//! interp text + workdir/user/entrypoint enter it) — see build/memo.rs. Each
+//! bump is a documented one-time Action-Cache invalidation.
 
 use lightr_core::{Digest, LightrError, Result, OUTPUT_CAP_BYTES};
 use lightr_index::{scan, Index};
