@@ -25,6 +25,18 @@ pub struct PushReport {
     pub size: u64,
 }
 
+/// Result of a `save` (WP-IMG-04): where the tar was written (`-` for stdout),
+/// the layer count, the tar's total byte size, and whether the export was
+/// FAITHFUL (verbatim from a retained record) or a SYNTHESIZED single-layer
+/// fallback (lossy — no record). The caller reports `faithful` honestly.
+#[derive(Debug)]
+pub struct SaveReport {
+    pub destination: String,
+    pub layers: u64,
+    pub size: u64,
+    pub faithful: bool,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // JSON shapes for OCI index / manifest
 // ─────────────────────────────────────────────────────────────────────────────
