@@ -1,6 +1,7 @@
 //! OCI submodule tree. All implementation lives here; `crate::lib` re-exports
 //! the public surface.
 
+pub(crate) mod history;
 pub(crate) mod http;
 pub(crate) mod images;
 pub(crate) mod import;

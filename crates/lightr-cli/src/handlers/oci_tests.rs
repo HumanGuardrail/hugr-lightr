@@ -235,3 +235,29 @@ fn rmi_absent_ref_exits_2() {
     std::env::remove_var("LIGHTR_HOME");
     assert_eq!(code, 2, "absent ref → No such image → exit 2");
 }
+
+// ── WP-IMG-08: oci history ────────────────────────────────────────────────────
+//
+// Substantive behaviour (created-by/size/<missing>, newest-first, no-provenance
+// error) is covered parallel-safely in lightr-oci's history_tests against an
+// injected store. Here we only smoke the handler's name-validation + default-root
+// wiring: a bad ref exits 2 before any store open; an absent (but valid) ref
+// exits 2 via RefNotFound (requires LIGHTR_HOME ⇒ ENV_LOCK serialization).
+
+#[test]
+fn history_bad_ref_exits_2() {
+    let code = super::history("INVALID", false);
+    assert_eq!(code, 2, "bad ref name must exit 2 (no store opened)");
+}
+
+#[test]
+fn history_absent_ref_exits_2() {
+    let _guard = crate::test_lock::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::env::set_var("LIGHTR_HOME", tmp.path());
+    let code = super::history("@t/never", false);
+    std::env::remove_var("LIGHTR_HOME");
+    assert_eq!(code, 2, "absent ref → RefNotFound → exit 2");
+}
