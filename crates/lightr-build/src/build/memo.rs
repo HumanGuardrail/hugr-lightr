@@ -79,7 +79,7 @@ pub(crate) fn canonical_step_text(
 
 /// Compute `step_key = BLAKE3(BUILD_KEY_DOMAIN | prev_root_bytes |
 /// post_interpolation_text | [for shell-form RUN: the active SHELL] |
-/// [for COPY: each file's digest])`.
+/// [for COPY: each file's digest, then --chown/--chmod when present])`.
 ///
 /// `scope` + `escape` interpolate the instruction text BEFORE hashing (Docker
 /// resolves `${VAR}` at build time; the cache key must reflect the resolved
@@ -129,10 +129,35 @@ pub(crate) fn step_key(
     // dir (e.g. `COPY src/ /app`) invalidates the cache. Symlinks contribute
     // their target. Missing sources contribute a sentinel (so add/remove of a
     // source also changes the key).
-    if let Instr::Copy { src, .. } = &step.instr {
+    if let Instr::Copy {
+        src, chown, chmod, ..
+    } = &step.instr
+    {
         for s in src {
             let src_path = context_dir.join(s);
             hash_copy_source(&mut hasher, &src_path)?;
+        }
+        // WP-DF-06: --chown/--chmod change the COPY OUTPUT (file mode/owner) but
+        // are NOT part of the source content the loop above hashes. Two COPYs of
+        // the same bytes with different --chmod/--chown produce different layers,
+        // so the flags MUST enter the key — else the second would FALSELY hit the
+        // first's cached layer (wrong mode/owner).
+        //
+        // The flags' POST-INTERPOLATION text already enters the key via
+        // `canonical_step_text` (the flags live in `step.raw`). This explicit
+        // fold is the LOCAL, refactor-proof guarantee the contract requires: it
+        // pins the no-false-hit invariant to THIS block rather than to how the
+        // raw line happens to be composed. Folded with the SAME interpolated
+        // value that `exec_instr::copy` applies, ONLY when the flag is present,
+        // each under its own NUL-delimited separator — so a flagless
+        // `COPY src dest` keys BYTE-IDENTICALLY to before this WP (no cache bust).
+        if let Some(c) = chown {
+            hasher.update(b"\x00chown\x00");
+            hasher.update(interpolate(c, scope, escape)?.as_bytes());
+        }
+        if let Some(c) = chmod {
+            hasher.update(b"\x00chmod\x00");
+            hasher.update(interpolate(c, scope, escape)?.as_bytes());
         }
     }
     Ok(Digest(*hasher.finalize().as_bytes()))
