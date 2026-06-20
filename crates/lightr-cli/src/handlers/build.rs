@@ -97,7 +97,7 @@ pub fn run(
         if let Ok(text) = std::fs::read_to_string(dockerfile_path) {
             if let Ok(steps) = parse_dockerfile(&text) {
                 for (i, step) in steps.iter().enumerate() {
-                    if let Instr::Run { argv } = &step.instr {
+                    if let Instr::Run { argv, .. } = &step.instr {
                         if step_reads_clock_or_net(argv) {
                             eprintln!(
                                 "lightr: build --explain: step {}: RUN reads clock/net — not reproducible: {:?}",
