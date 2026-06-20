@@ -190,3 +190,117 @@ fn build_with_config_instructions_does_not_error() {
         report.err()
     );
 }
+
+// ---- WP-DF-HEALTHCHECK-ONBUILD --------------------------------------------
+
+#[test]
+fn records_healthcheck_cmd_with_opts() {
+    // HEALTHCHECK [opts] CMD <shell-form> → OCI shape: test = ["CMD-SHELL", cmd],
+    // opts kept as raw token text. Was the fail-closed "unsupported" path.
+    let f = fix();
+    let cfg = build_and_load(
+        &f,
+        "imgcfg-hc-cmd",
+        "FROM scratch\n\
+         HEALTHCHECK --interval=30s --timeout=5s --start-period=2s --retries=3 \
+         CMD curl -f http://localhost/\n",
+    );
+    let hc = cfg.healthcheck.expect("HEALTHCHECK must be recorded");
+    assert_eq!(
+        hc.test,
+        vec![
+            "CMD-SHELL".to_string(),
+            "curl -f http://localhost/".to_string()
+        ],
+        "shell-form CMD ⇒ CMD-SHELL test"
+    );
+    assert_eq!(hc.interval.as_deref(), Some("30s"));
+    assert_eq!(hc.timeout.as_deref(), Some("5s"));
+    assert_eq!(hc.start_period.as_deref(), Some("2s"));
+    assert_eq!(hc.retries.as_deref(), Some("3"));
+}
+
+#[test]
+fn records_healthcheck_cmd_exec_form() {
+    // Exec-form CMD → test = ["CMD", <argv>...]; absent opts stay None.
+    let f = fix();
+    let cfg = build_and_load(
+        &f,
+        "imgcfg-hc-exec",
+        "FROM scratch\nHEALTHCHECK CMD [\"/bin/check\", \"--fast\"]\n",
+    );
+    let hc = cfg.healthcheck.expect("HEALTHCHECK must be recorded");
+    assert_eq!(
+        hc.test,
+        vec![
+            "CMD".to_string(),
+            "/bin/check".to_string(),
+            "--fast".to_string()
+        ]
+    );
+    assert!(hc.interval.is_none() && hc.retries.is_none());
+}
+
+#[test]
+fn records_healthcheck_none_as_disabled() {
+    // HEALTHCHECK NONE → test = ["NONE"] (explicitly disabled / drop inherited).
+    let f = fix();
+    let cfg = build_and_load(&f, "imgcfg-hc-none", "FROM scratch\nHEALTHCHECK NONE\n");
+    let hc = cfg.healthcheck.expect("HEALTHCHECK NONE must be recorded");
+    assert_eq!(hc.test, vec!["NONE".to_string()], "NONE ⇒ disabled marker");
+}
+
+#[test]
+fn records_onbuild_triggers_verbatim() {
+    // ONBUILD triggers are recorded VERBATIM (keyword stripped), in order, and
+    // accumulate. Trigger-execution on derived builds is a flagged follow-up.
+    let f = fix();
+    let cfg = build_and_load(
+        &f,
+        "imgcfg-onbuild",
+        "FROM scratch\n\
+         ONBUILD COPY . /app\n\
+         ONBUILD RUN make build\n",
+    );
+    assert_eq!(
+        cfg.onbuild,
+        vec!["COPY . /app".to_string(), "RUN make build".to_string()],
+        "ONBUILD triggers recorded verbatim, in order"
+    );
+}
+
+#[test]
+fn healthcheck_and_onbuild_no_longer_unsupported() {
+    // Before this WP, HEALTHCHECK/ONBUILD routed to the "unsupported instruction"
+    // error — a Dockerfile using them failed to build. Now they record + build.
+    let f = fix();
+    let df_path = f.ctx_path.join("Dockerfile");
+    std::fs::write(
+        &df_path,
+        "FROM scratch\nHEALTHCHECK NONE\nONBUILD RUN echo deferred\n",
+    )
+    .unwrap();
+    let report = build(
+        &f.ctx_path,
+        &df_path,
+        "imgcfg-hc-ob-noerr",
+        lightr_engine::EngineKind::Native,
+        &f.store,
+        &[],
+    );
+    assert!(
+        report.is_ok(),
+        "HEALTHCHECK/ONBUILD must build (not 'unsupported'): {:?}",
+        report.err()
+    );
+}
+
+#[test]
+fn config_less_image_has_no_healthcheck_or_onbuild() {
+    // Behaviour-preserved: a Dockerfile WITHOUT HEALTHCHECK/ONBUILD records
+    // neither (None / empty) — builds identically to before this WP.
+    let f = fix();
+    let cfg = build_and_load(&f, "imgcfg-no-hc-ob", "FROM scratch\nENV ONLY=env\n");
+    assert!(cfg.healthcheck.is_none(), "no HEALTHCHECK ⇒ None");
+    assert!(cfg.onbuild.is_empty(), "no ONBUILD ⇒ empty");
+}

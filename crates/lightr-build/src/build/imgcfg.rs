@@ -21,6 +21,30 @@ use std::path::Path;
 /// pre-WP `load_meta` reader). The single canonical sidecar filename.
 pub const IMAGE_CONFIG_FILE: &str = ".lightr-image.json";
 
+/// The OCI image-config `Healthcheck` shape (WP-DF-HEALTHCHECK-ONBUILD).
+///
+/// Mirrors the OCI/Docker `Config.Healthcheck`: `test` is the test argv with a
+/// leading mode token — `["NONE"]` (disabled, from `HEALTHCHECK NONE`),
+/// `["CMD", <argv>...]` (exec form), or `["CMD-SHELL", <command>]` (shell form).
+/// The duration/count opts are kept as their raw Dockerfile token text
+/// (faithful, un-interpreted — `30s`, `5m`, `3`), the same way the parser keeps
+/// them; `None` means "unset, inherit the Docker default". Every field is
+/// `#[serde(default)]` so a partial/older sidecar round-trips.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageHealthcheck {
+    /// The test argv: `["NONE"]`, `["CMD", ...]`, or `["CMD-SHELL", <cmd>]`.
+    #[serde(default)]
+    pub test: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_period: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<String>,
+}
+
 /// The full image config sidecar (Docker `ImageConfig` parity). Every field is
 /// `#[serde(default)]` so a partial sidecar (or an older one) round-trips. The
 /// freeze-gate freezes the shape; the WPs populate/consume the richer fields.
@@ -43,7 +67,7 @@ pub struct ImageConfig {
     #[serde(default)]
     pub labels: Vec<(String, String)>,
     #[serde(default)]
-    pub healthcheck: Option<Vec<String>>,
+    pub healthcheck: Option<ImageHealthcheck>,
     #[serde(default)]
     pub stop_signal: Option<String>,
     #[serde(default)]

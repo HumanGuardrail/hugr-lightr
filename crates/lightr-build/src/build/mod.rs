@@ -28,7 +28,7 @@ pub use compose::{
 };
 pub use exec::{build, BuildReport};
 pub use exec_fs::step_reads_clock_or_net;
-pub use imgcfg::{effective_argv, ImageConfig};
+pub use imgcfg::{effective_argv, ImageConfig, ImageHealthcheck};
 pub use parse::{
     parse_dockerfile, parse_dockerfile_full, BuildStep, CmdForm, Directives, Healthcheck,
     HealthcheckOpts, Instr,
