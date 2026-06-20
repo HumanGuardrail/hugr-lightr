@@ -177,6 +177,7 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             None, // env_file
             None, // workdir
             None, // user (WP-RC-USER)
+            None, // restart (WP-RC-RESTART)
             &crate::handlers::run::HealthFlags::default(),
         )
     } else if is_known_ref {
@@ -215,6 +216,7 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             None, // env_file
             None, // workdir
             None, // user (WP-RC-USER)
+            None, // restart (WP-RC-RESTART)
             &crate::handlers::run::HealthFlags::default(),
         )
     }

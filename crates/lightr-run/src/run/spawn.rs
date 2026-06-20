@@ -101,6 +101,11 @@ pub fn spawn_detached_engine(
         // uid/gid before exec). `None` for runs with no `-u` ⇒ child runs as the
         // current user, as before. RUNTIME ONLY — never a memo-key input.
         user: spec.user.clone(),
+        // WP-RC-RESTART: persist `--restart` so the detached supervisor's
+        // re-spawn loop reads it back and applies the policy on child exit.
+        // `None` for runs with no `--restart` ⇒ the supervisor runs the child
+        // once and exits, as before. RUNTIME ONLY — never a memo-key input.
+        restart: spec.restart.clone(),
         // R-SPECDISK freeze-gate fields: defaults until the Wave-A/B WPs
         // populate them (no behaviour change here).
         ..Default::default()
