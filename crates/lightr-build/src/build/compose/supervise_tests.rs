@@ -24,6 +24,9 @@ fn svc_with_deps(name: &str, deps: Vec<(&str, DepCondition)>) -> ServiceSpec {
         working_dir: None,
         user: None,
         restart: None,
+        mem_limit_bytes: None,
+        cpu_limit_millis: None,
+        replicas: None,
     }
 }
 

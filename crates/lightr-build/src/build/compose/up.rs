@@ -150,6 +150,11 @@ pub fn compose_up(
             working_dir: s.working_dir.clone(),
             user: s.user.clone(),
             restart: s.restart.clone(),
+            // CMP-P1-DEPLOY: carry the deploy-derived caps + replica count so
+            // the supervisor can apply/note them at the spawn site.
+            mem_limit_bytes: s.mem_limit_bytes,
+            cpu_limit_millis: s.cpu_limit_millis,
+            replicas: s.replicas,
         })
         .collect();
 

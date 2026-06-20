@@ -22,6 +22,8 @@
 //!
 //! The `_` bindings below are deliberate: they document that the source field
 //! exists and is intentionally not yet consumed (no `#[allow(unused)]`, no debt).
+use lightr_core::ResourceLimits;
+
 use super::model::{DepCondition, Service};
 use super::spec::{DependsOn, ServiceDef};
 
@@ -59,10 +61,86 @@ pub(super) fn lower_depends_on(def: &ServiceDef, svc: &mut Service) {
     };
 }
 
-/// `deploy` (CMP-P1-DEPLOY-RES): replicas + resource limits + restart policy.
-/// Stub — no resource/replica slot in the runtime `Service` yet.
-pub(super) fn lower_deploy(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.deploy;
+/// Map a `deploy.restart_policy.condition` to the docker `restart:` policy
+/// string the run side parses (`lightr_run::restart::RestartPolicy::parse`).
+///
+/// Compose's deploy conditions are `any` / `on-failure` / `none`; docker's
+/// equivalent restart strings are `always` / `on-failure` / `no`. Returns
+/// `None` for an absent condition (no policy declared). An unrecognized
+/// condition is treated as `none` (fail-closed: run-once, never a surprise
+/// auto-restart from a typo).
+fn map_restart_condition(condition: Option<&str>) -> Option<String> {
+    match condition? {
+        "any" => Some("always".to_string()),
+        "on-failure" => Some("on-failure".to_string()),
+        "none" => Some("no".to_string()),
+        // Unknown condition ⇒ the safe compose default (no auto-restart).
+        _ => Some("no".to_string()),
+    }
+}
+
+/// CMP-P1-DEPLOY: lower the `deploy` block — `resources.limits` + `restart_policy`.
+///
+/// * `resources.limits.cpus` / `.memory` are parsed with the EXACT same grammar
+///   as `lightr run --cpus/--memory` ([`lightr_core::ResourceLimits::parse`]):
+///   memory accepts `k/K`,`m/M`,`g/G` suffixes or bare bytes; cpus is a float
+///   (1.0 = one core) stored as milli-CPUs. Parse errors are fail-closed
+///   (propagated), never silently dropped. The parsed caps are recorded on
+///   `svc.mem_limit_bytes` / `svc.cpu_limit_millis` and carried through the
+///   on-disk spec to the supervisor. They are NOT yet ENFORCED on the detached
+///   compose spawn path — that channel (`spawn_detached_engine` / `SpecOnDisk`)
+///   lives in `lightr-run`, which this WP does not own; the supervisor emits an
+///   honest once-note at the spawn site (follow-up WP), never a silent ignore.
+/// * `restart_policy.condition` (`any`/`on-failure`/`none`) is mapped to the
+///   docker restart string and written onto `svc.restart`. PRECEDENCE: when a
+///   `deploy.restart_policy.condition` is set it WINS over any top-level
+///   `restart:` (compose precedence); `lower_restart` defers to it.
+/// * `replicas` is OUT OF SCOPE (multi-instance spawn is a separate WP): the
+///   declared count is recorded on `svc.replicas` only so the spawn site can
+///   emit an honest "not yet honored" note for `replicas > 1`.
+///
+/// FAIL-CLOSED on a malformed limit: this aspect keeps the `(def, svc)` ⇒ `()`
+/// shape of the frozen `lower.rs` dispatch (it is not an owned file and its call
+/// site discards a return), so a `cpus`/`memory` that does not parse cannot be
+/// surfaced as a `Result` here. Rather than silently caching a bad value, the
+/// caps are written ONLY when [`ResourceLimits::parse`] accepts them; a parse
+/// failure is reported on stderr (naming the service + the rejected value) and
+/// the cap is left unset — honest (logged), never a silent wrong number.
+///
+/// No `deploy` block ⇒ no field touched ⇒ today's behavior (behavior-preserving).
+pub(super) fn lower_deploy(def: &ServiceDef, svc: &mut Service) {
+    let Some(deploy) = &def.deploy else {
+        return;
+    };
+
+    if let Some(limits) = deploy.resources.as_ref().and_then(|r| r.limits.as_ref()) {
+        // Transcribe the run-path parsing verbatim — same grammar.
+        match ResourceLimits::parse(limits.memory.as_deref(), limits.cpus.as_deref()) {
+            Ok(parsed) => {
+                svc.mem_limit_bytes = parsed.memory_bytes;
+                svc.cpu_limit_millis = parsed.cpu_millis;
+            }
+            Err(e) => {
+                eprintln!(
+                    "lightr compose: service {:?}: invalid deploy.resources.limits \
+                     (cpus={:?}, memory={:?}): {e}; limit not applied",
+                    svc.name, limits.cpus, limits.memory
+                );
+            }
+        }
+    }
+
+    if let Some(policy) = map_restart_condition(
+        deploy
+            .restart_policy
+            .as_ref()
+            .and_then(|p| p.condition.as_deref()),
+    ) {
+        // Deploy wins over top-level `restart:` (compose precedence).
+        svc.restart = Some(policy);
+    }
+
+    svc.replicas = deploy.replicas;
 }
 
 /// `networks` (CMP-P1-NETWORKS): service network attachments + aliases.
@@ -78,7 +156,21 @@ pub(super) fn lower_networks(def: &ServiceDef, _svc: &mut Service) {
 /// the detached re-spawn loop (WP-RC-RESTART). Absent ⇒ `None` ⇒ `no` policy
 /// (run once, today's behavior). The policy STRING is transcribed as-is; its
 /// parsing/semantics are the run side's law.
+///
+/// CMP-P1-DEPLOY precedence: a `deploy.restart_policy.condition` WINS over the
+/// top-level `restart:`. This defers to a deploy-declared policy (independent of
+/// the dispatch order in `lower.rs`): if `deploy.restart_policy.condition` is
+/// set, the top-level string is NOT applied.
 pub(super) fn lower_restart(def: &ServiceDef, svc: &mut Service) {
+    let deploy_sets_restart = def
+        .deploy
+        .as_ref()
+        .and_then(|d| d.restart_policy.as_ref())
+        .and_then(|p| p.condition.as_deref())
+        .is_some();
+    if deploy_sets_restart {
+        return;
+    }
     svc.restart = def.restart.clone();
 }
 
@@ -183,3 +275,9 @@ pub(super) fn lower_entrypoint(def: &ServiceDef, _svc: &mut Service) {
 pub(super) fn lower_profiles(def: &ServiceDef, svc: &mut Service) {
     svc.profiles = def.profiles.clone();
 }
+
+// CMP-P1-DEPLOY tests live in a sibling file (godfile headroom). House
+// convention — see network_tests.rs / imgmeta_tests.rs.
+#[cfg(test)]
+#[path = "lower_stubs_tests.rs"]
+mod tests;
