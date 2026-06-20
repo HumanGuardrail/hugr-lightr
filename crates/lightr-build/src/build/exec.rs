@@ -205,14 +205,19 @@ pub fn build(
                     }
                 }
             }
-            Instr::Env { key, val } => {
-                // ENV updates the scope: interpolate V with the CURRENT scope,
-                // then set scope.env[K] (Docker build-time semantics). The key
-                // is NOT interpolated (Docker treats ENV/ARG names literally).
-                let val = interpolate(val, &scope, escape)?;
-                accumulated_env.retain(|(k, _)| k != key);
-                accumulated_env.push((key.clone(), val.clone()));
-                scope.env.insert(key.clone(), val);
+            Instr::Env { pairs } => {
+                // ENV updates the scope for ALL pairs (WP-DF-05 multi-pair).
+                // Each value is interpolated against the scope AS IT EVOLVES
+                // left-to-right, so a later pair can reference an earlier one in
+                // the SAME instruction (Docker semantics). Keys are NOT
+                // interpolated (Docker treats ENV/ARG names literally). A
+                // single-pair `ENV K v` updates exactly one key, unchanged.
+                for (key, raw_val) in pairs {
+                    let val = interpolate(raw_val, &scope, escape)?;
+                    accumulated_env.retain(|(k, _)| k != key);
+                    accumulated_env.push((key.clone(), val.clone()));
+                    scope.env.insert(key.clone(), val);
+                }
                 let mut meta = load_meta(work_dir);
                 meta.env = accumulated_env.clone();
                 save_meta(work_dir, &meta)?;
@@ -233,11 +238,16 @@ pub fn build(
                 meta.cmd = Some(argv);
                 save_meta(work_dir, &meta)?;
             }
-            Instr::Label { key, val } => {
-                let val = interpolate(val, &scope, escape)?;
+            Instr::Label { pairs } => {
+                // LABEL records ALL pairs (WP-DF-05 multi-pair) into image
+                // metadata. Values are interpolated; labels are NOT build vars,
+                // so they do NOT update the VarScope (Docker semantics).
                 let mut meta = load_meta(work_dir);
-                meta.labels.retain(|(k, _)| k != key);
-                meta.labels.push((key.clone(), val));
+                for (key, raw_val) in pairs {
+                    let val = interpolate(raw_val, &scope, escape)?;
+                    meta.labels.retain(|(k, _)| k != key);
+                    meta.labels.push((key.clone(), val));
+                }
                 save_meta(work_dir, &meta)?;
             }
             Instr::Arg { .. } => {
@@ -299,3 +309,9 @@ fn instr_verb(instr: &Instr) -> &'static str {
 #[cfg(test)]
 #[path = "exec_tests.rs"]
 mod tests;
+
+// WP-DF-05 end-to-end tests live in a sibling file to keep each under the
+// 400-line godfile cap.
+#[cfg(test)]
+#[path = "exec_df05_tests.rs"]
+mod df05_tests;
