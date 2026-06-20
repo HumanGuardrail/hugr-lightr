@@ -254,6 +254,8 @@ fn supervisor_health_flips_unhealthy() {
         &healthcheck::Healthcheck {
             cmd: "exit 1".to_string(), // always fails ⇒ Unhealthy
             interval_s: 1,
+            timeout_s: 0,
+            start_period_s: 0,
             retries: 0,
         },
     )

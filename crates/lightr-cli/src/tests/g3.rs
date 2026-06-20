@@ -212,9 +212,7 @@ fn run_bad_engine_string_rejected_at_handler() {
         None,
         &[],
         &[],
-        None,
-        30,
-        3,
+        &crate::handlers::run::HealthFlags::default(),
     );
     assert_eq!(code, 2, "bad engine string must exit 2");
 }

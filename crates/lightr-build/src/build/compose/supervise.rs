@@ -84,6 +84,11 @@ pub(crate) fn start_service_detached(
         .map(|(cmd, interval_s, retries)| Healthcheck {
             cmd: cmd.clone(),
             interval_s: *interval_s,
+            // WP-RC-4: compose's healthcheck carries only cmd/interval/retries;
+            // the new per-probe timeout + start-period take Docker's defaults
+            // (30s / 0s) until compose surfaces them. Compile-driven touch only.
+            timeout_s: 30,
+            start_period_s: 0,
             retries: *retries,
         });
 

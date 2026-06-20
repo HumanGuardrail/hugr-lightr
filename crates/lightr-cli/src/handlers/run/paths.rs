@@ -10,9 +10,10 @@ use std::io::Write;
 use lightr_core::ResourceLimits;
 use lightr_engine::{engine_for, EngineKind, ExecSpec};
 use lightr_index;
+use lightr_run::healthcheck::Healthcheck;
 use lightr_run::{
-    run_memoized_deep, run_memoized_with, run_vz_memoized, spawn_detached, DeepMemoConfig, Mount,
-    PortMap, RunSpec, StoreFile, VzMemoKey,
+    run_memoized_deep, run_memoized_with, run_vz_memoized, spawn_detached,
+    spawn_detached_with_health, DeepMemoConfig, Mount, PortMap, RunSpec, StoreFile, VzMemoKey,
 };
 use lightr_store::Store;
 
@@ -261,6 +262,11 @@ pub(super) struct NativeRun<'a> {
     pub json: bool,
     pub deep_memo: bool,
     pub limits: ResourceLimits,
+    /// WP-RC-4: an optional healthcheck for the DETACHED native path. `None` for
+    /// every non-`-d` run (and when no `--health-cmd` is given), so the
+    /// foreground path is byte-identical to before. The supervisor owns the
+    /// watchdog; this only hands it the config.
+    pub healthcheck: Option<Healthcheck>,
 }
 
 pub(super) fn run_native_memo(req: NativeRun) -> i32 {
@@ -279,6 +285,7 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         json,
         deep_memo,
         limits,
+        healthcheck,
     } = req;
     let input_paths: Vec<std::path::PathBuf> = if inputs.is_empty() {
         vec![cwd.clone()]
@@ -308,9 +315,17 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         ports,
     };
 
-    // Detach path: spawn detached and print the run id
+    // Detach path: spawn detached and print the run id. WP-RC-4: when a
+    // healthcheck is configured, go through `spawn_detached_with_health` so the
+    // supervisor probes it; with no healthcheck this is the same call shape as
+    // before (`spawn_detached` == `_with_health(None)`), so the no-flags path is
+    // behavior-preserving.
     if detach {
-        match spawn_detached(&spec, store) {
+        let result = match healthcheck {
+            Some(ref hc) => spawn_detached_with_health(&spec, store, Some(hc)),
+            None => spawn_detached(&spec, store),
+        };
+        match result {
             Ok(handle) => {
                 println!("id={}", handle.id);
                 return 0;

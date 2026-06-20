@@ -29,6 +29,7 @@
 
 use lightr_core::{validate_ref_name, ResourceLimits};
 use lightr_engine::EngineKind;
+use lightr_run::healthcheck::Healthcheck;
 use lightr_run::{spawn_detached_engine, Mount, PortMap, RunSpec, StoreFile};
 use lightr_store::Store;
 use serde::Serialize;
@@ -140,6 +141,41 @@ pub(super) fn parse_publish(raw: &str) -> Result<PortMap, i32> {
     Ok(PortMap { host, container })
 }
 
+/// The `--health-*` CLI flags, bundled (WP-RC-4). Built from the parsed `Cmd`
+/// in dispatch and lowered to a [`Healthcheck`] by [`HealthFlags::build`].
+///
+/// `cmd == None` (no `--health-cmd`) OR `no_healthcheck == true` ⇒ no
+/// healthcheck (the latter is Docker's `--no-healthcheck`, which wins over any
+/// other `--health-*` flag). Otherwise the flags lower 1:1 to a [`Healthcheck`].
+#[derive(Clone, Debug, Default)]
+pub struct HealthFlags {
+    pub cmd: Option<String>,
+    pub interval: u64,
+    pub timeout: u64,
+    pub start_period: u64,
+    pub retries: u32,
+    pub no_healthcheck: bool,
+}
+
+impl HealthFlags {
+    /// Lower the flags to a [`Healthcheck`], or `None` when no healthcheck is
+    /// configured. `--no-healthcheck` disables unconditionally (Docker
+    /// semantics); a missing `--health-cmd` is also "no healthcheck".
+    pub fn build(&self) -> Option<Healthcheck> {
+        if self.no_healthcheck {
+            return None;
+        }
+        let cmd = self.cmd.clone()?;
+        Some(Healthcheck {
+            cmd,
+            interval_s: self.interval,
+            timeout_s: self.timeout,
+            start_period_s: self.start_period,
+            retries: self.retries,
+        })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     dir: &str,
@@ -158,11 +194,10 @@ pub fn run(
     cpus: Option<&str>,
     secrets_raw: &[String],
     configs_raw: &[String],
-    // Healthcheck flags are parsed at the CLI surface (A0.5) but the probe is
-    // wired by WP-A3; accepted here as an honest no-op so the surface is frozen.
-    _health_cmd: Option<&str>,
-    _health_interval: u64,
-    _health_retries: u32,
+    // WP-RC-4: healthcheck flags, now WIRED (was parsed & discarded). Lowered to
+    // a Healthcheck and run by the detached supervisor's watchdog. Never a
+    // memo-key input (runtime probe, §0).
+    health: &HealthFlags,
 ) -> i32 {
     // Parse engine kind — bad value ⇒ exit 2
     let engine_kind = match engine_str.parse::<EngineKind>() {
@@ -195,6 +230,21 @@ pub fn run(
     // Decide path: native + no rootfs ⇒ memoized path (unchanged R0/R1 behaviour).
     // Any other combination ⇒ engine path (NOT memoized, per §4).
     let use_engine_path = engine_kind != EngineKind::Native || rootfs_ref.is_some();
+
+    // ── WP-RC-4: lower the --health-* flags to a Healthcheck ───────────────────
+    // The healthcheck is a SUPERVISOR-owned watchdog: it only runs for detached
+    // (`-d`) runs (the supervisor probes on the interval and writes the verdict
+    // to <run_dir>/health for `ps`). For a non-detached run we have no
+    // supervisor, so a configured `--health-cmd` is honestly reported as
+    // supervisor-only rather than silently dropped — fail-open on the run itself
+    // (the command still runs), fail-loud on the unmet expectation.
+    let healthcheck = health.build();
+    if healthcheck.is_some() && !detach {
+        eprintln!(
+            "lightr: --health-cmd is wired for detached runs only (-d); the \
+             healthcheck watchdog is owned by the supervisor — running without it"
+        );
+    }
 
     // ── Networking Phase 1 policy (frozen, honest — enforce in this order) ────
     // These guards run BEFORE the engine-path early return below, so an
@@ -274,8 +324,14 @@ pub fn run(
             configs,
             ports,
         };
-        return match spawn_detached_engine(&spec, &store, None, EngineKind::Vz, Some(ref_name), &[])
-        {
+        return match spawn_detached_engine(
+            &spec,
+            &store,
+            healthcheck.as_ref(),
+            EngineKind::Vz,
+            Some(ref_name),
+            &[],
+        ) {
             Ok(handle) => {
                 println!("id={}", handle.id);
                 0
@@ -304,5 +360,6 @@ pub fn run(
         json,
         deep_memo,
         limits,
+        healthcheck,
     })
 }
