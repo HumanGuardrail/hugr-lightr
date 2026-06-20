@@ -78,9 +78,12 @@ pub(crate) fn start_service_detached(
         ports: Vec::new(),
         // WP-RC-1 (R-KEY): compose env is the UNKEYED discovery channel, NOT keyed.
         env_explicit: Vec::new(),
-        workdir: None, // compose working_dir lowering is a separate WP
-        user: None,    // WP-RC-USER (non-owned): compose `user` lowering is a separate WP
-        restart: None, // WP-RC-RESTART (non-owned): compose `restart` lowering is a separate WP
+        // CMP-LOWER-RUNCFG: lowered from the compose service (working_dir/user/
+        // restart). `None` for a service that declares none ⇒ today's behavior
+        // (run in cwd / current user / run-once).
+        workdir: svc.working_dir.clone(),
+        user: svc.user.clone(),
+        restart: svc.restart.clone(),
     };
 
     let mut child_env: Vec<(String, String)> = svc.env.clone();

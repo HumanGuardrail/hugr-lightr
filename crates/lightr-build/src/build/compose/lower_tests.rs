@@ -323,3 +323,29 @@ fn no_depends_on_lowers_empty_edges() {
     let c = lower(serde_yaml::from_str(yaml).unwrap()).unwrap();
     assert!(deps_of(&c, "web").is_empty());
 }
+
+// --- CMP-LOWER-RUNCFG: working_dir / user / restart lowering ---
+
+#[test]
+fn run_config_fields_lower_onto_service() {
+    // A service declaring working_dir/user/restart lowers each verbatim onto the
+    // runtime Service (the supervisor then threads them into RunSpec).
+    let yaml = "services:\n  web:\n    image: x\n    working_dir: /app\n    user: \"1000:1000\"\n    restart: on-failure:3\n";
+    let c = lower_yaml(yaml, None);
+    let s = &c.services[0];
+    assert_eq!(s.working_dir.as_deref(), Some("/app"));
+    assert_eq!(s.user.as_deref(), Some("1000:1000"));
+    assert_eq!(s.restart.as_deref(), Some("on-failure:3"));
+}
+
+#[test]
+fn run_config_fields_absent_lower_to_none() {
+    // Behavior-preserving: a service without these fields lowers to None ⇒ the
+    // supervisor's RunSpec keeps today's None placeholders.
+    let yaml = "services:\n  web:\n    image: x\n";
+    let c = lower_yaml(yaml, None);
+    let s = &c.services[0];
+    assert!(s.working_dir.is_none());
+    assert!(s.user.is_none());
+    assert!(s.restart.is_none());
+}
