@@ -63,11 +63,12 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             // this guard: they are now WIRED into the keyed env_explicit channel
             // and pass through to the handler. WP-RC-WORKDIR REMOVED `-w`/`--workdir`
             // (workdir): it is now WIRED into the runtime child cwd (honored at
-            // exec). With no still-stubbed flag set, `run` behaves exactly as
-            // before (behavior-preserving).
+            // exec). WP-RC-USER REMOVED `-u`/`--user` (user): it is now WIRED into
+            // the runtime child uid/gid (honored at exec, cfg(unix); honest
+            // non-root error). With no still-stubbed flag set, `run` behaves
+            // exactly as before (behavior-preserving).
             let new_flag_set = name.is_some()
                 || rm
-                || user.is_some()
                 || !label.is_empty()
                 || entrypoint.is_some()
                 || hostname.is_some()
@@ -112,6 +113,9 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                     // WP-RC-WORKDIR: `-w`/`--workdir` → RunSpec.workdir (honored
                     // as the child's cwd at exec). `None` ⇒ run in `dir`, as before.
                     workdir.as_deref(),
+                    // WP-RC-USER: `-u`/`--user` → RunSpec.user (honored as the
+                    // child's uid/gid at exec, cfg(unix)). `None` ⇒ current user.
+                    user.as_deref(),
                     &health,
                 )
             }

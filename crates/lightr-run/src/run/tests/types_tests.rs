@@ -103,3 +103,61 @@ fn resolve_workdir_creates_dir_only_when_set() {
     assert_eq!(got, base.join("a/b/c"));
     assert!(got.is_dir(), "-w must auto-create the workdir recursively");
 }
+
+// ── WP-RC-USER: apply_user parse + cfg-gated honor ─────────────────────────
+
+/// `apply_user(None)` is a NO-OP (Ok) on every platform — the no-`-u` path runs
+/// as the current user, byte-identical to before (behavior-preserving).
+#[test]
+fn apply_user_none_is_noop() {
+    let mut cmd = std::process::Command::new("true");
+    crate::run::spawn::apply_user(&mut cmd, None).expect("None must be a no-op Ok");
+}
+
+/// A non-numeric `--user` is an HONEST parse error on EVERY platform (the parse
+/// runs before any cfg branch): name resolution needs the container's
+/// /etc/passwd, so only numeric `uid[:gid]` is the faithful native path.
+#[test]
+fn apply_user_nonnumeric_name_errors() {
+    let mut cmd = std::process::Command::new("true");
+    assert!(
+        crate::run::spawn::apply_user(&mut cmd, Some("alice")).is_err(),
+        "a non-numeric user name must be an honest error (no /etc/passwd)"
+    );
+    let mut cmd2 = std::process::Command::new("true");
+    assert!(
+        crate::run::spawn::apply_user(&mut cmd2, Some("1000:devs")).is_err(),
+        "a non-numeric group must be an honest error"
+    );
+    let mut cmd3 = std::process::Command::new("true");
+    assert!(
+        crate::run::spawn::apply_user(&mut cmd3, Some("")).is_err(),
+        "an empty --user value must be an honest error"
+    );
+}
+
+/// On unix, numeric `uid[:gid]` parses + applies to the Command (Ok). We do NOT
+/// spawn — applying uid/gid to the builder needs no privilege; the EPERM for a
+/// non-root uid change surfaces at exec, not here. cfg(unix) so the windows
+/// clippy gate (where this is an honest Err) never sees these bindings.
+#[cfg(unix)]
+#[test]
+fn apply_user_numeric_ok_on_unix() {
+    let mut cmd = std::process::Command::new("true");
+    crate::run::spawn::apply_user(&mut cmd, Some("1000")).expect("numeric uid parses+applies");
+    let mut cmd2 = std::process::Command::new("true");
+    crate::run::spawn::apply_user(&mut cmd2, Some("1000:1000"))
+        .expect("numeric uid:gid parses+applies");
+}
+
+/// On windows, a POSIX `--user` (even numeric) is an HONEST error — uid/gid has
+/// no meaning. cfg(not(unix)) so the unix gate never sees this binding.
+#[cfg(not(unix))]
+#[test]
+fn apply_user_unsupported_on_windows() {
+    let mut cmd = std::process::Command::new("cmd");
+    assert!(
+        crate::run::spawn::apply_user(&mut cmd, Some("1000:1000")).is_err(),
+        "POSIX uid/gid is unsupported on windows — honest error"
+    );
+}
