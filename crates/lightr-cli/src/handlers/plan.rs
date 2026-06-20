@@ -171,6 +171,9 @@ fn plan_run(
         // WP-RC-RESTART (NON-OWNED site, set None): `plan` doesn't take `--restart`,
         // and restart is RUNTIME (not a memo-key input) → `None` (prediction unchanged).
         restart: None,
+        // WP-RC-STOPSIGNAL (NON-OWNED site, set None): `plan` doesn't take
+        // `--stop-signal`, and it is RUNTIME (not keyed) → `None` (prediction unchanged).
+        stop_signal: None,
     };
 
     match predict(&spec, &store) {

@@ -68,6 +68,7 @@ fn publish_without_detach_exits_2() {
         None, // workdir (WP-RC-WORKDIR)
         None, // user (WP-RC-USER)
         None, // restart (WP-RC-RESTART)
+        None, // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
     );
     assert_eq!(code, 2, "-p without -d must exit 2");
@@ -99,72 +100,13 @@ fn publish_on_engine_path_exits_2() {
         None, // workdir (WP-RC-WORKDIR)
         None, // user (WP-RC-USER)
         None, // restart (WP-RC-RESTART)
+        None, // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
     );
     assert_eq!(code, 2, "-p on the engine path must exit 2 (Phase 2)");
 }
 
-// ── HealthFlags::build (WP-RC-4) ──────────────────────────────────────────
-
-#[test]
-fn health_flags_build_from_cmd() {
-    // A --health-cmd with explicit timings lowers 1:1 to a Healthcheck.
-    let flags = HealthFlags {
-        cmd: Some("curl -fsS localhost/health".to_string()),
-        interval: 15,
-        timeout: 5,
-        start_period: 10,
-        retries: 4,
-        no_healthcheck: false,
-    };
-    let hc = flags
-        .build()
-        .expect("a --health-cmd must build a Healthcheck");
-    assert_eq!(hc.cmd, "curl -fsS localhost/health");
-    assert_eq!(hc.interval_s, 15);
-    assert_eq!(hc.timeout_s, 5);
-    assert_eq!(hc.start_period_s, 10);
-    assert_eq!(hc.retries, 4);
-}
-
-#[test]
-fn health_flags_none_without_cmd() {
-    // No --health-cmd ⇒ no healthcheck (the common case; behavior-preserving).
-    let flags = HealthFlags {
-        cmd: None,
-        interval: 30,
-        timeout: 30,
-        start_period: 0,
-        retries: 3,
-        no_healthcheck: false,
-    };
-    assert!(flags.build().is_none(), "no --health-cmd ⇒ no healthcheck");
-}
-
-#[test]
-fn health_flags_no_healthcheck_disables() {
-    // --no-healthcheck wins even when --health-cmd is present (Docker
-    // semantics: explicit disable beats a configured command).
-    let flags = HealthFlags {
-        cmd: Some("true".to_string()),
-        interval: 30,
-        timeout: 30,
-        start_period: 0,
-        retries: 3,
-        no_healthcheck: true,
-    };
-    assert!(
-        flags.build().is_none(),
-        "--no-healthcheck must disable even with a --health-cmd"
-    );
-}
-
-#[test]
-fn health_flags_default_is_no_healthcheck() {
-    // The Default (used by the docker-translation path + the no-flags run path)
-    // builds no healthcheck — the behavior-preservation anchor.
-    assert!(HealthFlags::default().build().is_none());
-}
+// ── HealthFlags::build (WP-RC-4) — moved to tests_health.rs (godfile cap) ──────
 
 // ── parse_mount (existing) ────────────────────────────────────────────────
 
@@ -251,6 +193,7 @@ fn dash_e_runs_not_stubbed() {
         None,                     // workdir (WP-RC-WORKDIR)
         None,                     // user (WP-RC-USER)
         None,                     // restart (WP-RC-RESTART)
+        None,                     // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
     );
     std::env::remove_var("LIGHTR_HOME");
@@ -307,6 +250,7 @@ fn dash_w_runs_not_stubbed_and_honored() {
         Some("sub/wd"), // workdir (WP-RC-WORKDIR) — must NOT be stubbed
         None,           // user (WP-RC-USER)
         None,           // restart (WP-RC-RESTART)
+        None,           // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
     );
     std::env::remove_var("LIGHTR_HOME");
@@ -385,6 +329,7 @@ fn dash_u_current_uid_runs_not_stubbed() {
         None,       // workdir
         Some(&uid), // user (WP-RC-USER) — must NOT be stubbed
         None,       // restart (WP-RC-RESTART)
+        None,       // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
     );
     std::env::remove_var("LIGHTR_HOME");
@@ -392,5 +337,56 @@ fn dash_u_current_uid_runs_not_stubbed() {
     assert_eq!(
         code, 0,
         "a run with -u <current uid> must execute (exit 0), not the stub (exit 1)"
+    );
+}
+
+// ── WP-RC-STOPSIGNAL: `--stop-signal` is WIRED (never on the WP-RUNFLAGS stub) ──
+
+/// A native run WITH `--stop-signal` set actually RUNS (exit 0), proving the flag
+/// flows through to RunSpec.stop_signal (honored later by `lightr stop`) and is
+/// NOT trapped by the dispatch stub guard. The signal value was validated at
+/// dispatch; the handler is behavior-preserving for a non-detached run (the stop
+/// path is exercised by the lightr-run stop tests).
+#[test]
+fn stop_signal_runs_not_stubbed() {
+    let _env_guard = crate::test_lock::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    std::env::set_var("LIGHTR_HOME", tmp.path());
+
+    let work = tmp.path().join("work");
+    std::fs::create_dir_all(&work).expect("mkdir work");
+
+    let code = run(
+        work.to_str().unwrap(),
+        &[],
+        &[],
+        &["true".to_string()],
+        false, // json
+        false, // explain
+        false, // detach
+        &[],   // publish
+        &[],   // mounts
+        "native",
+        None,           // rootfs
+        false,          // deep_memo
+        None,           // memory
+        None,           // cpus
+        &[],            // secrets
+        &[],            // configs
+        &[],            // env_set
+        None,           // env_file
+        None,           // workdir
+        None,           // user
+        None,           // restart
+        Some("SIGINT"), // stop_signal (WP-RC-STOPSIGNAL) — must NOT be stubbed
+        &HealthFlags::default(),
+    );
+    std::env::remove_var("LIGHTR_HOME");
+
+    assert_eq!(
+        code, 0,
+        "a run with --stop-signal must execute (exit 0), not return a stub"
     );
 }

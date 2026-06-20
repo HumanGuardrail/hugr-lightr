@@ -84,6 +84,7 @@ pub(crate) fn start_service_detached(
         workdir: svc.working_dir.clone(),
         user: svc.user.clone(),
         restart: svc.restart.clone(),
+        stop_signal: None, // WP-RC-STOPSIGNAL (NON-OWNED): compose stop_signal lowering is WP-RUNFLAGS' job.
     };
 
     let mut child_env: Vec<(String, String)> = svc.env.clone();

@@ -16,7 +16,11 @@ use crate::lightr_home;
 /// Platform-specific signals (USR1, STOP, …) are deliberately NOT mapped by
 /// name — their numbers differ across platforms — but remain reachable as an
 /// explicit numeric. An unrecognised spec yields `None`.
-fn parse_signal(spec: &str) -> Option<i32> {
+///
+/// `pub(crate)` so `--stop-signal` (WP-RC-STOPSIGNAL) validates against the same
+/// portable-name contract at dispatch time — one CLI source of truth for the
+/// signal grammar shared by `kill -s` and `run --stop-signal`.
+pub(crate) fn parse_signal(spec: &str) -> Option<i32> {
     let spec = spec.trim();
     if spec.is_empty() {
         return None;

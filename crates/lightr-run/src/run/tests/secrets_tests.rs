@@ -64,6 +64,7 @@ fn secret_ref_changes_memo_key() {
         workdir: None,
         user: None,
         restart: None,
+        stop_signal: None,
     };
 
     let spec_a = mk("sec-a");
@@ -110,6 +111,7 @@ fn config_ref_changes_memo_key_and_domain_separated() {
         workdir: None,
         user: None,
         restart: None,
+        stop_signal: None,
     };
 
     let mut as_secret = base();
@@ -163,6 +165,7 @@ fn empty_secrets_configs_leave_key_unchanged() {
         workdir: None,
         user: None,
         restart: None,
+        stop_signal: None,
     };
     // build_key is the storeless fast path (no mounts/secrets/configs).
     let fast = build_key(&spec).expect("fast key");
@@ -261,6 +264,7 @@ fn missing_secret_ref_fails_closed() {
         workdir: None,
         user: None,
         restart: None,
+        stop_signal: None,
     };
     let run_err = run_memoized_with(&spec, &store, &lightr_core::ResourceLimits::default());
     assert!(run_err.is_err(), "run with a missing secret must Err");

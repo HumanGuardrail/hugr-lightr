@@ -159,6 +159,10 @@ pub(crate) enum Cmd {
         /// Restart policy (docker --restart)
         #[arg(long)]
         restart: Option<String>,
+        /// Signal to stop the container (docker --stop-signal). Numeric or a
+        /// portable name (HUP/INT/QUIT/KILL/TERM). Default SIGTERM.
+        #[arg(long, value_name = "SIG")]
+        stop_signal: Option<String>,
         /// Connect to a network (docker --network)
         #[arg(long)]
         network: Option<String>,

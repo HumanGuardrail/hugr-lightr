@@ -3,14 +3,14 @@
 #![cfg(test)]
 
 use crate::run::memo::{build_key, predict, run_memoized};
-use crate::run::types::{PortMap, RunSpec};
+use crate::run::types::RunSpec;
 use lightr_store::Store;
 use std::fs;
 
 // LIGHTR_HOME is process-global (index dir): serialized via super::ENV_LOCK
 // (shared across all sibling test modules in the same binary).
 
-fn isolated_home() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+pub(super) fn isolated_home() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
     let guard = super::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("LIGHTR_HOME", home.path());
@@ -21,7 +21,7 @@ fn make_store(dir: &std::path::Path) -> Store {
     Store::open(dir.join("store")).expect("store open")
 }
 
-fn make_spec(cwd: &std::path::Path, command: Vec<&str>) -> RunSpec {
+pub(super) fn make_spec(cwd: &std::path::Path, command: Vec<&str>) -> RunSpec {
     RunSpec {
         cwd: cwd.to_path_buf(),
         inputs: vec![],
@@ -35,6 +35,7 @@ fn make_spec(cwd: &std::path::Path, command: Vec<&str>) -> RunSpec {
         workdir: None,
         user: None,
         restart: None,
+        stop_signal: None,
     }
 }
 
@@ -55,108 +56,8 @@ fn key_stability() {
     assert_eq!(k1.0, k2.0, "same spec must produce same key");
 }
 
-// -----------------------------------------------------------------------
-// MEMO-KEY LAW: ports are RUNTIME, not a key input (like resource limits;
-// like Docker, which does not key on -p). Two specs differing ONLY in
-// `ports` MUST produce the same memo key.
-// -----------------------------------------------------------------------
-#[test]
-fn ports_excluded_from_key() {
-    let (_home, _env_guard) = isolated_home();
-    let tmp = tempfile::tempdir().unwrap();
-    let cwd = tmp.path();
-    fs::write(cwd.join("f.txt"), b"data").unwrap();
-
-    let mut spec_no_ports = make_spec(cwd, vec!["/bin/echo", "x"]);
-    spec_no_ports.ports = vec![];
-
-    let mut spec_with_ports = make_spec(cwd, vec!["/bin/echo", "x"]);
-    spec_with_ports.ports = vec![
-        PortMap {
-            host: 8080,
-            container: 80,
-        },
-        PortMap {
-            host: 9090,
-            container: 90,
-        },
-    ];
-
-    let k1 = build_key(&spec_no_ports).expect("k1");
-    let k2 = build_key(&spec_with_ports).expect("k2");
-    assert_eq!(
-        k1.0, k2.0,
-        "ports must NOT affect the memo key (runtime-only, like -p in Docker)"
-    );
-}
-
-// -----------------------------------------------------------------------
-// WP-RC-WORKDIR: -w/--workdir is RUNTIME (like ports/limits; like Docker,
-// which does not key on -w). Two specs differing ONLY in workdir must key
-// IDENTICALLY — otherwise a `-w` would bust the cache (a false miss).
-// -----------------------------------------------------------------------
-#[test]
-fn workdir_excluded_from_key() {
-    let (_home, _env_guard) = isolated_home();
-    let tmp = tempfile::tempdir().unwrap();
-    let cwd = tmp.path();
-    fs::write(cwd.join("f.txt"), b"data").unwrap();
-
-    let spec_no_wd = make_spec(cwd, vec!["/bin/echo", "x"]);
-
-    let mut spec_with_wd = make_spec(cwd, vec!["/bin/echo", "x"]);
-    spec_with_wd.workdir = Some("sub/wd".to_string());
-
-    let k1 = build_key(&spec_no_wd).expect("k1");
-    let k2 = build_key(&spec_with_wd).expect("k2");
-    assert_eq!(
-        k1.0, k2.0,
-        "workdir must NOT affect the memo key (runtime-only, like -w in Docker)"
-    );
-}
-
-// -----------------------------------------------------------------------
-// WP-RC-USER: -u/--user is RUNTIME (like ports/workdir; like Docker, which
-// does not key on -u). Two specs differing ONLY in user must key IDENTICALLY
-// — otherwise a `-u` would bust the cache (a false miss).
-// -----------------------------------------------------------------------
-#[test]
-fn user_excluded_from_key() {
-    let (_home, _env_guard) = isolated_home();
-    let tmp = tempfile::tempdir().unwrap();
-    let cwd = tmp.path();
-    fs::write(cwd.join("f.txt"), b"data").unwrap();
-
-    let spec_no_user = make_spec(cwd, vec!["/bin/echo", "x"]);
-
-    let mut spec_with_user = make_spec(cwd, vec!["/bin/echo", "x"]);
-    spec_with_user.user = Some("1000:1000".to_string());
-
-    let k1 = build_key(&spec_no_user).expect("k1");
-    let k2 = build_key(&spec_with_user).expect("k2");
-    assert_eq!(
-        k1.0, k2.0,
-        "user must NOT affect the memo key (runtime-only, like -u in Docker)"
-    );
-}
-
-// WP-RC-RESTART: --restart is RUNTIME (like ports/workdir/user; Docker does not
-// key on it). Specs differing ONLY in restart must key IDENTICALLY (no false miss).
-#[test]
-fn restart_excluded_from_key() {
-    let (_home, _env_guard) = isolated_home();
-    let tmp = tempfile::tempdir().unwrap();
-    let cwd = tmp.path();
-    fs::write(cwd.join("f.txt"), b"data").unwrap();
-
-    let spec_no_restart = make_spec(cwd, vec!["/bin/echo", "x"]);
-    let mut spec_on_failure = make_spec(cwd, vec!["/bin/echo", "x"]);
-    spec_on_failure.restart = Some("on-failure:3".to_string());
-
-    let k0 = build_key(&spec_no_restart).expect("k0").0;
-    let k1 = build_key(&spec_on_failure).expect("k1").0;
-    assert_eq!(k0, k1, "restart must NOT affect the memo key");
-}
+// MEMO-KEY LAW: runtime parameters (ports/workdir/user/restart/stop_signal) are
+// NOT key inputs — see memo_key_runtime_excl.rs (split out for the godfile cap).
 
 // -----------------------------------------------------------------------
 // key_changes_when_input_file_changes
@@ -222,6 +123,7 @@ fn key_changes_when_selected_env_changes() {
         workdir: None,
         user: None,
         restart: None,
+        stop_signal: None,
     };
     let k1 = build_key(&spec1).expect("k1");
 
@@ -261,6 +163,7 @@ fn predict_miss_run_hit() {
         workdir: None,
         user: None,
         restart: None,
+        stop_signal: None,
     };
 
     let (key1, hit1) = predict(&spec, &store).expect("predict1");

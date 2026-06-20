@@ -106,6 +106,11 @@ pub fn spawn_detached_engine(
         // `None` for runs with no `--restart` ⇒ the supervisor runs the child
         // once and exits, as before. RUNTIME ONLY — never a memo-key input.
         restart: spec.restart.clone(),
+        // WP-RC-STOPSIGNAL: persist `--stop-signal` so the stop path (`lightr stop`
+        // and the restart-stop path) reads it back and sends the configured signal
+        // for graceful termination, before the SIGKILL fallback. `None` for runs
+        // with no `--stop-signal` ⇒ SIGTERM as before. RUNTIME ONLY — never keyed.
+        stop_signal: spec.stop_signal.clone(),
         // R-SPECDISK freeze-gate fields: defaults until the Wave-A/B WPs
         // populate them (no behaviour change here).
         ..Default::default()

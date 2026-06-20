@@ -73,6 +73,16 @@ pub struct RunSpec {
     /// Docker, which does not key on `--restart`). It never enters
     /// `assemble_key`/`build_key`.
     pub restart: Option<String>,
+    /// WP-RC-STOPSIGNAL: user `--stop-signal` — the signal `lightr stop` (and the
+    /// restart-stop path) sends to gracefully stop the run, before the SIGKILL
+    /// fallback (Docker `--stop-signal`/`STOPSIGNAL`). Numeric (`9`, `15`) or a
+    /// portable name (`HUP`/`INT`/`QUIT`/`KILL`/`TERM`, case-insensitive, optional
+    /// `SIG` prefix). `None` ⇒ SIGTERM (15), today's behaviour, byte-identical.
+    ///
+    /// RUNTIME ONLY — never a memo-key input (like `ports`/`workdir`/`user`/
+    /// `restart`; like Docker, which does not key on `--stop-signal`). It never
+    /// enters `assemble_key`/`build_key`.
+    pub stop_signal: Option<String>,
 }
 
 impl RunSpec {
