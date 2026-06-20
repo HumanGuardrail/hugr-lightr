@@ -7,7 +7,19 @@
 //! the SHAPE + the minimal-correct entrypoint+cmd combination (last-wins); the
 //! richer fields are populated by the Dockerfile/run WPs.
 
+use lightr_core::{LightrError, Result};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+/// Canonical on-disk filename for the image config sidecar, stored at a layer
+/// root. The SAME file the build's `ImageMeta` historically wrote (cmd/env/
+/// labels): `ImageConfig` is the GO-FORWARD superset shape, and because every
+/// field is `#[serde(default)]` and serde-json ignores unknown keys, the two
+/// types round-trip the same file losslessly (back-compat: an old `ImageMeta`-
+/// written sidecar loads into `ImageConfig` with the richer fields defaulted,
+/// and an `ImageConfig`-written sidecar still exposes `env`/`cmd`/`labels` to a
+/// pre-WP `load_meta` reader). The single canonical sidecar filename.
+pub const IMAGE_CONFIG_FILE: &str = ".lightr-image.json";
 
 /// The full image config sidecar (Docker `ImageConfig` parity). Every field is
 /// `#[serde(default)]` so a partial sidecar (or an older one) round-trips. The
@@ -38,6 +50,30 @@ pub struct ImageConfig {
     pub shell: Option<Vec<String>>,
     #[serde(default)]
     pub onbuild: Vec<String>,
+}
+
+impl ImageConfig {
+    /// Load the `.lightr-image.json` sidecar from a layer `root`. A missing or
+    /// unreadable sidecar (e.g. a `scratch`/OCI base without one) is the DEFAULT
+    /// config — never an error (Docker: an image without config simply has no
+    /// defaults). A malformed sidecar also degrades to the default (best-effort,
+    /// matching the historical `load_meta` behaviour this supersedes).
+    pub fn load(root: &Path) -> Self {
+        match std::fs::read(root.join(IMAGE_CONFIG_FILE)) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Persist the config to the `.lightr-image.json` sidecar at `root`. Written
+    /// as compact JSON (same shape `load`/`load_meta` read back). A serialize or
+    /// write failure is an honest error (fail-closed — a build that cannot record
+    /// its config must not silently produce a config-less image).
+    pub fn save(&self, root: &Path) -> Result<()> {
+        let bytes = serde_json::to_vec(self)
+            .map_err(|e| LightrError::InvalidManifest(format!("image config serialize: {e}")))?;
+        std::fs::write(root.join(IMAGE_CONFIG_FILE), &bytes).map_err(LightrError::Io)
+    }
 }
 
 /// Combine an image's `entrypoint`/`cmd` with a caller's command override into

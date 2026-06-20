@@ -1,4 +1,5 @@
-//! Build memoization: ImageMeta sidecar, step key, COPY hashing, TempDirGuard.
+//! Build memoization: step key, COPY hashing, TempDirGuard. (The image config
+//! sidecar moved to `build::imgcfg::ImageConfig` — WP-DF-IMGCFG.)
 //!
 //! # R-KEY partition (parity-contract.md §0) — DOCUMENTED here; behaviour is the WPs'
 //!
@@ -24,37 +25,17 @@
 //! invalidation: every image rebuilds once (expected + acceptable). A Dockerfile
 //! with no `${VAR}` re-keys once to v2 and is then stable across runs.
 use lightr_core::{Digest, LightrError, Result};
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use super::parse::{BuildStep, CmdForm, Instr};
 use super::vars::{interpolate, VarScope};
 
-/// Sidecar `.lightr-image.json` stored at the layer root.
-/// Persists CMD / LABEL / ENV accumulation across layer snapshots.
-#[derive(Default, Serialize, Deserialize)]
-pub(crate) struct ImageMeta {
-    pub cmd: Option<Vec<String>>,
-    pub labels: Vec<(String, String)>,
-    pub env: Vec<(String, String)>,
-}
-
-pub(crate) const IMAGE_META_FILE: &str = ".lightr-image.json";
-
-pub(crate) fn load_meta(root: &Path) -> ImageMeta {
-    let p = root.join(IMAGE_META_FILE);
-    if let Ok(bytes) = std::fs::read(&p) {
-        serde_json::from_slice(&bytes).unwrap_or_default()
-    } else {
-        ImageMeta::default()
-    }
-}
-
-pub(crate) fn save_meta(root: &Path, meta: &ImageMeta) -> Result<()> {
-    let bytes = serde_json::to_vec(meta)
-        .map_err(|e| LightrError::InvalidManifest(format!("meta serialize: {e}")))?;
-    std::fs::write(root.join(IMAGE_META_FILE), &bytes).map_err(LightrError::Io)
-}
+// WP-DF-IMGCFG: the image config sidecar (`.lightr-image.json`) is now the ONE
+// `ImageConfig` type in `build::imgcfg` (entrypoint/cmd/env/workdir/user/expose/
+// volume/labels/stop_signal/...). The historical `ImageMeta` (cmd/labels/env
+// only) + `load_meta`/`save_meta` here were a strict subset of that file and are
+// superseded — every build read/write now goes through `ImageConfig::load/save`,
+// so this module no longer owns the sidecar shape (only the memo KEY + helpers).
 
 /// The BUILD-key domain tag. **v2** (WP-DF-BUILDKEY): the key hashes the
 /// POST-INTERPOLATION instruction text, not the raw text. Bumping from v1 is a

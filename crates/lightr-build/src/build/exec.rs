@@ -16,7 +16,8 @@ use super::exec_fs::materialize_from_digest;
 #[cfg(test)]
 use super::exec_fs::step_reads_clock_or_net;
 use super::exec_instr::{self, BuildCtx};
-use super::memo::{load_meta, step_key, TempDirGuard};
+use super::imgcfg::ImageConfig;
+use super::memo::{step_key, TempDirGuard};
 use super::parse::Instr;
 use super::vars::{interpolate, VarScope};
 
@@ -203,8 +204,8 @@ pub fn build(
                 materialize_from_digest(work_dir, &cached_root, store)?;
                 prev_layer_root = Some(cached_root);
                 cached_steps += 1;
-                let meta = load_meta(work_dir);
-                accumulated_env = meta.env.clone();
+                let cfg = ImageConfig::load(work_dir);
+                accumulated_env = cfg.env.clone();
                 // Keep the interpolation scope in sync with the replayed layer's
                 // accumulated ENV (so subsequent steps interpolate correctly even
                 // when earlier ENV/FROM steps were cache hits).
@@ -280,6 +281,15 @@ pub fn build(
             Instr::Env { pairs } => exec_instr::env(&mut ctx, pairs)?,
             Instr::Workdir { path } => exec_instr::workdir(&mut ctx, path)?,
             Instr::Cmd { argv, .. } => exec_instr::cmd(&mut ctx, argv)?,
+            // WP-DF-IMGCFG: the config instructions now RECORD into the image
+            // config sidecar (was the fail-closed "unsupported" path). Each is a
+            // pure metadata write (no filesystem mutation), so a layer snapshot
+            // still follows below — the sidecar IS the layer's recorded config.
+            Instr::Entrypoint { argv, .. } => exec_instr::entrypoint(&mut ctx, argv)?,
+            Instr::User { user } => exec_instr::user(&mut ctx, user)?,
+            Instr::Expose { ports } => exec_instr::expose(&mut ctx, ports)?,
+            Instr::Stopsignal { signal } => exec_instr::stopsignal(&mut ctx, signal)?,
+            Instr::Volume { paths } => exec_instr::volume(&mut ctx, paths)?,
             Instr::Label { pairs } => exec_instr::label(&mut ctx, pairs)?,
             Instr::Arg { .. } => exec_instr::arg(&mut ctx, &step.instr)?,
             Instr::Shell { shell } => exec_instr::shell(&mut ctx, shell)?,
@@ -345,3 +355,9 @@ mod df07_tests;
 #[cfg(test)]
 #[path = "exec_df03_tests.rs"]
 mod df03_tests;
+
+// WP-DF-IMGCFG record-side tests: config instructions land in the image config
+// sidecar; config-less images keep the default config (sibling file, godfile cap).
+#[cfg(test)]
+#[path = "exec_imgcfg_tests.rs"]
+mod imgcfg_tests;
