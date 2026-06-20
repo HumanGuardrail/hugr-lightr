@@ -6,7 +6,7 @@
 //! (entrypoint/cmd/env preserved) instead of a config-less single layer.
 
 use super::cas::{atomic_write, get_bytes, put_bytes, shard_parts};
-use lightr_core::{Digest, LightrError, Result};
+use lightr_core::{Digest, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -52,101 +52,9 @@ pub struct ImageManifestRecord {
 // Self-describing + length-prefixed so a truncated/garbage record decodes to a
 // clean InvalidManifest error rather than a panic.
 
-const IMG_MANIFEST_CODEC_VERSION: u32 = 1;
-
-fn encode_manifest_record(rec: &ImageManifestRecord) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&IMG_MANIFEST_CODEC_VERSION.to_le_bytes());
-    out.extend_from_slice(&(rec.manifest_bytes.len() as u64).to_le_bytes());
-    out.extend_from_slice(&rec.manifest_bytes);
-    out.extend_from_slice(&(rec.platform.len() as u32).to_le_bytes());
-    out.extend_from_slice(rec.platform.as_bytes());
-    out.extend_from_slice(&(rec.descriptors.len() as u32).to_le_bytes());
-    for d in &rec.descriptors {
-        out.extend_from_slice(&(d.media_type.len() as u32).to_le_bytes());
-        out.extend_from_slice(d.media_type.as_bytes());
-        out.extend_from_slice(&d.digest.0);
-        out.extend_from_slice(&d.size.to_le_bytes());
-    }
-    out
-}
-
-/// A bounds-checked cursor reader for the length-prefixed codec.
-struct Reader<'a> {
-    b: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(b: &'a [u8]) -> Self {
-        Reader { b, pos: 0 }
-    }
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self
-            .pos
-            .checked_add(n)
-            .filter(|&e| e <= self.b.len())
-            .ok_or_else(|| {
-                LightrError::InvalidManifest("image manifest record truncated".into())
-            })?;
-        let s = &self.b[self.pos..end];
-        self.pos = end;
-        Ok(s)
-    }
-    fn u32(&mut self) -> Result<u32> {
-        let s = self.take(4)?;
-        Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-    }
-    fn u64(&mut self) -> Result<u64> {
-        let s = self.take(8)?;
-        let mut a = [0u8; 8];
-        a.copy_from_slice(s);
-        Ok(u64::from_le_bytes(a))
-    }
-    fn digest(&mut self) -> Result<Digest> {
-        let s = self.take(32)?;
-        let mut a = [0u8; 32];
-        a.copy_from_slice(s);
-        Ok(Digest(a))
-    }
-    fn string(&mut self, n: usize) -> Result<String> {
-        let s = self.take(n)?;
-        String::from_utf8(s.to_vec())
-            .map_err(|_| LightrError::InvalidManifest("non-UTF8 in image manifest record".into()))
-    }
-}
-
-fn decode_manifest_record(bytes: &[u8]) -> Result<ImageManifestRecord> {
-    let mut r = Reader::new(bytes);
-    let version = r.u32()?;
-    if version != IMG_MANIFEST_CODEC_VERSION {
-        return Err(LightrError::InvalidManifest(format!(
-            "unknown image manifest record version: {version}"
-        )));
-    }
-    let mlen = r.u64()? as usize;
-    let manifest_bytes = r.take(mlen)?.to_vec();
-    let plen = r.u32()? as usize;
-    let platform = r.string(plen)?;
-    let n = r.u32()? as usize;
-    let mut descriptors = Vec::with_capacity(n);
-    for _ in 0..n {
-        let mtlen = r.u32()? as usize;
-        let media_type = r.string(mtlen)?;
-        let digest = r.digest()?;
-        let size = r.u64()?;
-        descriptors.push(ImageDescriptor {
-            media_type,
-            digest,
-            size,
-        });
-    }
-    Ok(ImageManifestRecord {
-        manifest_bytes,
-        descriptors,
-        platform,
-    })
-}
+#[path = "imgmeta_codec.rs"]
+mod codec;
+use codec::{decode_manifest_record, encode_manifest_record};
 
 // ── path helper ───────────────────────────────────────────────────────────────
 
@@ -200,6 +108,59 @@ pub fn image_config_get(root: &Path, name: &str) -> Result<Option<Vec<u8>>> {
     arr.copy_from_slice(&dbytes);
     let config = get_bytes(root, &Digest(arr))?;
     Ok(Some(config))
+}
+
+// ── WP-IMG-03: copy image sidecars (oci tag — ref alias fidelity) ────────────
+//
+// `oci tag <src> <dst>` aliases a ref to a new name with ZERO data copy: the
+// ref pointer is repointed (in the refs plane) and the image sidecars are
+// duplicated here so a later FAITHFUL `oci push` of `dst` reproduces the
+// original image (entrypoint/cmd/env + exact manifest), not a synthesized
+// single-layer image. Only the 32-byte sidecar POINTERS are copied — the CAS
+// blobs they reference are shared (content-addressed, never duplicated). If
+// `src` has no sidecar, copy is a no-op for that family (tag still works).
+
+/// Copy the image sidecars (config + manifest) from `src` to `dst`, sharing the
+/// underlying CAS blobs (no object duplication). Each family is copied only if
+/// `src` has it; a corrupt `src` sidecar (not a 32-byte pointer) is skipped,
+/// matching the fail-soft read path. Last-write-wins on `dst`.
+pub fn copy_image_sidecars(root: &Path, src: &str, dst: &str) -> Result<()> {
+    lightr_core::validate_ref_name(src)?;
+    lightr_core::validate_ref_name(dst)?;
+
+    copy_one_sidecar(root, "imgmeta", src, dst)?;
+    copy_one_sidecar(root, "imgmanifest", src, dst)?;
+    Ok(())
+}
+
+/// Copy a single sidecar family's 32-byte pointer from `src`'s key to `dst`'s
+/// key under `<root>/<dir>/`. No-op if absent; skip (no-op) if the source
+/// pointer is not exactly 32 bytes (corrupt — fail-soft, like the read path).
+fn copy_one_sidecar(root: &Path, dir: &str, src: &str, dst: &str) -> Result<()> {
+    let src_key = lightr_core::ref_key(src);
+    let src_path = sidecar_path(root, dir, &src_key);
+    if !src_path.exists() {
+        return Ok(());
+    }
+    let pointer = fs::read(&src_path)?;
+    if pointer.len() != 32 {
+        return Ok(());
+    }
+
+    let dst_key = lightr_core::ref_key(dst);
+    let dst_path = sidecar_path(root, dir, &dst_key);
+    let hex = dst_key.to_hex();
+    let (pre, _) = shard_parts(&hex);
+    let shard = root.join(dir).join(pre);
+    atomic_write(&shard, &dst_path, &pointer)?;
+    Ok(())
+}
+
+/// Sidecar pointer path for a family dir: `<root>/<dir>/<2hex>/<62hex of key>`.
+fn sidecar_path(root: &Path, dir: &str, key: &Digest) -> PathBuf {
+    let hex = key.to_hex();
+    let (pre, rest) = shard_parts(&hex);
+    root.join(dir).join(pre).join(rest)
 }
 
 // ── R-IMGREC: image MANIFEST record put/get ─────────────────────────────────
