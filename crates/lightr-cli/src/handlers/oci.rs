@@ -214,9 +214,39 @@ fn tag_in_store(store: &Store, src: &str, target: &str) -> lightr_core::Result<(
     Ok(())
 }
 
-/// `oci save <store-ref> [--output]` — export an image to a tar (docker save).
-pub fn save(_store_ref: &str, _output: Option<&str>) -> i32 {
-    stub("oci save", "WP-IMG-03")
+/// `oci save <store-ref> [--output]` — export an image to a tar (docker save,
+/// WP-IMG-04). Faithful (verbatim) when a retained image record exists, else a
+/// synthesized single-layer fallback (reported honestly). Output goes to
+/// `--output <file>` or stdout (Docker default); the status line goes to stderr
+/// so a piped-to-stdout tar is never polluted. Fail-closed: absent ref → exit 2,
+/// unwritable path → exit 1.
+pub fn save(store_ref: &str, output: Option<&str>) -> i32 {
+    if let Err(e) = validate_ref_name(store_ref) {
+        return die_lightr(&e);
+    }
+
+    let store = match Store::open(Store::default_root()) {
+        Ok(s) => s,
+        Err(e) => return die_lightr(&e),
+    };
+
+    let out_path = output.map(std::path::Path::new);
+    let report = match lightr_oci::save(store_ref, out_path, &store) {
+        Ok(r) => r,
+        Err(e) => return die_lightr(&e),
+    };
+
+    // Human-readable status to STDERR (stdout may carry the tar bytes).
+    let fidelity = if report.faithful {
+        "faithful"
+    } else {
+        "synthesized (lossy: no retained image record)"
+    };
+    eprintln!(
+        "saved {} layers={} size={} fidelity={}",
+        report.destination, report.layers, report.size, fidelity
+    );
+    0
 }
 
 /// `oci load [--input]` — import an image from a tar (docker load).
