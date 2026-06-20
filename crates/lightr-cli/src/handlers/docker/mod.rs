@@ -106,7 +106,16 @@ fn translate_build(args: &[String], json: bool, explain: bool) -> i32 {
         &["-f", df_display, "-t", &name, "--engine", "native", &ctx],
     );
 
-    crate::handlers::build::run(&ctx, dockerfile.as_deref(), &name, "native", json, explain)
+    // The docker shim does not yet translate `--build-arg` (deferred); pass none.
+    crate::handlers::build::run(
+        &ctx,
+        dockerfile.as_deref(),
+        &name,
+        "native",
+        &[],
+        json,
+        explain,
+    )
 }
 
 // ── docker run translation ────────────────────────────────────────────────────

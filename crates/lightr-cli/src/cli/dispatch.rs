@@ -178,7 +178,16 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             file,
             name,
             engine,
-        } => handlers::build::run(&context, file.as_deref(), &name, &engine, json, explain),
+            build_arg,
+        } => handlers::build::run(
+            &context,
+            file.as_deref(),
+            &name,
+            &engine,
+            &build_arg,
+            json,
+            explain,
+        ),
         Cmd::Compose { subcmd } => match subcmd {
             ComposeCmd::Up { file, eager, ttl } => handlers::compose::up(&file, eager, ttl, json),
             ComposeCmd::Down { file } => handlers::compose::down(file.as_deref()),

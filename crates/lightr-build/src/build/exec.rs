@@ -8,14 +8,9 @@ use super::memo::{load_meta, save_meta, step_key, TempDirGuard};
 use super::parse::Instr;
 use super::vars::{interpolate, VarScope};
 
-/// Interpolate one string against `scope` (Dockerfile escape directive `escape`).
-fn interp(s: &str, scope: &VarScope, escape: bool) -> Result<String> {
-    interpolate(s, scope, escape)
-}
-
 /// Interpolate every string in a slice against `scope`.
 fn interp_vec(v: &[String], scope: &VarScope, escape: bool) -> Result<Vec<String>> {
-    v.iter().map(|s| interp(s, scope, escape)).collect()
+    v.iter().map(|s| interpolate(s, scope, escape)).collect()
 }
 
 /// Materialize a snapshot (identified by its manifest digest) into `dest`.
@@ -97,25 +92,29 @@ pub struct BuildReport {
 }
 /// Execute a Dockerfile build.
 ///
-/// - RUN steps use the **native engine** (`rootfs: None`). No filesystem
-///   isolation -- RUN runs in the working tree directly.
-/// - Memoization: each step has a content-derived key; AC hits replay the
-///   cached layer without executing.
+/// - RUN steps use the **native engine** (`rootfs: None`); no filesystem
+///   isolation. Memoization: each step has a content-derived key; AC hits
+///   replay the cached layer without executing.
 /// - Build-time `${VAR}` interpolation (WP-DF-BUILDKEY): each instruction's text
-///   args are interpolated against a `VarScope` BEFORE executing/keying. The
-///   scope's `env` is seeded from the base image's config ENV (after FROM) and
-///   updated by each `ENV` instruction; `args` (ARG → DF-08) and SHELL (DF-09)
-///   extend it later (hooks below). The memo key hashes the POST-INTERPOLATION
-///   text (memo key v2) — so differing ENV/ARG values never collide on a stale
-///   layer.
+///   is interpolated against a `VarScope` BEFORE executing/keying. `env` is
+///   seeded from the base image (after FROM) + updated by ENV; `args` by ARG
+///   (DF-08, `build_args` = `--build-arg`). The memo key hashes the
+///   POST-INTERPOLATION text (v2) — differing ENV/ARG never collide on a stale
+///   layer; an UNUSED ARG changes no text, so it never busts the cache.
 pub fn build(
     context_dir: &Path,
     dockerfile: &Path,
     name: &str,
     engine: lightr_engine::EngineKind,
     store: &Store,
+    build_args: &[(String, String)],
 ) -> Result<BuildReport> {
+    use super::args::{overrides_from_pairs, ArgState};
     use super::parse::parse_dockerfile_full;
+
+    // ARG (DF-08): `--build-arg` overrides + scope state (logic in `build::args`).
+    let arg_overrides = overrides_from_pairs(build_args);
+    let mut arg_state = ArgState::default();
 
     let text = std::fs::read_to_string(dockerfile).map_err(LightrError::Io)?;
     let (directives, steps) = parse_dockerfile_full(&text)?;
@@ -132,9 +131,8 @@ pub fn build(
     let mut accumulated_env: Vec<(String, String)> = Vec::new();
     let mut current_workdir = String::from("/");
     let mut cached_steps: u64 = 0;
-    // The interpolation scope threaded through the build. `args` stays empty here
-    // (ARG → DF-08 seeds it); `env` is seeded from the base image after FROM and
-    // updated by ENV. SHELL (DF-09) is a later hook.
+    // Interpolation scope: `args` seeded by ARG (DF-08, via `arg_state`); `env`
+    // seeded from the base after FROM + updated by ENV (ENV wins over ARG).
     let mut scope = VarScope::default();
 
     for step in &steps {
@@ -155,8 +153,10 @@ pub fn build(
                 // accumulated ENV (so subsequent steps interpolate correctly even
                 // when earlier ENV/FROM steps were cache hits).
                 scope.env = accumulated_env.iter().cloned().collect();
+                // Re-derive ARG/FROM scope on the cache-hit path too (not in meta).
+                arg_state.sync(&step.instr, &arg_overrides, &mut scope.args);
                 if let Instr::Workdir { path } = &step.instr {
-                    current_workdir = interp(path, &scope, escape)?;
+                    current_workdir = interpolate(path, &scope, escape)?;
                 }
                 continue;
             }
@@ -164,10 +164,9 @@ pub fn build(
 
         match &step.instr {
             Instr::From { image_ref, .. } => {
-                // FROM ref interpolation is multi-stage's concern (DF-03); the
-                // ref rarely uses build-time vars, but interpolating it here is
-                // trivial and matches Docker (ARG-before-FROM → DF-08 hook).
-                let image_ref = interp(image_ref, &scope, escape)?;
+                // FROM ref is interpolated against the GLOBAL ARG scope (Docker:
+                // ARG-before-FROM is usable here); multi-stage refs are DF-03.
+                let image_ref = interpolate(image_ref, &scope, escape)?;
                 for entry in std::fs::read_dir(work_dir).map_err(LightrError::Io)? {
                     let entry = entry.map_err(LightrError::Io)?;
                     let p = entry.path();
@@ -187,6 +186,8 @@ pub fn build(
                 let base = load_meta(work_dir);
                 accumulated_env = base.env.clone();
                 scope.env = accumulated_env.iter().cloned().collect();
+                // Stage boundary: global ARGs do NOT cross into the stage (Docker).
+                arg_state.sync(&step.instr, &arg_overrides, &mut scope.args);
             }
             Instr::Run { argv, .. } => {
                 let argv = &interp_vec(argv, &scope, escape)?;
@@ -237,7 +238,7 @@ pub fn build(
                 // CONTEXT use the interpolated src; the key already hashed the
                 // interpolated text + the content of these resolved sources.
                 let src = &interp_vec(src, &scope, escape)?;
-                let dest = &interp(dest, &scope, escape)?;
+                let dest = &interpolate(dest, &scope, escape)?;
                 let dest_path = if dest.starts_with('/') {
                     work_dir.join(dest.trim_start_matches('/'))
                 } else {
@@ -273,7 +274,7 @@ pub fn build(
                 // ENV updates the scope: interpolate V with the CURRENT scope,
                 // then set scope.env[K] (Docker build-time semantics). The key
                 // is NOT interpolated (Docker treats ENV/ARG names literally).
-                let val = interp(val, &scope, escape)?;
+                let val = interpolate(val, &scope, escape)?;
                 accumulated_env.retain(|(k, _)| k != key);
                 accumulated_env.push((key.clone(), val.clone()));
                 scope.env.insert(key.clone(), val);
@@ -282,7 +283,7 @@ pub fn build(
                 save_meta(work_dir, &meta)?;
             }
             Instr::Workdir { path } => {
-                let path = interp(path, &scope, escape)?;
+                let path = interpolate(path, &scope, escape)?;
                 current_workdir = path.clone();
                 let abs = if path.starts_with('/') {
                     work_dir.join(path.trim_start_matches('/'))
@@ -298,11 +299,15 @@ pub fn build(
                 save_meta(work_dir, &meta)?;
             }
             Instr::Label { key, val } => {
-                let val = interp(val, &scope, escape)?;
+                let val = interpolate(val, &scope, escape)?;
                 let mut meta = load_meta(work_dir);
                 meta.labels.retain(|(k, _)| k != key);
                 meta.labels.push((key.clone(), val));
                 save_meta(work_dir, &meta)?;
+            }
+            Instr::Arg { .. } => {
+                // ARG (DF-08): resolve + bind into the ARG scope (logic in `build::args`).
+                arg_state.sync(&step.instr, &arg_overrides, &mut scope.args);
             }
             // WP-DF-01 parses these into the AST; execution is DF-02..15. Until
             // then they route to the SAME "unsupported instruction" error path
