@@ -41,11 +41,20 @@ pub(crate) fn lower(spec: ComposeSpec) -> Result<Compose> {
 /// ON TOP (inline overrides file). A required-but-missing env_file is an honest
 /// error. Bare `KEY` lines pass through the process env.
 pub(crate) fn lower_with_base_dir(spec: ComposeSpec, base_dir: Option<&Path>) -> Result<Compose> {
+    // WP-CMP-SECRETS-FULL: lower the top-level `secrets:`/`configs:` source maps
+    // BEFORE the services map is consumed, so the up-path can ingest each `file:`
+    // source into the Store (the lowering holds no Store; ingestion is up.rs's).
+    let secret_sources = super::lower_files::lower_top_sources(&spec.secrets);
+    let config_sources = super::lower_files::lower_top_sources(&spec.configs);
     let mut services = Vec::with_capacity(spec.services.len());
     for (name, def) in spec.services {
         services.push(lower_service(name, def, base_dir)?);
     }
-    Ok(Compose { services })
+    Ok(Compose {
+        services,
+        secret_sources,
+        config_sources,
+    })
 }
 
 /// Dispatcher: lower one service `def` into a runtime [`Service`] by calling each
@@ -80,8 +89,10 @@ fn lower_service(name: String, mut def: ServiceDef, base_dir: Option<&Path>) -> 
     lower_stubs::lower_deploy(&def, &mut svc);
     lower_stubs::lower_networks(&def, &mut svc);
     lower_stubs::lower_restart(&def, &mut svc);
-    lower_stubs::lower_spec_secrets(&def, &mut svc);
-    lower_stubs::lower_spec_configs(&def, &mut svc);
+    // WP-CMP-SECRETS-FULL: the full-spec secrets/configs refs are lowered above
+    // by lower_secrets/lower_configs (single writer); the disconnected
+    // lower_spec_secrets/lower_spec_configs stubs are removed (they could not
+    // reach the top-level source maps and would double-handle def.secrets).
     lower_stubs::lower_extra_hosts(&def, &mut svc);
     lower_stubs::lower_stop_grace_period(&def, &mut svc);
     lower_stubs::lower_stop_signal(&def, &mut svc);
@@ -137,14 +148,17 @@ fn lower_eager(def: &ServiceDef, svc: &mut Service) {
     svc.eager = def.x_lightr_eager.unwrap_or(false);
 }
 
-/// Lightr-extension `secrets` aspect: `name=ref` list ⇒ `svc.secrets`.
+/// `secrets` aspect (WP-CMP-SECRETS-FULL): a service's `secrets:` refs ⇒
+/// `svc.secrets` `(name, ref)` pairs feeding `RunSpec.secrets`. The full
+/// resolution (legacy `name=ref`, compose short name, compose long map) lives in
+/// `lower_files.rs` (single writer; the top-level source ingestion is up.rs's).
 fn lower_secrets(def: &ServiceDef, svc: &mut Service) {
-    svc.secrets = lower_pairs(&def.secrets);
+    svc.secrets = super::lower_files::lower_service_file_refs(&def.secrets, "secret");
 }
 
-/// Lightr-extension `configs` aspect: `name=ref` list ⇒ `svc.configs`.
+/// `configs` aspect (WP-CMP-SECRETS-FULL): counterpart of [`lower_secrets`].
 fn lower_configs(def: &ServiceDef, svc: &mut Service) {
-    svc.configs = lower_pairs(&def.configs);
+    svc.configs = super::lower_files::lower_service_file_refs(&def.configs, "config");
 }
 
 /// `healthcheck` aspect: lower the full compose healthcheck onto
@@ -267,18 +281,6 @@ fn lower_ports(ports: &[super::spec::PortSpec]) -> Result<Vec<(u16, u16)>> {
         .into_iter()
         .filter_map(|p: ParsedPort| p.published.map(|h| (h, p.target)))
         .collect())
-}
-
-/// Legacy `name=ref` list lowering for secrets/configs.
-fn lower_pairs(items: &[String]) -> Vec<(String, String)> {
-    items
-        .iter()
-        .filter_map(|item| {
-            let item = item.trim().trim_matches('"');
-            item.split_once('=')
-                .map(|(n, r)| (n.trim().to_string(), r.trim().to_string()))
-        })
-        .collect()
 }
 
 /// `healthcheck` (CMP-P1-HEALTH-FULL): lower the full compose form to the

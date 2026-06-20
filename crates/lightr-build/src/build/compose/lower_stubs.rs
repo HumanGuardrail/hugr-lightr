@@ -39,9 +39,11 @@
 // Re-export every per-aspect helper so `lower.rs` (the dispatcher) calls
 // `lower_stubs::lower_<aspect>` unchanged, and so the `#[cfg(test)]` module
 // below sees them through `super::*`.
-pub(super) use super::lower_files::{
-    lower_entrypoint, lower_spec_configs, lower_spec_secrets, lower_stop_grace_period,
-};
+// WP-CMP-SECRETS-FULL: `lower_spec_secrets`/`lower_spec_configs` removed — the
+// full-spec secrets/configs lowering is now `lower_files::lower_service_file_refs`,
+// called directly from `lower.rs`'s `lower_secrets`/`lower_configs` (single
+// writer, with the top-level source maps the old stub signature could not reach).
+pub(super) use super::lower_files::{lower_entrypoint, lower_stop_grace_period};
 pub(super) use super::lower_net::{
     lower_depends_on, lower_extra_hosts, lower_networks, lower_profiles,
 };

@@ -1,5 +1,6 @@
 //! Compose data model: Service, Compose, ComposeHandle, StackSpec, ServiceSpec,
 //! empty_service, parse_duration_secs.
+use super::lower_files::FileSource;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -119,6 +120,15 @@ pub struct Service {
 
 pub struct Compose {
     pub services: Vec<Service>,
+    /// WP-CMP-SECRETS-FULL (model touch — FLAGGED): the top-level `secrets:`
+    /// source map, lowered to typed [`FileSource`]s, so the up-path (`up.rs`,
+    /// which holds the Store) can INGEST each `file:` source into the Store under
+    /// its name as the ref — making a service's `(name, source)` `StoreFile`
+    /// resolve at run. Empty ⇒ no top-level secrets (behavior-preserving).
+    pub secret_sources: Vec<FileSource>,
+    /// WP-CMP-SECRETS-FULL: the top-level `configs:` source map — counterpart of
+    /// [`Self::secret_sources`].
+    pub config_sources: Vec<FileSource>,
 }
 
 /// The project name a pre-CMP-P1-PROJECT `spec.json` is read back as (it had
