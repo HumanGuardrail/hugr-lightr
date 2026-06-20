@@ -111,3 +111,57 @@ fn no_deploy_is_behavior_preserving() {
     assert_eq!(svc.replicas, None);
     assert_eq!(svc.restart, None);
 }
+
+// ── WP-CMP-CONFIG-LOWER: runtime-config + capability lowering ───────────────
+
+/// Lower a fragment through every WP-CMP-CONFIG-LOWER stub (init/tty/
+/// container_name/cap_add/cap_drop/privileged) onto a fresh service, in the
+/// dispatch grouping of `lower.rs` (runtime aspects then capability aspects).
+fn lower_config(yaml: &str) -> Service {
+    let def = def_from(yaml);
+    let mut svc = empty_service("svc".to_string());
+    lower_init(&def, &mut svc);
+    lower_tty(&def, &mut svc);
+    lower_container_name(&def, &mut svc);
+    lower_cap_add(&def, &mut svc);
+    lower_cap_drop(&def, &mut svc);
+    lower_privileged(&def, &mut svc);
+    svc
+}
+
+#[test]
+fn config_fields_lower_into_service() {
+    let svc = lower_config(
+        "init: true\ntty: true\nprivileged: true\ncontainer_name: my-db\n\
+         cap_add: [NET_ADMIN, SYS_TIME]\ncap_drop: [MKNOD]\n",
+    );
+    assert!(svc.init);
+    assert!(svc.tty);
+    assert!(svc.privileged);
+    assert_eq!(svc.container_name.as_deref(), Some("my-db"));
+    assert_eq!(svc.cap_add, vec!["NET_ADMIN", "SYS_TIME"]);
+    assert_eq!(svc.cap_drop, vec!["MKNOD"]);
+}
+
+#[test]
+fn absent_config_is_behavior_preserving() {
+    // No init/tty/privileged/container_name/cap_* ⇒ the no-op defaults
+    // (false/None/empty) ⇒ today's behavior, byte-identical.
+    let svc = lower_config("image: x\n");
+    assert!(!svc.init);
+    assert!(!svc.tty);
+    assert!(!svc.privileged);
+    assert_eq!(svc.container_name, None);
+    assert!(svc.cap_add.is_empty());
+    assert!(svc.cap_drop.is_empty());
+}
+
+#[test]
+fn explicit_false_bools_stay_false() {
+    // `init: false` / `tty: false` / `privileged: false` are the absent default
+    // and lower to false (no surprise toggle).
+    let svc = lower_config("init: false\ntty: false\nprivileged: false\n");
+    assert!(!svc.init);
+    assert!(!svc.tty);
+    assert!(!svc.privileged);
+}
