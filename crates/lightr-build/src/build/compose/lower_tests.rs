@@ -266,3 +266,60 @@ fn healthcheck_bad_duration_is_fail_closed() {
     };
     assert!(format!("{err}").contains("bad healthcheck interval"));
 }
+
+// --- CMP-P0-DEPENDS: depends_on lowering ---
+
+use crate::build::compose::model::DepCondition;
+
+/// The lowered depends_on edges of the named service.
+fn deps_of<'a>(c: &'a Compose, name: &str) -> &'a [(String, DepCondition)] {
+    &c.services
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap()
+        .depends_on
+}
+
+#[test]
+fn depends_on_short_form_defaults_to_started() {
+    let yaml = "services:\n  web:\n    image: x\n    depends_on: [db, redis]\n  db:\n    image: d\n  redis:\n    image: r\n";
+    let c = lower(serde_yaml::from_str(yaml).unwrap()).unwrap();
+    assert_eq!(
+        deps_of(&c, "web"),
+        &[
+            ("db".to_string(), DepCondition::Started),
+            ("redis".to_string(), DepCondition::Started),
+        ]
+    );
+}
+
+#[test]
+fn depends_on_long_form_carries_conditions() {
+    let yaml = "services:\n  web:\n    image: x\n    depends_on:\n      db:\n        condition: service_healthy\n      migrate:\n        condition: service_completed_successfully\n  db:\n    image: d\n  migrate:\n    image: m\n";
+    let c = lower(serde_yaml::from_str(yaml).unwrap()).unwrap();
+    assert_eq!(
+        deps_of(&c, "web"),
+        &[
+            ("db".to_string(), DepCondition::Healthy),
+            ("migrate".to_string(), DepCondition::Completed),
+        ]
+    );
+}
+
+#[test]
+fn depends_on_long_form_absent_condition_defaults_started() {
+    let yaml =
+        "services:\n  web:\n    image: x\n    depends_on:\n      db: {}\n  db:\n    image: d\n";
+    let c = lower(serde_yaml::from_str(yaml).unwrap()).unwrap();
+    assert_eq!(
+        deps_of(&c, "web"),
+        &[("db".to_string(), DepCondition::Started)]
+    );
+}
+
+#[test]
+fn no_depends_on_lowers_empty_edges() {
+    let yaml = "services:\n  web:\n    image: x\n";
+    let c = lower(serde_yaml::from_str(yaml).unwrap()).unwrap();
+    assert!(deps_of(&c, "web").is_empty());
+}
