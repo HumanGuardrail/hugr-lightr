@@ -9,6 +9,41 @@ use std::path::PathBuf;
 /// added timeout/start_period); the supervisor maps this tuple field-for-field.
 pub type LoweredHealthcheck = (String, u64, u64, u64, u32);
 
+/// CMP-P0-DEPENDS: the start-order condition on a `depends_on` edge.
+///
+/// Mirrors compose's three conditions verbatim. `Started` is the short-form
+/// default (`depends_on: [db]`): the dependency need only be SPAWNED before the
+/// dependent starts. `Healthy` waits for the dependency's healthcheck verdict to
+/// report `healthy`. `Completed` (`service_completed_successfully`) waits for the
+/// dependency to exit 0. Serialized as the compose condition string so the
+/// on-disk `StackSpec` is self-describing and round-trips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DepCondition {
+    #[serde(rename = "service_started")]
+    Started,
+    #[serde(rename = "service_healthy")]
+    Healthy,
+    #[serde(rename = "service_completed_successfully")]
+    Completed,
+}
+
+impl DepCondition {
+    /// Parse a compose `condition:` string. Unknown/absent ⇒ the short-form
+    /// default `service_started` (Docker-faithful: the short list form and any
+    /// long entry without a condition both mean "dependency started").
+    pub(crate) fn parse(s: Option<&str>) -> DepCondition {
+        match s {
+            Some("service_healthy") => DepCondition::Healthy,
+            Some("service_completed_successfully") => DepCondition::Completed,
+            // `service_started` and any unrecognized value fall back to started.
+            _ => DepCondition::Started,
+        }
+    }
+}
+
+/// CMP-P0-DEPENDS: one start-order dependency edge — `(dep_service, condition)`.
+pub type DepEdge = (String, DepCondition);
+
 pub struct Service {
     pub name: String,
     pub image_ref: String,
@@ -22,6 +57,10 @@ pub struct Service {
     pub configs: Vec<(String, String)>,
     /// CMP-P1-HEALTH-FULL: optional healthcheck — see [`LoweredHealthcheck`].
     pub healthcheck: Option<LoweredHealthcheck>,
+    /// CMP-P0-DEPENDS: start-order dependency edges (`dep -> condition`). Empty
+    /// for a service with no `depends_on` (behavior-preserving — supervisor
+    /// start order is then the declaration order, exactly as before).
+    pub depends_on: Vec<DepEdge>,
 }
 
 pub struct Compose {
@@ -72,6 +111,12 @@ pub struct ServiceSpec {
     /// loading as `None`.
     #[serde(default)]
     pub healthcheck: Option<LoweredHealthcheck>,
+    /// CMP-P0-DEPENDS: start-order dependency edges (`dep -> condition`). The
+    /// supervisor topo-sorts on these to start deps before dependents and to
+    /// gate on each edge's condition. `#[serde(default)]` keeps pre-existing
+    /// stack specs (no `depends_on` field) loading as empty (= today's order).
+    #[serde(default)]
+    pub depends_on: Vec<DepEdge>,
 }
 
 pub struct ComposeHandle {
@@ -91,6 +136,7 @@ pub(crate) fn empty_service(name: String) -> Service {
         secrets: Vec::new(),
         configs: Vec::new(),
         healthcheck: None,
+        depends_on: Vec::new(),
     }
 }
 

@@ -22,13 +22,41 @@
 //!
 //! The `_` bindings below are deliberate: they document that the source field
 //! exists and is intentionally not yet consumed (no `#[allow(unused)]`, no debt).
-use super::model::Service;
-use super::spec::ServiceDef;
+use super::model::{DepCondition, Service};
+use super::spec::{DependsOn, ServiceDef};
 
 /// `depends_on` (CMP-P0-DEPENDS): startup ordering / health-gated dependencies.
-/// Stub — start order is not modeled in the runtime `Service` yet.
-pub(super) fn lower_depends_on(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.depends_on;
+///
+/// Records each dependency edge `(dep_service, condition)` onto `svc.depends_on`
+/// so the supervisor can topo-sort the start order and gate each edge on its
+/// condition. Two shapes (per the frozen [`DependsOn`] model):
+///  * short list (`[db, redis]`) ⇒ every edge defaults to `service_started`;
+///  * long map (`{db: {condition: service_healthy}}`) ⇒ the declared condition
+///    (absent/unknown ⇒ `service_started`, the compose default).
+///
+/// Declaration order of the deps is preserved (`Vec` over the `IndexMap`); the
+/// topo sort is the supervisor's job. A service with no `depends_on` lowers to
+/// an empty edge list — behavior-preserving (start order stays declaration
+/// order in the supervisor).
+pub(super) fn lower_depends_on(def: &ServiceDef, svc: &mut Service) {
+    let Some(depends_on) = &def.depends_on else {
+        return;
+    };
+    svc.depends_on = match depends_on {
+        DependsOn::List(names) => names
+            .iter()
+            .map(|n| (n.clone(), DepCondition::Started))
+            .collect(),
+        DependsOn::Map(map) => map
+            .iter()
+            .map(|(name, entry)| {
+                (
+                    name.clone(),
+                    DepCondition::parse(entry.condition.as_deref()),
+                )
+            })
+            .collect(),
+    };
 }
 
 /// `deploy` (CMP-P1-DEPLOY-RES): replicas + resource limits + restart policy.

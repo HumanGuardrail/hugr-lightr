@@ -73,6 +73,7 @@ pub fn compose_up(
             secrets: s.secrets.clone(),
             configs: s.configs.clone(),
             healthcheck: s.healthcheck.clone(),
+            depends_on: s.depends_on.clone(),
         })
         .collect();
 
