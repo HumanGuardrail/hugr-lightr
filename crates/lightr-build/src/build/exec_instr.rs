@@ -13,7 +13,7 @@ use lightr_store::Store;
 use std::path::Path;
 
 use super::args::{ArgOverrides, ArgState};
-use super::exec_fs::{apply_meta, copy_dir_recursive_meta, expand_glob, CopyMeta};
+use super::exec_fs::{expand_glob, place_sources, CopyMeta};
 use super::memo::{load_meta, save_meta};
 use super::parse::{CmdForm, Instr};
 use super::vars::{interpolate, VarScope};
@@ -155,15 +155,11 @@ pub(super) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
 
 /// `COPY [--chown=u:g] [--chmod=NNNN] <src>... <dest>` (WP-DF-06).
 ///
-/// - `--from` is OUT OF SCOPE (multi-stage = DF-03): an honest fail-closed error.
-/// - `--chown`/`--chmod` (parsed into [`CopyMeta`]) are applied to every copied
-///   entry. `--chown` honors NUMERIC ids; named users are best-effort no-ops.
-/// - Multiple sources / a trailing-slash dest ⇒ dest is a DIRECTORY (Docker).
-/// - Copying a directory copies its CONTENTS into the dest (Docker dir semantics).
-/// - `*`/`?` GLOBS in a src expand against the build context.
-///
-/// The memo key already folds chown/chmod + the resolved source content
-/// (build/memo.rs), so this executor only realizes the bytes + metadata.
+/// `--from` is OUT OF SCOPE (multi-stage = DF-03): an honest fail-closed error.
+/// `--chown`/`--chmod` (parsed into [`CopyMeta`]), multi-src/glob/dir-contents
+/// placement, and the dir-vs-file dest rule all live in `place_sources`. The memo
+/// key already folds chown/chmod + the resolved source content (build/memo.rs),
+/// so this executor only realizes the bytes + metadata.
 pub(super) fn copy(
     ctx: &mut BuildCtx,
     src: &[String],
@@ -179,70 +175,64 @@ pub(super) fn copy(
         ));
     }
     let meta = CopyMeta::parse(chown, chmod)?;
-    // Interpolate the src tokens + dest, then glob-expand each src against the
-    // context. A glob with zero matches is an honest error (Docker: "no source
-    // files were specified"); a literal (non-glob) src is kept verbatim.
-    let raw_src = interp_vec(src, ctx.scope, ctx.escape)?;
     let dest = &interpolate(dest, ctx.scope, ctx.escape)?;
+    let sources = resolve_sources(ctx, src, "COPY")?;
+    // COPY never auto-extracts (a `.tar` is copied as a file) — `extract = false`.
+    place_sources(ctx.work_dir, &sources, dest, &meta, false)
+}
+
+/// Interpolate + glob-expand a COPY/ADD `src` list against the build context. A
+/// glob with zero matches is an honest error (Docker: "no source files"); a
+/// literal token is kept verbatim. Shared by COPY+ADD (DF-07 reuses DF-06).
+fn resolve_sources(ctx: &BuildCtx, src: &[String], verb: &str) -> Result<Vec<std::path::PathBuf>> {
+    let raw_src = interp_vec(src, ctx.scope, ctx.escape)?;
     let mut sources: Vec<std::path::PathBuf> = Vec::new();
     for token in &raw_src {
         let matched = expand_glob(ctx.context_dir, token);
-        if token.contains('*') || token.contains('?') {
-            if matched.is_empty() {
-                return Err(LightrError::InvalidManifest(format!(
-                    "COPY: no source files match {token:?}"
-                )));
-            }
-            sources.extend(matched);
-        } else {
-            sources.extend(matched);
+        if (token.contains('*') || token.contains('?')) && matched.is_empty() {
+            return Err(LightrError::InvalidManifest(format!(
+                "{verb}: no source files match {token:?}"
+            )));
         }
+        sources.extend(matched);
     }
-    let dest_path = if dest.starts_with('/') {
-        ctx.work_dir.join(dest.trim_start_matches('/'))
-    } else {
-        ctx.work_dir.join(dest)
-    };
-    // dest is a directory when it ends in `/` OR there is >1 resolved source
-    // (Docker requires a dir dest when copying multiple sources).
-    let dest_is_dir = dest.ends_with('/') || sources.len() > 1;
-    if dest_is_dir {
-        std::fs::create_dir_all(&dest_path).map_err(LightrError::Io)?;
-        for src_path in &sources {
-            copy_one_into_dir(src_path, &dest_path, &meta)?;
-        }
-    } else {
-        if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent).map_err(LightrError::Io)?;
-        }
-        let src_path = &sources[0];
-        if src_path.is_file() {
-            std::fs::copy(src_path, &dest_path).map_err(LightrError::Io)?;
-            apply_meta(&dest_path, &meta)?;
-        } else if src_path.is_dir() {
-            std::fs::create_dir_all(&dest_path).map_err(LightrError::Io)?;
-            copy_dir_recursive_meta(src_path, &dest_path, &meta)?;
-            apply_meta(&dest_path, &meta)?;
-        }
-    }
-    Ok(())
+    Ok(sources)
 }
 
-/// Copy one resolved source INTO an existing directory `dest_dir`. A file lands
-/// as `dest_dir/<name>`; a directory copies its CONTENTS into `dest_dir`
-/// (Docker's COPY dir semantics). `meta` (chown/chmod) is applied to each entry.
-fn copy_one_into_dir(src_path: &Path, dest_dir: &Path, meta: &CopyMeta) -> Result<()> {
-    if src_path.is_file() {
-        let file_name = src_path
-            .file_name()
-            .ok_or_else(|| LightrError::InvalidManifest("COPY: source has no file name".into()))?;
-        let target = dest_dir.join(file_name);
-        std::fs::copy(src_path, &target).map_err(LightrError::Io)?;
-        apply_meta(&target, meta)?;
-    } else if src_path.is_dir() {
-        copy_dir_recursive_meta(src_path, dest_dir, meta)?;
+/// `ADD [--chown=u:g] [--chmod=NNNN] <src>... <dest>` (WP-DF-07).
+///
+/// Local file/dir ADD is identical to COPY (reuses DF-06's `CopyMeta`/placement
+/// via `place_sources`). ADD-specific: a LOCAL src that is a recognized archive
+/// (`.tar`, `.tar.gz`/`.tgz`) is auto-EXTRACTED into dest (Docker); `.tar.bz2`/
+/// `.tar.xz` are honestly deferred (no decompressor dep). A remote URL src is
+/// HONEST UNSUPPORTED — a network fetch is non-hermetic and breaks the
+/// memoize-first/CAS determinism model. The memo key folds source content +
+/// chown/chmod (build/memo.rs, the SAME fold as COPY), so extraction is
+/// deterministic from the keyed archive bytes.
+pub(super) fn add(
+    ctx: &mut BuildCtx,
+    src: &[String],
+    dest: &str,
+    chown: Option<&str>,
+    chmod: Option<&str>,
+) -> Result<()> {
+    // Remote URL src: fail-closed BEFORE any work (non-hermetic — breaks CAS
+    // determinism). Checked on the RAW tokens. Docker fetches; we are honest.
+    for token in src {
+        let t = token.trim_start();
+        if t.starts_with("http://") || t.starts_with("https://") {
+            return Err(LightrError::InvalidManifest(format!(
+                "ADD from a URL is unsupported: non-hermetic (breaks memoize-first/CAS \
+                 determinism); vendor the file and use COPY instead — {token:?}"
+            )));
+        }
     }
-    Ok(())
+    let meta = CopyMeta::parse(chown, chmod)?;
+    let dest = &interpolate(dest, ctx.scope, ctx.escape)?;
+    let sources = resolve_sources(ctx, src, "ADD")?;
+    // ADD auto-extracts recognized archives (`extract = true`); the placement +
+    // dir/file rules are otherwise COPY's, shared via `place_sources`.
+    place_sources(ctx.work_dir, &sources, dest, &meta, true)
 }
 
 /// `ENV`: update the scope + accumulated ENV for all pairs, persisting to meta.

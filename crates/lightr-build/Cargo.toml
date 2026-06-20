@@ -24,6 +24,11 @@ serde_yaml = { workspace = true }
 indexmap = { workspace = true }
 blake3 = { workspace = true }
 libc = { workspace = true }
+# ADD tar auto-extract (WP-DF-07). Both are EXISTING workspace deps (already in
+# the lockfile via lightr-oci's docker-save import) — wiring them into this crate
+# is `{ workspace = true }`, NOT a new project dependency.
+tar = { workspace = true }
+flate2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
