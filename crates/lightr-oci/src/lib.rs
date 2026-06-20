@@ -40,6 +40,7 @@ mod oci;
 
 // ── Public API re-exports ─────────────────────────────────────────────────
 
+pub use oci::images::{list_images, ImageRow};
 pub use oci::import::import_layout;
 pub use oci::load::load;
 pub use oci::model::{ImportReport, LoadReport, PushReport, SaveReport};

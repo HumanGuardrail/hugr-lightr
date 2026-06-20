@@ -2,6 +2,7 @@
 //! the public surface.
 
 pub(crate) mod http;
+pub(crate) mod images;
 pub(crate) mod import;
 pub(crate) mod layer;
 pub(crate) mod load;

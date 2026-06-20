@@ -194,3 +194,24 @@ fn tag_lww_repoints_existing_dst() {
     let second = store.ref_get("@t/dst").unwrap().unwrap();
     assert_eq!(second.root, root_b, "re-tag must repoint dst (LWW)");
 }
+
+// ── WP-IMG-06: oci images ──────────────────────────────────────────────────
+//
+// The substantive behaviour (repo/tag/id/size, unique-object size, sorting)
+// is covered parallel-safely in lightr-oci's images_tests against an injected
+// store. Here we only smoke the handler's default-root wiring + exit code on an
+// empty store, which requires LIGHTR_HOME ⇒ ENV_LOCK serialization.
+
+#[test]
+fn images_empty_store_exits_0() {
+    let _guard = crate::test_lock::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::env::set_var("LIGHTR_HOME", tmp.path());
+    let code_table = super::images(false);
+    let code_json = super::images(true);
+    std::env::remove_var("LIGHTR_HOME");
+    assert_eq!(code_table, 0, "empty store table → exit 0 (header only)");
+    assert_eq!(code_json, 0, "empty store json → exit 0 ([])");
+}
