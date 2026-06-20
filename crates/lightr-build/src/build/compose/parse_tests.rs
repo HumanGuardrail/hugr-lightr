@@ -93,3 +93,92 @@ fn parse_compose_healthcheck_without_cmd_dropped() {
         "healthcheck without a command must be dropped"
     );
 }
+
+// ---- serde-model tests (CMP-P0-PARSER) ----
+
+#[test]
+fn parse_compose_environment_map_form() {
+    let yaml = "services:\n  svc:\n    image: i\n    environment:\n      FOO: bar\n      NUM: 7\n      EMPTY:\n";
+    let c = parse_compose(yaml).unwrap();
+    let env = &c.services[0].env;
+    // Numbers coerce to strings; empty/null map values are dropped (legacy).
+    assert!(env.contains(&("FOO".to_string(), "bar".to_string())));
+    assert!(env.contains(&("NUM".to_string(), "7".to_string())));
+    assert!(
+        !env.iter().any(|(k, _)| k == "EMPTY"),
+        "empty map env value must be dropped"
+    );
+}
+
+#[test]
+fn parse_compose_environment_list_form() {
+    let yaml = "services:\n  svc:\n    image: i\n    environment:\n      - FOO=bar\n      - BAZ=qux=extra\n";
+    let c = parse_compose(yaml).unwrap();
+    assert_eq!(
+        c.services[0].env,
+        vec![
+            ("FOO".to_string(), "bar".to_string()),
+            ("BAZ".to_string(), "qux=extra".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn parse_compose_preserves_service_order() {
+    let yaml = "services:\n  zeta:\n    image: z\n  alpha:\n    image: a\n  mid:\n    image: m\n";
+    let c = parse_compose(yaml).unwrap();
+    let names: Vec<&str> = c.services.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["zeta", "alpha", "mid"],
+        "declaration order kept"
+    );
+}
+
+#[test]
+fn parse_compose_rich_service_parses_without_error() {
+    // depends_on, volumes, networks, deploy, profiles, labels, build, restart,
+    // working_dir, user, container_name, expose, env_file, entrypoint — all
+    // richer compose-spec fields must parse (ignored at lowering, consumed by
+    // CMP-P1/P2) without erroring.
+    let yaml = "version: \"3.9\"\nname: stack\nservices:\n  web:\n    image: nginx\n    entrypoint: [\"/entry.sh\"]\n    env_file: .env\n    expose:\n      - 9000\n    build:\n      context: .\n      dockerfile: Dockerfile\n    depends_on:\n      - db\n    volumes:\n      - data:/var/lib/data\n    networks:\n      - backend\n    deploy:\n      replicas: 2\n    profiles:\n      - prod\n    labels:\n      com.example: yes\n    restart: always\n    working_dir: /app\n    user: nobody\n    container_name: web1\n  db:\n    image: postgres\nvolumes:\n  data: {}\nnetworks:\n  backend: {}\n";
+    let c = parse_compose(yaml).expect("rich compose parses");
+    assert_eq!(c.services.len(), 2);
+    assert_eq!(c.services[0].name, "web");
+    assert_eq!(c.services[0].image_ref, "nginx");
+}
+
+#[test]
+fn parse_compose_malformed_yaml_errors() {
+    // Unbalanced flow mapping — genuinely malformed YAML.
+    let yaml = "services:\n  svc:\n    image: [unterminated\n";
+    assert!(
+        parse_compose(yaml).is_err(),
+        "malformed YAML must fail-closed, not panic"
+    );
+}
+
+#[test]
+fn parse_compose_top_level_unknown_ignored() {
+    let yaml = "x-some-anchor: &a 1\ntotally-unknown: hi\nservices:\n  svc:\n    image: i\n";
+    let c = parse_compose(yaml).unwrap();
+    assert_eq!(c.services.len(), 1);
+    assert_eq!(c.services[0].image_ref, "i");
+}
+
+#[test]
+fn compose_spec_model_deserializes_both_env_forms() {
+    use super::super::spec::{ComposeSpec, Environment};
+    let yaml =
+        "services:\n  a:\n    environment:\n      - K=V\n  b:\n    environment:\n      M: N\n";
+    let spec: ComposeSpec = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(spec.services.len(), 2);
+    assert!(matches!(
+        spec.services["a"].environment,
+        Some(Environment::List(_))
+    ));
+    assert!(matches!(
+        spec.services["b"].environment,
+        Some(Environment::Map(_))
+    ));
+}
