@@ -49,6 +49,7 @@ fn deep_memo_disabled_equals_run_memoized() {
         workdir: None,
         user: None,
         restart: None,
+        stop_signal: None,
     };
     let cfg = DeepMemoConfig { enabled: false };
 
@@ -128,6 +129,7 @@ fn deep_memo_enabled_fallback_correctness() {
         workdir: None,
         user: None,
         restart: None,
+        stop_signal: None,
     };
     let cfg_on = DeepMemoConfig { enabled: true };
 

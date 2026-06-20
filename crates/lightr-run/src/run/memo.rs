@@ -10,8 +10,8 @@
 //! - **IN the run key:** explicit env (`env_explicit`, folded `key=value\0` —
 //!   WP-RC-1), image ENV, CAS-ref content, ro-bind fingerprint. (Build-only
 //!   inputs — workdir/user/entrypoint + interp text — key in the BUILD domain.)
-//! - **OUT of the run key (runtime):** caps, restart, health, ports, labels,
-//!   network, tty, workdir/user/hostname at RUN time, and the discovery `env`
+//! - **OUT of the run key (runtime):** caps, restart, stop_signal, health, ports,
+//!   labels, network, tty, workdir/user/hostname at RUN time, and the discovery `env`
 //!   channel (LEAD ARBITRATION env-split: `env` is UNKEYED; only `env_explicit`
 //!   is keyed).
 //! - **NON-memoizable (force-MISS, no AC write):** rw-bind, named, anon, tmpfs

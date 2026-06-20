@@ -128,7 +128,6 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
         return 2;
     }
 
-    // Check if args[0] looks like a ref (store lookup)
     let possible_ref = &args[0];
     let cmd_args: &[String] = &args[1..];
 
@@ -178,6 +177,7 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             None, // workdir
             None, // user (WP-RC-USER)
             None, // restart (WP-RC-RESTART)
+            None, // stop_signal (WP-RC-STOPSIGNAL) — untranslated by the docker shim
             &crate::handlers::run::HealthFlags::default(),
         )
     } else if is_known_ref {
@@ -217,6 +217,7 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             None, // workdir
             None, // user (WP-RC-USER)
             None, // restart (WP-RC-RESTART)
+            None, // stop_signal (WP-RC-STOPSIGNAL) — untranslated by the docker shim
             &crate::handlers::run::HealthFlags::default(),
         )
     }

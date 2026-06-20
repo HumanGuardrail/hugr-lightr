@@ -41,6 +41,8 @@ mod paths;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_health;
 
 #[derive(Serialize)]
 pub(super) struct RunJson {
@@ -200,18 +202,17 @@ pub fn run(
     // (env_keys, discovery channel) is a SEPARATE mechanism, untouched here.
     env_set: &[String],
     env_file: Option<&str>,
-    // WP-RC-WORKDIR: `-w`/`--workdir` (Docker WORKDIR). `None` ⇒ run in `dir`.
-    // RUNTIME ONLY (never keyed). Honored as the child's cwd at exec (auto-created).
+    // RUNTIME-ONLY docker-parity flags (never keyed; `None` ⇒ today's behaviour).
+    // WP-RC-WORKDIR `-w` (Docker WORKDIR; `None` ⇒ run in `dir`): child's cwd at exec.
     workdir: Option<&str>,
-    // WP-RC-USER: `-u`/`--user` (Docker `--user`). `None` ⇒ current user. RUNTIME
-    // ONLY. Honored as the native child's uid/gid at exec (cfg(unix); honest error).
+    // WP-RC-USER `-u` (`None` ⇒ current user): native child uid/gid (cfg(unix)).
     user: Option<&str>,
-    // WP-RC-RESTART: `--restart` (Docker restart policy). `None` ⇒ `no` (run once +
-    // exit). RUNTIME ONLY. Honored by the supervisor re-spawn loop; pre-validated.
+    // WP-RC-RESTART `--restart` (`None` ⇒ `no`): supervisor re-spawn loop; pre-validated.
     restart: Option<&str>,
-    // WP-RC-4: healthcheck flags, now WIRED (was parsed & discarded). Lowered to
-    // a Healthcheck and run by the detached supervisor's watchdog. Never a
-    // memo-key input (runtime probe, §0).
+    // WP-RC-STOPSIGNAL `--stop-signal` (`None` ⇒ SIGTERM): `lightr stop`; pre-validated.
+    stop_signal: Option<&str>,
+    // WP-RC-4: healthcheck flags, WIRED — lowered to a Healthcheck run by the
+    // supervisor's watchdog. Never a memo-key input (runtime probe, §0).
     health: &HealthFlags,
 ) -> i32 {
     // Parse engine kind — bad value ⇒ exit 2
@@ -347,12 +348,11 @@ pub fn run(
             configs,
             ports,
             env_explicit,
-            // WP-RC-WORKDIR/USER/RESTART: persisted to spec.json for fidelity. The
-            // vz branch boots a microVM (not a native re-spawnable child) so it does
-            // not honor these here; the native supervisor (memo/supervise) does.
+            // RUNTIME flags persisted to spec.json; the native supervisor honors them.
             workdir: workdir.map(String::from),
             user: user.map(String::from),
             restart: restart.map(String::from),
+            stop_signal: stop_signal.map(String::from),
         };
         return match spawn_detached_engine(
             &spec,
@@ -392,9 +392,9 @@ pub fn run(
         limits,
         healthcheck,
         env_explicit,
-        // WP-RC-WORKDIR: `-w`/`--workdir` → honored as the native child's cwd.
         workdir: workdir.map(String::from),
-        user: user.map(String::from), // WP-RC-USER: honored as native child uid/gid
-        restart: restart.map(String::from), // WP-RC-RESTART: honored by the supervisor re-spawn loop
+        user: user.map(String::from),
+        restart: restart.map(String::from),
+        stop_signal: stop_signal.map(String::from),
     })
 }
