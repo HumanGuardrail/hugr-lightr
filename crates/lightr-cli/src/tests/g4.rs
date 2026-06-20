@@ -98,8 +98,14 @@ fn compose_up_minimal() {
     let cli = parse(&["compose", "up"]);
     match &cli.cmd {
         Cmd::Compose { subcmd } => match subcmd {
-            ComposeCmd::Up { file, eager, ttl } => {
+            ComposeCmd::Up {
+                file,
+                project_name,
+                eager,
+                ttl,
+            } => {
                 assert_eq!(file, "compose.yml", "default compose file");
+                assert!(project_name.is_none(), "no -p by default");
                 assert!(!eager, "eager is false by default");
                 assert_eq!(*ttl, 3600, "default TTL is 3600");
             }
@@ -151,6 +157,25 @@ fn compose_up_ttl_flag() {
     }
 }
 
+#[test]
+fn compose_up_project_name_flag() {
+    for argv in [
+        vec!["compose", "up", "-p", "myproj"],
+        vec!["compose", "up", "--project-name", "myproj"],
+    ] {
+        let cli = parse(&argv);
+        match &cli.cmd {
+            Cmd::Compose { subcmd } => match subcmd {
+                ComposeCmd::Up { project_name, .. } => {
+                    assert_eq!(project_name.as_deref(), Some("myproj"));
+                }
+                _ => panic!("expected Up"),
+            },
+            _ => panic!("expected Compose"),
+        }
+    }
+}
+
 // ── compose down ──────────────────────────────────────────────────────────
 
 #[test]
@@ -158,8 +183,9 @@ fn compose_down_minimal() {
     let cli = parse(&["compose", "down"]);
     match &cli.cmd {
         Cmd::Compose { subcmd } => match subcmd {
-            ComposeCmd::Down { file } => {
+            ComposeCmd::Down { file, project_name } => {
                 assert!(file.is_none(), "no -f by default");
+                assert!(project_name.is_none(), "no -p by default");
             }
             _ => panic!("expected Down"),
         },
@@ -172,8 +198,22 @@ fn compose_down_with_file_flag() {
     let cli = parse(&["compose", "down", "-f", "my-compose.yml"]);
     match &cli.cmd {
         Cmd::Compose { subcmd } => match subcmd {
-            ComposeCmd::Down { file } => {
+            ComposeCmd::Down { file, .. } => {
                 assert_eq!(file.as_deref(), Some("my-compose.yml"));
+            }
+            _ => panic!("expected Down"),
+        },
+        _ => panic!("expected Compose"),
+    }
+}
+
+#[test]
+fn compose_down_project_name_flag() {
+    let cli = parse(&["compose", "down", "-p", "myproj"]);
+    match &cli.cmd {
+        Cmd::Compose { subcmd } => match subcmd {
+            ComposeCmd::Down { project_name, .. } => {
+                assert_eq!(project_name.as_deref(), Some("myproj"));
             }
             _ => panic!("expected Down"),
         },

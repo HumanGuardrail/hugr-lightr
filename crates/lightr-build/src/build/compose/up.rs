@@ -28,8 +28,18 @@ pub(crate) fn lightr_home_pub() -> PathBuf {
 /// - Lazy services: the supervisor binds their host ports and starts the service
 ///   on the first incoming connection.
 ///
+/// `project` is the resolved compose project name (CMP-P1-PROJECT —
+/// precedence cli>env>`name:`>basename, sanitized to Docker's grammar at the
+/// call site). It is recorded in the `StackSpec` so `compose down -p <name>`
+/// can target exactly this stack's project and two projects never collide.
+///
 /// Returns once the stack directory is written (ms).
-pub fn compose_up(c: &Compose, store: &Store, ttl_secs: u64) -> Result<ComposeHandle> {
+pub fn compose_up(
+    c: &Compose,
+    store: &Store,
+    ttl_secs: u64,
+    project: &str,
+) -> Result<ComposeHandle> {
     let _ = store; // store reserved for future hydrate-before-spawn path
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -69,6 +79,7 @@ pub fn compose_up(c: &Compose, store: &Store, ttl_secs: u64) -> Result<ComposeHa
     let spec = StackSpec {
         ttl_secs,
         created_at_unix,
+        project: project.to_string(),
         supervisor_pid: None,
         services: service_specs.clone(),
     };
