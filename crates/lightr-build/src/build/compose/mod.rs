@@ -5,9 +5,24 @@ pub mod down;
 pub(crate) mod envfile;
 pub mod interp;
 pub(crate) mod lower;
-/// SKELETON-FREEZE: per-aspect lowering STUBS for compose service fields frozen
-/// in the model but not yet lowered (depends_on/deploy/networks/restart/...).
-/// Each is an honest no-op a feature WP fills. Consumed by `lower.rs`.
+/// SKELETON-FREEZE per-aspect lowering bodies, grouped cohesively so a feature WP
+/// touching one aspect group is FILE-DISJOINT from another. Re-exported through
+/// `lower_stubs` (the facade the dispatcher calls). Each holds the
+/// secrets/configs (full-spec) refs + entrypoint/stop_grace_period bodies.
+mod lower_files;
+/// SKELETON-FREEZE per-aspect group: depends_on/networks/extra_hosts/profiles
+/// (network attachment + start orchestration). Re-exported via `lower_stubs`.
+mod lower_net;
+/// SKELETON-FREEZE per-aspect group: deploy (resources.limits + restart_policy)
+/// + cap_add/cap_drop/privileged. Re-exported via `lower_stubs`.
+mod lower_resources;
+/// SKELETON-FREEZE per-aspect group: working_dir/user/restart/stop_signal/init/
+/// tty/container_name (per-process runtime config). Re-exported via `lower_stubs`.
+mod lower_runtime;
+/// SKELETON-FREEZE facade: re-exports every per-aspect `lower_<aspect>` from the
+/// `lower_{runtime,resources,net,files}` siblings so the dispatcher (`lower.rs`)
+/// calls `lower_stubs::lower_<aspect>` unchanged. Filled bodies + honest no-op
+/// stubs; a feature WP fills exactly one stub. Consumed by `lower.rs`.
 pub(crate) mod lower_stubs;
 /// CMP-P0-MERGE: compose override deep-merge engine + merged parse entry point.
 pub mod merge;
