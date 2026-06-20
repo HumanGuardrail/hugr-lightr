@@ -144,6 +144,43 @@ pub fn push_image(store_ref: &str, target: &str, json: bool) -> i32 {
     0
 }
 
+// ── image ops (CLI-surface freeze — honest fail-closed stubs) ──────────────────
+//
+// `docker tag/save/load/images/rmi/history` map to `oci <verb>` (the shim does
+// the translation, untouched here). Behavior lands in WP-IMG-*.
+
+use crate::handlers::stub::stub;
+
+/// `oci tag <src> <target>` — add a ref alias to an image (docker tag).
+pub fn tag(_src: &str, _target: &str) -> i32 {
+    stub("oci tag", "WP-IMG-03")
+}
+
+/// `oci save <store-ref> [--output]` — export an image to a tar (docker save).
+pub fn save(_store_ref: &str, _output: Option<&str>) -> i32 {
+    stub("oci save", "WP-IMG-03")
+}
+
+/// `oci load [--input]` — import an image from a tar (docker load).
+pub fn load(_input: Option<&str>) -> i32 {
+    stub("oci load", "WP-IMG-03")
+}
+
+/// `oci images` — list stored images (docker images).
+pub fn images(_json: bool) -> i32 {
+    stub("oci images", "WP-IMG-03")
+}
+
+/// `oci rmi <targets...>` — remove one or more images (docker rmi).
+pub fn rmi(_targets: &[String], _force: bool) -> i32 {
+    stub("oci rmi", "WP-IMG-03")
+}
+
+/// `oci history <target>` — show the layer history of an image (docker history).
+pub fn history(_target: &str, _json: bool) -> i32 {
+    stub("oci history", "WP-IMG-03")
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

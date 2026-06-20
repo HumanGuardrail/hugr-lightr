@@ -115,6 +115,63 @@ pub(crate) enum Cmd {
         /// Healthcheck retries before Unhealthy — F-309
         #[arg(long, default_value_t = 3)]
         health_retries: u32,
+        // ── Docker-parity run flags (CLI-surface freeze; behavior per WP-RUNFLAGS) ──
+        /// Assign a name to the container (docker --name)
+        #[arg(long)]
+        name: Option<String>,
+        /// Remove the container when it exits (docker --rm)
+        #[arg(long = "rm")]
+        rm: bool,
+        /// Working directory inside the container (docker -w/--workdir)
+        #[arg(short = 'w', long)]
+        workdir: Option<String>,
+        /// User[:group] to run as (docker -u/--user)
+        #[arg(short = 'u', long)]
+        user: Option<String>,
+        /// Set environment variables (docker -e/--env, repeatable). The long
+        /// `--env` already binds the memo env-KEYS list above; this adds only
+        /// the docker short `-e` (KEY=VAL). WP-RUNFLAGS owns reconciling the
+        /// two `--env` grammars. Flagged in the return card.
+        #[arg(short = 'e', value_name = "KEY=VAL")]
+        env_set: Vec<String>,
+        /// Read environment variables from a file (docker --env-file)
+        #[arg(long)]
+        env_file: Option<String>,
+        /// Set metadata labels (docker --label, repeatable)
+        #[arg(long, value_name = "KEY=VAL")]
+        label: Vec<String>,
+        /// Override the image entrypoint (docker --entrypoint)
+        #[arg(long)]
+        entrypoint: Option<String>,
+        /// Container hostname (docker --hostname)
+        #[arg(long)]
+        hostname: Option<String>,
+        /// Restart policy (docker --restart)
+        #[arg(long)]
+        restart: Option<String>,
+        /// Connect to a network (docker --network)
+        #[arg(long)]
+        network: Option<String>,
+        /// Network-scoped alias (docker --network-alias, repeatable)
+        #[arg(long)]
+        network_alias: Vec<String>,
+        /// Add a custom host-to-IP mapping (docker --add-host, repeatable)
+        #[arg(long, value_name = "HOST:IP")]
+        add_host: Vec<String>,
+        /// Set custom DNS servers (docker --dns, repeatable)
+        #[arg(long)]
+        dns: Vec<String>,
+        /// Bind mount a volume (docker -v/--volume, repeatable)
+        #[arg(short = 'v', long = "volume", value_name = "SRC:DST")]
+        volume: Vec<String>,
+        // NOTE: docker's `--mount` is intentionally NOT re-added here — the Run
+        // variant already owns `--mount` (lightr REF:TARGET, field `mount`
+        // above). Re-declaring `long = "mount"` would be a clap conflict. The
+        // docker `--mount` type=... syntax is deferred to WP-RUNFLAGS, which
+        // owns reconciling the two grammars. Flagged in the return card.
+        /// Mount a tmpfs directory (docker --tmpfs, repeatable)
+        #[arg(long)]
+        tmpfs: Vec<String>,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
@@ -166,6 +223,47 @@ pub(crate) enum Cmd {
         id: String,
         #[arg(last = true, required = true)]
         command: Vec<String>,
+    },
+    // ── Docker-parity container-lifecycle verbs (CLI-surface freeze) ───────────
+    /// Remove one or more containers (docker rm)
+    Rm {
+        targets: Vec<String>,
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
+    /// Send a signal to one or more running containers (docker kill)
+    Kill {
+        targets: Vec<String>,
+        #[arg(short = 's', long)]
+        signal: Option<String>,
+    },
+    /// Start one or more stopped containers (docker start)
+    Start { targets: Vec<String> },
+    /// Restart one or more containers (docker restart)
+    Restart {
+        targets: Vec<String>,
+        #[arg(short = 't', long, default_value_t = 10)]
+        grace: u64,
+    },
+    /// Block until one or more containers stop (docker wait)
+    Wait { targets: Vec<String> },
+    /// Rename a container (docker rename)
+    Rename { target: String, new_name: String },
+    /// Copy files between a container and the host (docker cp)
+    Cp { src: String, dest: String },
+    /// Display live resource-usage statistics (docker stats)
+    Stats { target: Option<String> },
+    /// Display the running processes of a container (docker top)
+    Top { target: String },
+    /// Manage container networks (docker network)
+    Network {
+        #[command(subcommand)]
+        subcmd: NetworkCmd,
+    },
+    /// Manage named volumes (docker volume)
+    Volume {
+        #[command(subcommand)]
+        subcmd: VolumeCmd,
     },
     /// Garbage collect unreachable objects
     Gc {
