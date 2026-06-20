@@ -16,6 +16,9 @@ pub mod inspect;
 pub mod kill;
 pub mod logs;
 pub mod mcp;
+// The net mesh (lightr_run::network) is unix-only; on Windows (WSL ring, future)
+// the network verbs are honest-stubbed at dispatch. Gate the module to match.
+#[cfg(unix)]
 pub mod network;
 pub mod oci;
 pub mod plan;
