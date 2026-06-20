@@ -93,6 +93,17 @@ pub fn spawn_detached_engine(
     };
     write_spec_json(&dir, &spec_on_disk)?;
 
+    launch_supervisor(&dir)?;
+
+    Ok(RunHandle { id, dir })
+}
+
+/// Re-launch the detached supervisor (`__supervise <dir>`) for a run dir that
+/// already holds a valid `spec.json`. Extracted from `spawn_detached_engine` so
+/// the lifecycle primitive `respawn_run` re-spawns a stopped run in its SAME
+/// dir/id without duplicating the detach (setsid / DETACHED_PROCESS) logic.
+/// Behaviour for the spawn path is byte-identical to the inline code it replaced.
+pub(super) fn launch_supervisor(dir: &std::path::Path) -> Result<()> {
     let exe = std::env::current_exe().map_err(LightrError::Io)?;
     let dir_str = dir.to_string_lossy().into_owned();
 
@@ -128,6 +139,5 @@ pub fn spawn_detached_engine(
     }
 
     cmd.spawn().map_err(LightrError::Io)?;
-
-    Ok(RunHandle { id, dir })
+    Ok(())
 }

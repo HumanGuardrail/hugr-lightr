@@ -5,6 +5,7 @@ mod ac;
 mod ctl;
 pub mod deepmemo;
 pub mod exec;
+pub mod lifecycle;
 pub mod logs;
 pub mod memo;
 pub mod mount;
