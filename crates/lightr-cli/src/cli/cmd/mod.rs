@@ -114,6 +114,13 @@ pub(crate) enum Cmd {
         both: bool,
         #[arg(short = 'f', long)]
         follow: bool,
+        /// Lines from the end of the logs: a number or `all` (docker --tail/-t).
+        #[arg(long, value_name = "N", default_value = "all")]
+        tail: String,
+        #[arg(long, value_name = "TS")] // docker --since (unix seconds)
+        since: Option<String>,
+        #[arg(short = 't', long)] // docker -t (file-level timestamp signal)
+        timestamps: bool,
     },
     /// Stop a running instance
     Stop {
@@ -142,6 +149,17 @@ pub(crate) enum Cmd {
     },
     /// Start one or more stopped containers (docker start)
     Start { targets: Vec<String> },
+    /// Suspend all processes in one or more containers (docker pause)
+    Pause { targets: Vec<String> },
+    /// Resume all processes in one or more paused containers (docker unpause)
+    Unpause { targets: Vec<String> },
+    /// List a container's published port mappings (docker port)
+    Port {
+        target: String,
+        /// Specific container port (e.g. `8080` or `8080/tcp`) — print only its
+        /// host binding; omit to print every published mapping.
+        port: Option<String>,
+    },
     /// Restart one or more containers (docker restart)
     Restart {
         targets: Vec<String>,

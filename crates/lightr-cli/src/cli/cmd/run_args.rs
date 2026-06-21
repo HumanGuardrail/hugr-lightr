@@ -90,8 +90,8 @@ pub(crate) struct RunArgs {
     /// Read environment variables from a file (docker --env-file)
     #[arg(long)]
     pub(crate) env_file: Option<String>,
-    /// Set metadata labels (docker --label, repeatable)
-    #[arg(long, value_name = "KEY=VAL")]
+    /// Set metadata labels (docker -l/--label, repeatable)
+    #[arg(short = 'l', long, value_name = "KEY=VAL")]
     pub(crate) label: Vec<String>,
     /// Override the image entrypoint (docker --entrypoint)
     #[arg(long)]
@@ -129,6 +129,36 @@ pub(crate) struct RunArgs {
     /// Mount a tmpfs directory (docker --tmpfs, repeatable)
     #[arg(long)]
     pub(crate) tmpfs: Vec<String>,
+    // ── WP-CLI-TRIO / RC-FLAGS: 11 run-config flags, WIRED to RunSpec carry-
+    // fields (off the WP-RUNFLAGS stub guard). RUNTIME-ONLY (never keyed).
+    // `hostname` + `label` already declared above; the rest are added here. ─────
+    /// Add a Linux capability (docker --cap-add, repeatable)
+    #[arg(long, value_name = "CAP")]
+    pub(crate) cap_add: Vec<String>,
+    /// Drop a Linux capability (docker --cap-drop, repeatable)
+    #[arg(long, value_name = "CAP")]
+    pub(crate) cap_drop: Vec<String>,
+    /// Give extended privileges to the container (docker --privileged)
+    #[arg(long)]
+    pub(crate) privileged: bool,
+    /// Allocate a pseudo-TTY (docker -t/--tty)
+    #[arg(short = 't', long)]
+    pub(crate) tty: bool,
+    /// Run an init inside the container as PID 1 (docker --init)
+    #[arg(long)]
+    pub(crate) init: bool,
+    /// Mount the container's root filesystem read-only (docker --read-only)
+    #[arg(long)]
+    pub(crate) read_only: bool,
+    /// Tune the host OOM killer preference (docker --oom-score-adj)
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    pub(crate) oom_score_adj: Option<i32>,
+    /// Tune the container pids limit (docker --pids-limit)
+    #[arg(long, value_name = "N")]
+    pub(crate) pids_limit: Option<i64>,
+    /// Size of /dev/shm (docker --shm-size: 64m, 1g, or bare bytes)
+    #[arg(long, value_name = "SIZE")]
+    pub(crate) shm_size: Option<String>,
     #[arg(last = true, required = true)]
     pub(crate) command: Vec<String>,
 }

@@ -59,11 +59,49 @@ fn logs_minimal() {
             stderr,
             both,
             follow,
+            ..
         } => {
             assert_eq!(id, "abc123");
             assert!(!stderr);
             assert!(!both);
             assert!(!follow);
+        }
+        _ => panic!("wrong cmd"),
+    }
+}
+
+// WP-CLI-TRIO / LOGS-FLAGS: --tail / --since / -t parse and default correctly.
+#[test]
+fn logs_tail_default_is_all() {
+    let cli = parse(&["logs", "id1"]);
+    match &cli.cmd {
+        Cmd::Logs {
+            tail,
+            since,
+            timestamps,
+            ..
+        } => {
+            assert_eq!(tail, "all");
+            assert!(since.is_none());
+            assert!(!timestamps);
+        }
+        _ => panic!("wrong cmd"),
+    }
+}
+
+#[test]
+fn logs_tail_n_and_since_and_timestamps() {
+    let cli = parse(&["logs", "id1", "--tail", "20", "--since", "1717600000", "-t"]);
+    match &cli.cmd {
+        Cmd::Logs {
+            tail,
+            since,
+            timestamps,
+            ..
+        } => {
+            assert_eq!(tail, "20");
+            assert_eq!(since.as_deref(), Some("1717600000"));
+            assert!(timestamps);
         }
         _ => panic!("wrong cmd"),
     }
