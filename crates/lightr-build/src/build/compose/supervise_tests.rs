@@ -293,6 +293,61 @@ fn config_fields_absent_roundtrip_to_defaults() {
     assert!(s.container_name.is_none());
 }
 
+// --- WP-RESLIMITS: deploy.resources.limits reach the spawned RunSpec.limits ---
+
+#[test]
+fn deploy_limits_survive_spec_roundtrip_into_runspec() {
+    // CMP-P1-DEPLOY lowers `deploy.resources.limits` onto `svc.mem_limit_bytes`/
+    // `cpu_limit_millis`; the supervisor reads the ServiceSpec back and the
+    // `start_service_detached` RunSpec literal maps them onto `RunSpec.limits`
+    // (memory_bytes/cpu_millis) → SpecOnDisk → the supervisor's `apply_native`.
+    // Assert the on-disk round-trip keeps both caps so the spawn carries them
+    // (this is the #57 plumbing for the compose path: no longer silently dropped).
+    let mut svc = svc_with_deps("web", vec![]);
+    svc.mem_limit_bytes = Some(512 * 1024 * 1024);
+    svc.cpu_limit_millis = Some(1500);
+    let spec = StackSpec {
+        ttl_secs: 60,
+        created_at_unix: 0,
+        project: "default".to_string(),
+        supervisor_pid: None,
+        services: vec![svc],
+    };
+    let bytes = serde_json::to_vec_pretty(&spec).unwrap();
+    let back: StackSpec = serde_json::from_slice(&bytes).unwrap();
+    let s = &back.services[0];
+    // Exactly the sources the start_service_detached RunSpec.limits literal reads.
+    assert_eq!(s.mem_limit_bytes, Some(512 * 1024 * 1024));
+    assert_eq!(s.cpu_limit_millis, Some(1500));
+    // And the mapping the literal performs yields the runtime caps the supervisor
+    // reconstructs at spawn.
+    let limits = lightr_core::ResourceLimits {
+        memory_bytes: s.mem_limit_bytes,
+        cpu_millis: s.cpu_limit_millis,
+    };
+    assert_eq!(limits.memory_bytes, Some(512 * 1024 * 1024));
+    assert_eq!(limits.cpu_millis, Some(1500));
+}
+
+#[test]
+fn deploy_limits_absent_roundtrip_to_unlimited() {
+    // Behavior-preserving: a pre-WP-RESLIMITS spec.json (no limit fields) loads as
+    // None ⇒ RunSpec.limits is unlimited ⇒ today's spawn, byte-identical.
+    let legacy = r#"{"ttl_secs":60,"created_at_unix":0,"project":"default","supervisor_pid":null,"services":[{"name":"web","image_ref":"","command":["/bin/true"],"ports":[],"env":[],"eager":true,"run_dir":null}]}"#;
+    let back: StackSpec = serde_json::from_str(legacy).unwrap();
+    let s = &back.services[0];
+    assert!(s.mem_limit_bytes.is_none());
+    assert!(s.cpu_limit_millis.is_none());
+    let limits = lightr_core::ResourceLimits {
+        memory_bytes: s.mem_limit_bytes,
+        cpu_millis: s.cpu_limit_millis,
+    };
+    assert!(
+        limits.is_unlimited(),
+        "absent caps ⇒ unlimited (unchanged spawn)"
+    );
+}
+
 #[test]
 fn container_name_overrides_run_dir_name() {
     // WP-CMP-CONFIG-LOWER: an explicit container_name renames the materialized

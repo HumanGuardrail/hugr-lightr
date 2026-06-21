@@ -298,10 +298,10 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         user,        // WP-RC-USER: honored as the child uid/gid (cfg unix; memo + supervisor).
         restart,     // WP-RC-RESTART: honored by the detached supervisor's re-spawn loop.
         stop_signal, // WP-RC-STOPSIGNAL: honored by `lightr stop`/restart-stop.
+        limits,      // WP-RESLIMITS: caps → supervisor (RLIMIT_AS on Linux).
         // WP-RC-FLAGS: the resolved 11 run-config carry-fields. RUNTIME-ONLY
-        // (never keyed). Honored by the apply seam (apply_cfg) on the native exec
-        // + the detached supervisor; persisted to spec.json + shown by inspect
-        // (labels/hostname). All-default ⇒ no-op (behavior-preserving).
+        // (never keyed). Honored by the apply seam (apply_cfg) on the native exec +
+        // the detached supervisor; shown by inspect. All-default ⇒ no-op.
         hostname: rc.hostname,
         labels: rc.labels,
         cap_add: rc.cap_add,
@@ -321,6 +321,10 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
     // before (`spawn_detached` == `_with_health(None)`), so the no-flags path is
     // behavior-preserving.
     if detach {
+        // WP-RESLIMITS: validate caps BEFORE forking (honest sync error).
+        if let Err(e) = lightr_run::limits::check_native_support(&limits) {
+            return die_lightr(&e);
+        }
         let result = match healthcheck {
             Some(ref hc) => spawn_detached_with_health(&spec, store, Some(hc)),
             None => spawn_detached(&spec, store),
