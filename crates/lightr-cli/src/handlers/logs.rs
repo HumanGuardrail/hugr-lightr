@@ -34,7 +34,17 @@ pub struct LogOpts<'a> {
 
 pub fn run(id: &str, opts: &LogOpts) -> i32 {
     let home = lightr_home();
-    let run_dir = home.join("run").join(id);
+    // WP-RUNFLAGS: resolve a `--name` (or id-prefix) to the run id, like `rm`, so
+    // `logs <name>` works. Unresolvable ⇒ "No such container" + exit 1 (Docker
+    // parity, WP-EXIT-CODE). A bare existing id still resolves to itself.
+    let resolved = match lightr_run::resolve(&home, id) {
+        Ok(rid) => rid,
+        Err(_) => {
+            eprintln!("Error: No such container: {id}");
+            return 1;
+        }
+    };
+    let run_dir = home.join("run").join(&resolved);
 
     // Docker `logs <missing>` → "No such container" + exit 1 (WP-EXIT-CODE).
     if !run_dir.exists() {
@@ -87,7 +97,7 @@ pub fn run(id: &str, opts: &LogOpts) -> i32 {
     // Bounded follow: poll for appends, stop when the run has exited and the
     // streams are drained, OR when a hard cap is hit (never hang forever —
     // no-daemon discipline: nothing of ours should spin unbounded).
-    follow_bounded(id, &home, &paths)
+    follow_bounded(&resolved, &home, &paths)
 }
 
 /// Resolve the concrete log file path(s) for the selected stream.
