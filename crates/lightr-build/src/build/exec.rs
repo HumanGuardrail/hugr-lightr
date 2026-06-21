@@ -17,7 +17,7 @@ use super::exec_fs::materialize_from_digest;
 use super::exec_fs::step_reads_clock_or_net;
 use super::exec_instr::{self, BuildCtx};
 use super::imgcfg::ImageConfig;
-use super::memo::{step_key, TempDirGuard};
+use super::memo::{step_key, ContextKey, TempDirGuard};
 use super::parse::Instr;
 use super::vars::{interpolate, VarScope};
 
@@ -137,6 +137,12 @@ pub fn build(
     let arg_overrides = overrides_from_pairs(build_args);
     let mut arg_state = ArgState::default();
 
+    // WP-DF-IGNORE: read `<context>/.dockerignore` ONCE at build start. The
+    // matcher threads into BOTH the memo key (an ignored file is not hashed ⇒
+    // adding it never busts the cache) AND the COPY/ADD executor (it is not
+    // copied). No `.dockerignore` ⇒ an empty matcher ⇒ byte-identical to before.
+    let ignore = super::dockerignore::DockerIgnore::load(context_dir);
+
     let text = std::fs::read_to_string(dockerfile).map_err(LightrError::Io)?;
     let (directives, steps) = parse_dockerfile_full(&text)?;
     // The Dockerfile `# escape=` directive (default backslash) controls `\$`
@@ -202,7 +208,10 @@ pub fn build(
         let key = step_key(
             prev_layer_root,
             step,
-            context_dir,
+            ContextKey {
+                context_dir,
+                ignore: &ignore,
+            },
             &scope,
             escape,
             &current_shell,
@@ -262,6 +271,7 @@ pub fn build(
             current_workdir: &mut current_workdir,
             current_shell: &mut current_shell,
             stages: &stages,
+            ignore: &ignore,
         };
         match &step.instr {
             Instr::From { image_ref, .. } => exec_instr::from(&mut ctx, &step.instr, image_ref)?,
@@ -382,3 +392,9 @@ mod df03_tests;
 #[cfg(test)]
 #[path = "exec_imgcfg_tests.rs"]
 mod imgcfg_tests;
+
+// WP-DF-IGNORE e2e: `.dockerignore` excludes from COPY/ADD context + the memo
+// key reflects exclusion (ignored file doesn't bust the cache). Sibling file.
+#[cfg(test)]
+#[path = "exec_df_ignore_tests.rs"]
+mod df_ignore_tests;
