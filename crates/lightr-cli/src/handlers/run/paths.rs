@@ -41,14 +41,20 @@ pub(super) use vz::run_vz_memo;
 ///   to before this WP (behaviour-preserved for config-less images).
 /// - **WORKDIR** → the engine cwd-within-rootfs. The CLI `-w/--workdir` flag
 ///   overrides the image WORKDIR; absent both, the caller's `cwd` is used.
+/// - **ENV** (WP-IMG-ENVUSER) → the image `Env` (KEY=VAL list) seeds the process
+///   environment; the CLI `-e`/`--env-file` (`env_explicit`) OVERRIDES per key
+///   (Docker precedence: image ENV < CLI). The merged set is carried on the
+///   `ExecSpec` and applied by the engine at spawn (on top of the inherited env).
+/// - **USER** (WP-IMG-ENVUSER) → the image `User` sets the process uid/gid; the
+///   CLI `-u/--user` OVERRIDES it (Docker precedence: image USER < CLI). Carried
+///   on the `ExecSpec`; the engine resolves name→uid + sets uid/gid (cfg unix).
 ///
-/// Out of scope on THIS path (recorded by the build, NOT consumed here — flagged,
-/// never silently honored): image ENV and USER. The engine `ExecSpec` carries
-/// `env`/`user` fields but the native/ns/vz engines do not yet apply them
-/// (engine-owned, outside this WP's files), so wiring them here would be a
-/// recorded-but-ignored half-feature. The `--entrypoint` CLI override is gated
-/// behind the WP-RUNFLAGS stub in `dispatch.rs` (not an owned file), so only the
-/// image ENTRYPOINT is honored here (no in-scope CLI override exists yet).
+/// All four are runtime-apply only: this is the NON-memoized engine path, so the
+/// run memo key (computed pre-`ExecSpec` in `memo.rs`, for the native+no-rootfs
+/// path) is structurally untouched by this WP. A config-less image + no CLI
+/// env/user ⇒ empty env / `None` user ⇒ byte-identical to before (preserved).
+/// (`--entrypoint` CLI override is the WP-RUNFLAGS stub's job, not owned here.)
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_engine(
     engine_kind: EngineKind,
     rootfs_ref: Option<&str>,
@@ -57,6 +63,10 @@ pub(super) fn run_engine(
     command: &[String],
     limits: ResourceLimits,
     workdir: Option<&str>,
+    // WP-IMG-ENVUSER: CLI `-e`/`--env-file` pairs — OVERRIDE the image ENV per key.
+    env_explicit: &[(String, String)],
+    // WP-IMG-ENVUSER: CLI `-u`/`--user` — OVERRIDES the image USER. `None` ⇒ image.
+    user: Option<&str>,
 ) -> i32 {
     // Hydrate rootfs ref into a temp dir if provided
     let rootfs_tmp: Option<tempfile::TempDir>;
@@ -99,6 +109,15 @@ pub(super) fn run_engine(
     // is in-rootfs); a rootfs-less engine run keeps `cwd` as before.
     let run_cwd = resolve_run_cwd(workdir, cfg.workdir.as_deref(), rootfs_path.is_some(), cwd);
 
+    // ENV: image `Env` seeds the process env, CLI `-e`/`--env-file` overrides per
+    // key (Docker: image ENV < CLI). Empty image env + no CLI `-e` ⇒ empty merge
+    // ⇒ the engine's apply is a no-op (behavior-preserving).
+    let env = merge_image_env(&cfg.env, env_explicit);
+
+    // USER: CLI `-u/--user` overrides the image `User` (Docker: image USER < CLI).
+    // `None` everywhere ⇒ the engine runs as the current user (behavior-preserving).
+    let eff_user = user.or(cfg.user.as_deref());
+
     let engine = match engine_for(engine_kind) {
         Ok(e) => e,
         Err(e) => return die_lightr(&e),
@@ -113,9 +132,9 @@ pub(super) fn run_engine(
         net_fd: None, // mesh NIC is wired by the supervisor path (ADR-0018), not here
         net_mac: None,
         mounts: &[],
-        env: &[],
+        env: &env,
         workdir: None,
-        user: None,
+        user: eff_user,
         hostname: None,
         add_host: &[],
         dns: &[],
@@ -152,6 +171,29 @@ pub(super) fn resolve_run_cwd(
         (None, Some(w)) => std::path::PathBuf::from(w),
         (None, None) => fallback.to_path_buf(),
     }
+}
+
+/// Merge the image's recorded `ENV` with the CLI `-e`/`--env-file` pairs into the
+/// final process-env overlay (WP-IMG-ENVUSER), Docker precedence: image ENV is
+/// the base, a CLI key with the SAME name OVERRIDES it (image ENV < CLI). Image
+/// insertion order is preserved; a CLI-only key is appended. Both empty ⇒ empty
+/// (the engine apply is then a no-op — behavior-preserving for a config-less
+/// image with no `-e`). Last-write-wins within each source is already resolved
+/// upstream (`env::resolve_env_explicit`); here a CLI key simply replaces the
+/// image value in place (so the overlay has one entry per key, image-first).
+pub(super) fn merge_image_env(
+    image_env: &[(String, String)],
+    cli_env: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut merged: Vec<(String, String)> = image_env.to_vec();
+    for (k, v) in cli_env {
+        if let Some(slot) = merged.iter_mut().find(|(mk, _)| mk == k) {
+            slot.1 = v.clone(); // CLI overrides the image value (image ENV < CLI)
+        } else {
+            merged.push((k.clone(), v.clone()));
+        }
+    }
+    merged
 }
 
 #[cfg(test)]

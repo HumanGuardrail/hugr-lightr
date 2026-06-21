@@ -1,5 +1,6 @@
 //! lightr-engine submodules — Engine trait, dispatch, and all engine impls.
 
+pub mod envuser;
 pub mod kind;
 pub mod native;
 pub mod ns;
