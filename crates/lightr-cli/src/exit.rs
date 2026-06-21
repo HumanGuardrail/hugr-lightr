@@ -57,6 +57,39 @@ pub fn die_internal(e: &dyn std::fmt::Display) -> i32 {
     2
 }
 
+/// Container-resolution failure on a lifecycle verb, mapped to Docker's
+/// convention (WP-EXIT-CODE).
+///
+/// `docker stop|start|restart|kill|... <missing>` prints
+/// `Error: No such container: <ref>` and exits **1** — a missing container is
+/// NOT a usage error. Lightr's `resolve` distinguishes:
+///   - `RefNotFound` ⇒ the container does not exist ⇒ honest
+///     `No such container: <ref>` + exit **1** (Docker parity).
+///   - `InvalidRef`  ⇒ malformed/ambiguous token (empty ref, ambiguous id
+///     prefix) ⇒ a usage/arg-class error ⇒ keep exit **2** with its own
+///     message (arg-error codes are unchanged by this WP).
+///   - anything else ⇒ exit **1** with its message (an I/O fault while
+///     resolving is not a usage error).
+///
+/// `reference` is the user-supplied token (echoed in the not-found message so
+/// the operator sees what they asked for, matching Docker).
+pub fn die_resolve(e: &LightrError, reference: &str) -> i32 {
+    match e {
+        LightrError::RefNotFound(_) => {
+            eprintln!("Error: No such container: {reference}");
+            1
+        }
+        LightrError::InvalidRef(_) => {
+            eprintln!("lightr: {e}");
+            2
+        }
+        other => {
+            eprintln!("lightr: {other}");
+            1
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +128,28 @@ mod tests {
         use lightr_core::Digest;
         let e = LightrError::NotFound(Digest([0u8; 32]));
         assert_eq!(error_exit_code(&e), 1);
+    }
+
+    // ── die_resolve: Docker no-such-container parity (WP-EXIT-CODE) ──────────
+
+    #[test]
+    fn die_resolve_ref_not_found_is_exit_1() {
+        // A missing container is NOT a usage error — Docker exits 1.
+        let e = LightrError::RefNotFound("ghost".into());
+        assert_eq!(die_resolve(&e, "ghost"), 1);
+    }
+
+    #[test]
+    fn die_resolve_invalid_ref_stays_exit_2() {
+        // Malformed/ambiguous token is a usage/arg-class error — unchanged at 2.
+        let e = LightrError::InvalidRef("ambiguous id prefix: ab".into());
+        assert_eq!(die_resolve(&e, "ab"), 2);
+    }
+
+    #[test]
+    fn die_resolve_io_error_is_exit_1() {
+        // An I/O fault while resolving is not a usage error — exit 1.
+        let e = LightrError::Io(std::io::Error::other("disk"));
+        assert_eq!(die_resolve(&e, "anything"), 1);
     }
 }

@@ -36,9 +36,10 @@ pub fn run(id: &str, opts: &LogOpts) -> i32 {
     let home = lightr_home();
     let run_dir = home.join("run").join(id);
 
+    // Docker `logs <missing>` → "No such container" + exit 1 (WP-EXIT-CODE).
     if !run_dir.exists() {
-        eprintln!("lightr: unknown run id");
-        return 2;
+        eprintln!("Error: No such container: {id}");
+        return 1;
     }
 
     let stream = if opts.both {

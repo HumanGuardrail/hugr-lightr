@@ -26,9 +26,10 @@ pub fn run(id: &str, command: &[String]) -> i32 {
     let home = lightr_home();
     let run_dir = home.join("run").join(id);
 
+    // Docker `exec <missing>` → "No such container" + exit 1 (WP-EXIT-CODE).
     if !run_dir.exists() {
-        eprintln!("lightr: unknown run id");
-        return 2;
+        eprintln!("Error: No such container: {id}");
+        return 1;
     }
 
     // Guard: `exec` cannot enter a Linux microVM guest from the host.
@@ -92,5 +93,18 @@ mod tests {
         // the set→call→remove-under-lock convention in compose/engine/inspect.
         std::env::remove_var("LIGHTR_HOME");
         assert_eq!(code, 1, "exec on a vz run must exit 1");
+    }
+
+    /// Docker parity (WP-EXIT-CODE): `exec <missing>` → exit 1, not 2.
+    #[test]
+    fn exec_missing_container_exits_1() {
+        let _env_guard = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().expect("tmp dir");
+        std::env::set_var("LIGHTR_HOME", tmp.path().to_str().unwrap());
+        let code = run("does-not-exist", &["true".to_string()]);
+        std::env::remove_var("LIGHTR_HOME");
+        assert_eq!(code, 1, "exec on a missing container must exit 1");
     }
 }

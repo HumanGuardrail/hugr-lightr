@@ -163,14 +163,16 @@ fn base_opts() -> LogOpts<'static> {
 }
 
 #[test]
-fn unknown_run_id_exits_2() {
+fn unknown_run_id_exits_1() {
+    // Docker parity (WP-EXIT-CODE): `logs <missing>` → "No such container",
+    // exit 1 (a missing container is NOT a usage error).
     let tmp = tempfile::tempdir().unwrap();
     let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     // SAFETY: single-threaded under ENV_LOCK.
     unsafe { std::env::set_var("LIGHTR_HOME", tmp.path()) };
     let code = logs_run("does-not-exist", &base_opts());
     unsafe { std::env::remove_var("LIGHTR_HOME") };
-    assert_eq!(code, 2);
+    assert_eq!(code, 1);
 }
 
 #[test]
