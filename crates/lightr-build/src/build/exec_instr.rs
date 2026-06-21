@@ -90,6 +90,11 @@ pub(super) struct BuildCtx<'a> {
     /// Read-only within an instruction body; the loop in `exec.rs` records each
     /// stage's output after it finishes. A single-stage build leaves it empty.
     pub stages: &'a StageTable,
+    /// WP-DF-IGNORE: the compiled `.dockerignore` matcher. COPY/ADD from the
+    /// build CONTEXT consult it to drop excluded paths (so they are not copied);
+    /// `COPY --from=stage` ignores it (a prior stage's tree is not the context).
+    /// An empty matcher (no `.dockerignore`) excludes nothing ⇒ unchanged copy.
+    pub ignore: &'a super::dockerignore::DockerIgnore,
 }
 
 /// Interpolate every string in a slice against `scope`. Shared cross-group

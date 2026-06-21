@@ -27,6 +27,7 @@
 use lightr_core::{Digest, LightrError, Result};
 use std::path::{Path, PathBuf};
 
+use super::dockerignore::DockerIgnore;
 use super::parse::{BuildStep, CmdForm, Instr};
 use super::vars::{interpolate, VarScope};
 
@@ -41,6 +42,16 @@ use super::vars::{interpolate, VarScope};
 /// POST-INTERPOLATION instruction text, not the raw text. Bumping from v1 is a
 /// documented one-time Action-Cache invalidation (every image rebuilds once).
 pub(crate) const BUILD_KEY_DOMAIN: &[u8] = b"lightr/build/v2";
+
+/// The build CONTEXT inputs to a step key, bundled (WP-DF-IGNORE): the context
+/// root + the compiled `.dockerignore` matcher. Bundling them keeps `step_key`'s
+/// arity at the pre-WP shape AND pins the invariant that the SAME matcher gates
+/// BOTH the hashed context (here) and the copied context (the executor).
+#[derive(Clone, Copy)]
+pub(crate) struct ContextKey<'a> {
+    pub context_dir: &'a Path,
+    pub ignore: &'a DockerIgnore,
+}
 
 /// Canonical instruction text for keying: `step.raw` after `${VAR}`
 /// interpolation against `scope` (honoring the Dockerfile escape directive).
@@ -83,15 +94,26 @@ pub(crate) fn canonical_step_text(
 /// folded into the key whenever it is `Some` — i.e. ONLY for `COPY --from=stage`.
 /// A flagless COPY (or any non-`--from=stage` step) passes `None`, so its key is
 /// BYTE-IDENTICAL to before this WP (no cache bust, single-stage preserved).
+/// `ignore` (WP-DF-IGNORE) is the compiled `.dockerignore` matcher. A COPY/ADD
+/// source's content is hashed via `hash_copy_source`, which now SKIPS any
+/// context path the matcher excludes — so the key folds ONLY the bytes that the
+/// executor will actually copy. Adding an IGNORED file changes no hashed input,
+/// so the key is identical and the cached layer is reused (no false cache bust);
+/// conversely an edit to a NON-ignored file still busts as before. An empty
+/// matcher (no `.dockerignore`) excludes nothing ⇒ byte-identical to before.
 pub(crate) fn step_key(
     prev_layer_root: Option<Digest>,
     step: &BuildStep,
-    context_dir: &Path,
+    ctx: ContextKey,
     scope: &VarScope,
     escape: bool,
     current_shell: &[String],
     from_stage_digest: Option<Digest>,
 ) -> Result<Digest> {
+    let ContextKey {
+        context_dir,
+        ignore,
+    } = ctx;
     let mut hasher = blake3::Hasher::new();
     hasher.update(BUILD_KEY_DOMAIN);
     let prev_bytes = prev_layer_root.map(|d| d.0).unwrap_or([0u8; 32]);
@@ -136,8 +158,12 @@ pub(crate) fn step_key(
     } = &step.instr
     {
         for s in src {
+            // WP-DF-IGNORE: a top-level source token that is itself excluded by
+            // `.dockerignore` contributes nothing (the executor won't copy it
+            // either). `s` is a context-relative token (e.g. `.` for `COPY .`),
+            // so the per-entry rel path is computed against `context_dir`.
             let src_path = context_dir.join(s);
-            hash_copy_source(&mut hasher, &src_path)?;
+            hash_copy_source_filtered(&mut hasher, &src_path, context_dir, ignore)?;
         }
         // WP-DF-06: --chown/--chmod change the COPY/ADD OUTPUT (file mode/owner)
         // but are NOT part of the source content the loop above hashes. Two of
@@ -175,8 +201,30 @@ pub(crate) fn step_key(
     Ok(Digest(*hasher.finalize().as_bytes()))
 }
 
-/// Fold a COPY source's content-identity into `hasher`, recursing dirs.
-pub(crate) fn hash_copy_source(hasher: &mut blake3::Hasher, path: &Path) -> Result<()> {
+/// WP-DF-IGNORE: fold a COPY/ADD source's content-identity into `hasher`,
+/// recursing dirs (the canonical context hasher), but SKIPS any entry whose path,
+/// relative to `context_root`, is excluded by `.dockerignore`. A skipped entry
+/// folds NOTHING (not even a sentinel) — so adding an ignored file leaves the
+/// key unchanged (no false cache bust), exactly mirroring the executor, which
+/// does not copy it. Directories recurse so a NON-ignored file under an
+/// otherwise-walked dir still contributes (and an ignored file under it does
+/// not). An empty matcher excludes nothing ⇒ identical to `hash_copy_source`.
+fn hash_copy_source_filtered(
+    hasher: &mut blake3::Hasher,
+    path: &Path,
+    context_root: &Path,
+    ignore: &DockerIgnore,
+) -> Result<()> {
+    if !ignore.is_inactive() {
+        if let Ok(rel) = path.strip_prefix(context_root) {
+            // An empty rel (the context root itself, e.g. `COPY .`) is never
+            // "excluded"; only proper sub-paths are tested.
+            let rel_str = rel.to_string_lossy();
+            if !rel_str.is_empty() && ignore.is_excluded(&rel_str) {
+                return Ok(());
+            }
+        }
+    }
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(_) => {
@@ -194,19 +242,38 @@ pub(crate) fn hash_copy_source(hasher: &mut blake3::Hasher, path: &Path) -> Resu
         hasher.update(&Digest::of_file(path)?.0);
     } else if ft.is_dir() {
         hasher.update(b"D");
-        // Collect (relative path, entry) deterministically (sorted by path).
+        // Same flat-collect + global-sort structure as `hash_copy_source` (so an
+        // EMPTY matcher folds a byte-identical stream), but each child whose rel
+        // path is excluded is dropped from the list BEFORE the loop — it folds
+        // nothing (not even its `rel \0` header), making the hash identical to a
+        // context where that file does not exist (the no-false-bust guarantee).
         let mut entries: Vec<PathBuf> = Vec::new();
         collect_dir_paths(path, &mut entries)?;
+        if !ignore.is_inactive() {
+            entries.retain(|child| match child.strip_prefix(context_root) {
+                Ok(rel) => {
+                    let rel_str = rel.to_string_lossy();
+                    rel_str.is_empty() || !ignore.is_excluded(&rel_str)
+                }
+                Err(_) => true,
+            });
+        }
         entries.sort();
         for child in &entries {
             let rel = child.strip_prefix(path).unwrap_or(child);
             hasher.update(rel.as_os_str().as_encoded_bytes());
             hasher.update(b"\x00");
-            hash_copy_source(hasher, child)?;
+            // The recursion re-collects a dir child's subtree; an excluded entry
+            // there is pruned by the SAME `retain` on the next level down.
+            hash_copy_source_filtered(hasher, child, context_root, ignore)?;
         }
     }
     Ok(())
 }
+
+// WP-DF-IGNORE: the unfiltered `hash_copy_source` was SUPERSEDED by
+// `hash_copy_source_filtered` (an empty `.dockerignore` matcher folds a
+// byte-identical stream), so the original is removed to keep zero dead code.
 
 /// Recursively collect every entry path under `dir` (files, dirs, symlinks).
 pub(crate) fn collect_dir_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -283,6 +350,12 @@ impl Drop for TempDirGuard {
 #[cfg(test)]
 #[path = "memo_tests.rs"]
 mod tests;
+
+// WP-DF-06 key-layer tests (--chown/--chmod fold) split from memo_tests.rs to
+// keep both files under the 400-line godfile cap. Sibling file.
+#[cfg(test)]
+#[path = "memo_df06_tests.rs"]
+mod df06_tests;
 
 // WP-DF-03 key-layer tests: the upstream stage digest folds into a
 // `COPY --from=stage` key (no false hit) and is absent for a flagless COPY
