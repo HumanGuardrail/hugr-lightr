@@ -145,9 +145,9 @@ fn oci_push_json_uses_global_flag() {
 fn run_engine_default_is_native() {
     let cli = parse(&["run", "--", "echo", "hi"]);
     match &cli.cmd {
-        Cmd::Run { engine, rootfs, .. } => {
-            assert_eq!(engine, "native");
-            assert!(rootfs.is_none());
+        Cmd::Run(a) => {
+            assert_eq!(a.engine, "native");
+            assert!(a.rootfs.is_none());
         }
         _ => panic!("expected Run"),
     }
@@ -157,7 +157,7 @@ fn run_engine_default_is_native() {
 fn run_engine_ns() {
     let cli = parse(&["run", "--engine", "ns", "--", "echo"]);
     match &cli.cmd {
-        Cmd::Run { engine, .. } => assert_eq!(engine, "ns"),
+        Cmd::Run(a) => assert_eq!(a.engine, "ns"),
         _ => panic!("expected Run"),
     }
 }
@@ -166,7 +166,7 @@ fn run_engine_ns() {
 fn run_engine_vz() {
     let cli = parse(&["run", "--engine", "vz", "--", "echo"]);
     match &cli.cmd {
-        Cmd::Run { engine, .. } => assert_eq!(engine, "vz"),
+        Cmd::Run(a) => assert_eq!(a.engine, "vz"),
         _ => panic!("expected Run"),
     }
 }
@@ -175,9 +175,9 @@ fn run_engine_vz() {
 fn run_rootfs_flag() {
     let cli = parse(&["run", "--rootfs", "my-image", "--engine", "ns", "--", "sh"]);
     match &cli.cmd {
-        Cmd::Run { rootfs, engine, .. } => {
-            assert_eq!(rootfs.as_deref(), Some("my-image"));
-            assert_eq!(engine, "ns");
+        Cmd::Run(a) => {
+            assert_eq!(a.rootfs.as_deref(), Some("my-image"));
+            assert_eq!(a.engine, "ns");
         }
         _ => panic!("expected Run"),
     }
@@ -189,7 +189,7 @@ fn run_bad_engine_string_rejected_at_handler() {
     // Parse succeeds:
     let cli = parse(&["run", "--engine", "bogus", "--", "echo"]);
     match &cli.cmd {
-        Cmd::Run { engine, .. } => assert_eq!(engine, "bogus"),
+        Cmd::Run(a) => assert_eq!(a.engine, "bogus"),
         _ => panic!("expected Run"),
     }
     // The handler should return 2 for a bad engine string.
@@ -230,9 +230,9 @@ fn run_native_with_rootfs_rejected_by_engine() {
     // the flags and trust the engine unit tests cover the runtime rejection.
     let cli = parse(&["run", "--engine", "native", "--rootfs", "@x", "--", "true"]);
     match &cli.cmd {
-        Cmd::Run { engine, rootfs, .. } => {
-            assert_eq!(engine, "native");
-            assert_eq!(rootfs.as_deref(), Some("@x"));
+        Cmd::Run(a) => {
+            assert_eq!(a.engine, "native");
+            assert_eq!(a.rootfs.as_deref(), Some("@x"));
         }
         _ => panic!("expected Run"),
     }

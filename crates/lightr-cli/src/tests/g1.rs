@@ -107,21 +107,13 @@ fn status_requires_name() {
 fn run_minimal() {
     let cli = parse(&["run", "--", "echo", "hello"]);
     match &cli.cmd {
-        Cmd::Run {
-            dir,
-            input,
-            env,
-            command,
-            detach,
-            mount,
-            ..
-        } => {
-            assert_eq!(dir, ".");
-            assert!(input.is_empty());
-            assert!(env.is_empty());
-            assert_eq!(command, &["echo", "hello"]);
-            assert!(!detach);
-            assert!(mount.is_empty());
+        Cmd::Run(a) => {
+            assert_eq!(a.dir, ".");
+            assert!(a.input.is_empty());
+            assert!(a.env.is_empty());
+            assert_eq!(a.command, &["echo", "hello"]);
+            assert!(!a.detach);
+            assert!(a.mount.is_empty());
         }
         _ => panic!("wrong cmd"),
     }
@@ -134,17 +126,11 @@ fn run_all_flags() {
         "--", "make", "all",
     ]);
     match &cli.cmd {
-        Cmd::Run {
-            dir,
-            input,
-            env,
-            command,
-            ..
-        } => {
-            assert_eq!(dir, "/work");
-            assert_eq!(input, &["/a", "/b"]);
-            assert_eq!(env, &["FOO", "BAR"]);
-            assert_eq!(command, &["make", "all"]);
+        Cmd::Run(a) => {
+            assert_eq!(a.dir, "/work");
+            assert_eq!(a.input, &["/a", "/b"]);
+            assert_eq!(a.env, &["FOO", "BAR"]);
+            assert_eq!(a.command, &["make", "all"]);
         }
         _ => panic!("wrong cmd"),
     }
@@ -159,8 +145,8 @@ fn run_requires_command() {
 fn run_detach_flag() {
     let cli = parse(&["run", "-d", "--", "sleep", "100"]);
     match &cli.cmd {
-        Cmd::Run { detach, .. } => {
-            assert!(*detach, "expected detach to be true");
+        Cmd::Run(a) => {
+            assert!(a.detach, "expected detach to be true");
         }
         _ => panic!("wrong cmd"),
     }
@@ -170,8 +156,8 @@ fn run_detach_flag() {
 fn run_mount_single() {
     let cli = parse(&["run", "--mount", "myref:subdir", "--", "echo"]);
     match &cli.cmd {
-        Cmd::Run { mount, .. } => {
-            assert_eq!(mount, &["myref:subdir"]);
+        Cmd::Run(a) => {
+            assert_eq!(a.mount, &["myref:subdir"]);
         }
         _ => panic!("wrong cmd"),
     }
@@ -181,10 +167,10 @@ fn run_mount_single() {
 fn run_mount_multiple() {
     let cli = parse(&["run", "--mount", "r1:a", "--mount", "r2:b", "--", "cmd"]);
     match &cli.cmd {
-        Cmd::Run { mount, .. } => {
-            assert_eq!(mount.len(), 2);
-            assert_eq!(mount[0], "r1:a");
-            assert_eq!(mount[1], "r2:b");
+        Cmd::Run(a) => {
+            assert_eq!(a.mount.len(), 2);
+            assert_eq!(a.mount[0], "r1:a");
+            assert_eq!(a.mount[1], "r2:b");
         }
         _ => panic!("wrong cmd"),
     }
