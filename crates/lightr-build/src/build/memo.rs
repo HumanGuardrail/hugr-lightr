@@ -227,17 +227,47 @@ pub(crate) struct TempDirGuard {
 }
 
 impl TempDirGuard {
+    /// Create a fresh, EXCLUSIVELY-OWNED temp work dir.
+    ///
+    /// # Collision-proofing (WP-DF-FLAKE) — the multi-stage robustness fix
+    ///
+    /// The old name was nanos-ONLY (`lightr-build-<nanos>`). Under heavy parallel
+    /// load (the self-hosted gate + other builds contending), two concurrent
+    /// `build()` calls — or the build's own `COPY --from` stage-materialize guard
+    /// (`exec_instr::copy`) racing another build's — could read the SAME coarse
+    /// clock value, derive the SAME path, and `create_dir_all` SILENTLY succeeds on
+    /// an already-existing dir. Both builds then shared ONE work dir: one stage's
+    /// snapshot/materialize clobbered the other, or a sibling guard's `Drop`
+    /// (`remove_dir_all`) wiped a tree mid-read, so a `COPY --from=<stage>` read an
+    /// object/path that build never persisted → `NotFound(<digest>)` /
+    /// `Io(NotFound)`. (Reproduced ~2/25 loop iters under a churning parallel
+    /// `cargo build`.)
+    ///
+    /// The name now carries three independent disambiguators — the HOUSE
+    /// convention (see `run::registry`'s `TmpHome`, `run::lifecycle` tests):
+    /// - **pid**: distinct across separate `lightr`/test PROCESSES (the gate vs a
+    ///   contending build are different processes; nanos alone can't separate them);
+    /// - **a process-global atomic counter**: distinct across every guard within ONE
+    ///   process even if the clock doesn't advance between two calls (covers the
+    ///   intra-process race — two parallel `build()`s / a build + its COPY guard);
+    /// - **nanos**: keeps names human-legible + ordered for debugging.
+    ///
+    /// The combined name cannot collide with any other live guard. The exclusive
+    /// `create_dir` (vs the old `create_dir_all`) is the belt-and-braces: if the
+    /// name somehow already exists, we FAIL CLOSED rather than silently share a dir.
     pub fn new() -> Result<Self> {
-        let base = std::env::temp_dir();
-        let unique = format!(
-            "lightr-build-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        let path = base.join(unique);
-        std::fs::create_dir_all(&path).map_err(LightrError::Io)?;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let n = CTR.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let unique = format!("lightr-build-{}-{nanos}-{n}", std::process::id());
+        let path = std::env::temp_dir().join(unique);
+        // EXCLUSIVE create: fail closed if the (already collision-proof) name
+        // somehow exists, rather than `create_dir_all`'s silent share-an-existing.
+        std::fs::create_dir(&path).map_err(LightrError::Io)?;
         Ok(TempDirGuard { path })
     }
 }
@@ -260,3 +290,11 @@ mod tests;
 #[cfg(test)]
 #[path = "memo_df03_tests.rs"]
 mod df03_tests;
+
+// WP-DF-FLAKE regression: `TempDirGuard::new()` hands out a UNIQUE, exclusively
+// created work dir under a sequential + a many-thread parallel burst (the
+// collision that produced the multi-stage `NotFound` under load). Sibling file
+// (godfile cap).
+#[cfg(test)]
+#[path = "memo_flake_tests.rs"]
+mod flake_tests;
