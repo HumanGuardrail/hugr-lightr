@@ -29,6 +29,8 @@ libc = { workspace = true }
 # is `{ workspace = true }`, NOT a new project dependency.
 tar = { workspace = true }
 flate2 = { workspace = true }
+# WP-CMP-SECRETS-FULL: staging dir for compose file:-source Store ingestion (up-path, production).
+tempfile = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

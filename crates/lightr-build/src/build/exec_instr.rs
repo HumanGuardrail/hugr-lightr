@@ -9,8 +9,7 @@
 //! SKELETON-FREEZE: each instruction GROUP lives in its own sibling file so WPs
 //! touching different instructions are FILE-DISJOINT. This file is the shared
 //! HUB: it owns `BuildCtx` (the per-step state contract), the cross-group
-//! helpers (`interp_vec`, `default_shell`), the fail-closed `unsupported` path,
-//! and the `#[path]` mod decls + re-exports that keep every `exec_instr::*` call
+//! helpers (`interp_vec`, `default_shell`), the `#[path]` mod decls + re-exports that keep every `exec_instr::*` call
 //! site in `exec.rs` IDENTICAL. The per-group bodies:
 //!   - `exec_instr_from.rs` — FROM/stage              → `from`
 //!   - `exec_instr_run.rs`  — RUN/SHELL               → `run`, `shell`
@@ -21,14 +20,13 @@
 //!
 //! Behavior-preserving: every body is byte-identical logic to the prior single
 //! `exec_instr.rs`; the memo key (computed by the caller) is unchanged.
-use lightr_core::{LightrError, Result};
+use lightr_core::Result;
 use lightr_store::Store;
 use std::path::Path;
 
 use super::args::{ArgOverrides, ArgState};
 use super::exec::StageTable;
 use super::imgcfg::ImageConfig;
-use super::parse::Instr;
 use super::vars::{interpolate, VarScope};
 
 // SKELETON-FREEZE: per-instruction-group bodies live in sibling files and are
@@ -100,36 +98,4 @@ fn interp_vec(v: &[String], scope: &VarScope, escape: bool) -> Result<Vec<String
     v.iter().map(|s| interpolate(s, scope, escape)).collect()
 }
 
-/// Not-yet-implemented instructions: route to the SAME fail-closed
-/// "unsupported instruction" error path as before (behavior-preserving —
-/// these never built). WP-DF-01 parses them; execution is DF-02..15.
-pub(super) fn unsupported(instr: &Instr) -> Result<()> {
-    Err(LightrError::InvalidManifest(format!(
-        "unsupported instruction: {}",
-        instr_verb(instr)
-    )))
-}
 
-/// Verb name for an `Instr`, used only to report not-yet-implemented
-/// instructions through the existing "unsupported instruction" error path.
-fn instr_verb(instr: &Instr) -> &'static str {
-    match instr {
-        Instr::From { .. } => "FROM",
-        Instr::Run { .. } => "RUN",
-        Instr::Cmd { .. } => "CMD",
-        Instr::Entrypoint { .. } => "ENTRYPOINT",
-        Instr::Label { .. } => "LABEL",
-        Instr::Expose { .. } => "EXPOSE",
-        Instr::Env { .. } => "ENV",
-        Instr::Add { .. } => "ADD",
-        Instr::Copy { .. } => "COPY",
-        Instr::Volume { .. } => "VOLUME",
-        Instr::User { .. } => "USER",
-        Instr::Workdir { .. } => "WORKDIR",
-        Instr::Arg { .. } => "ARG",
-        Instr::Onbuild { .. } => "ONBUILD",
-        Instr::Stopsignal { .. } => "STOPSIGNAL",
-        Instr::Healthcheck { .. } => "HEALTHCHECK",
-        Instr::Shell { .. } => "SHELL",
-    }
-}
