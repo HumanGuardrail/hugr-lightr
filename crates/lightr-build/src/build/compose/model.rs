@@ -116,6 +116,16 @@ pub struct Service {
     /// name (today's behavior). Only the materialized run dir name is affected;
     /// the compose service name (depends_on edges, discovery keys) is unchanged.
     pub container_name: Option<String>,
+    /// WP-CMP-NET: the service's compose `networks:` attachments, each lowered to
+    /// `(network_name, aliases)` in declaration order (short list ⇒ empty aliases;
+    /// long map ⇒ the declared per-network `aliases`). EMPTY (the absent default)
+    /// ⇒ the service declares NO network and runs NATIVE with loopback+env
+    /// discovery, exactly as today (behavior-preserving). A NON-EMPTY list routes
+    /// the service to the `vz` engine + the shared L2 switch (DNS-by-service-name).
+    /// The compose project name is prepended to each entry (`<project>_<network>`)
+    /// at the supervisor's spawn site, matching Docker's per-project network
+    /// namespacing — so it is held UN-prefixed here (the lowering has no project).
+    pub networks: Vec<(String, Vec<String>)>,
 }
 
 pub struct Compose {
@@ -231,6 +241,16 @@ pub struct ServiceSpec {
     /// name, today's behavior).
     #[serde(default)]
     pub container_name: Option<String>,
+    /// WP-CMP-NET: the service's compose `networks:` as `(network_name, aliases)`
+    /// (un-prefixed; the supervisor prepends `<project>_`). EMPTY ⇒ the service
+    /// declares no network ⇒ NATIVE spawn (today's behavior). NON-EMPTY ⇒ the
+    /// supervisor routes the service to the `vz` engine and sets `RunSpec.network`
+    /// (= `<project>_<first network>`) so C9's svz path joins the per-network
+    /// registry + attaches the shared L2 switch (DNS-by-service-name). `#[serde(
+    /// default)]` keeps pre-existing stack specs (no `networks` field) loading as
+    /// empty ⇒ native, byte-identical.
+    #[serde(default)]
+    pub networks: Vec<(String, Vec<String>)>,
 }
 
 pub struct ComposeHandle {
@@ -264,6 +284,7 @@ pub(crate) fn empty_service(name: String) -> Service {
         cap_add: Vec::new(),
         cap_drop: Vec::new(),
         container_name: None,
+        networks: Vec::new(),
     }
 }
 

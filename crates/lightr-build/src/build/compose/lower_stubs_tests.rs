@@ -165,3 +165,52 @@ fn explicit_false_bools_stay_false() {
     assert!(!svc.tty);
     assert!(!svc.privileged);
 }
+
+// ── WP-CMP-NET: `networks:` lowering (the routing input) ─────────────────────
+
+/// Lower a `networks:` fragment onto a fresh service.
+fn lower_net_only(yaml: &str) -> Service {
+    let def = def_from(yaml);
+    let mut svc = empty_service("svc".to_string());
+    lower_networks(&def, &mut svc);
+    svc
+}
+
+#[test]
+fn networks_short_list_lowers_to_names_with_empty_aliases() {
+    // SHORT list form: each name, no aliases (un-prefixed; project prepended at
+    // the supervisor's spawn site).
+    let svc = lower_net_only("networks:\n  - frontend\n  - backend\n");
+    assert_eq!(
+        svc.networks,
+        vec![
+            ("frontend".to_string(), Vec::<String>::new()),
+            ("backend".to_string(), Vec::<String>::new()),
+        ]
+    );
+}
+
+#[test]
+fn networks_long_map_lowers_name_plus_aliases() {
+    // LONG map form: per-network `aliases` are transcribed; a null attachment ⇒
+    // empty aliases. Declaration order preserved (IndexMap).
+    let svc = lower_net_only("networks:\n  frontend:\n    aliases: [web, www]\n  backend:\n");
+    assert_eq!(
+        svc.networks,
+        vec![
+            (
+                "frontend".to_string(),
+                vec!["web".to_string(), "www".to_string()]
+            ),
+            ("backend".to_string(), Vec::<String>::new()),
+        ]
+    );
+}
+
+#[test]
+fn no_networks_is_behavior_preserving() {
+    // A service that declares NO `networks:` lowers to an EMPTY list ⇒ the
+    // supervisor spawns it NATIVE (today's behavior, byte-identical).
+    let svc = lower_net_only("image: x\n");
+    assert!(svc.networks.is_empty());
+}
