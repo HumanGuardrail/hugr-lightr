@@ -256,6 +256,10 @@ pub fn run(
 
     if use_engine_path {
         // WP-DF-IMGCFG: run_engine honors the rootfs image config (CLI > image).
+        // WP-IMG-ENVUSER: also consumes the image ENV + USER, with the CLI
+        // `-e`/`--env-file` (`env_explicit`) and `-u`/`--user` overriding per
+        // Docker precedence (image < CLI). `env_explicit` is only MOVED into the
+        // native-memo path below, which this branch returns before — borrow is safe.
         return paths::run_engine(
             engine_kind,
             rootfs_ref,
@@ -264,6 +268,8 @@ pub fn run(
             command,
             limits,
             workdir,
+            &env_explicit,
+            user,
         );
     }
 

@@ -22,6 +22,11 @@ impl Engine for NativeEngine {
         let mut cmd = std::process::Command::new(prog);
         cmd.args(args).current_dir(spec.cwd);
         // inherit all env from parent; inherit stdio (stdout/stderr passed through)
+        // WP-IMG-ENVUSER: consume the image's recorded ENV + USER (merged with the
+        // CLI's `-e`/`-u` by the run handler — CLI wins). Empty env + None user ⇒
+        // no-op, so a config-less image / no-flag run is byte-identical to before.
+        super::envuser::apply_env(&mut cmd, spec.env);
+        super::envuser::apply_user(&mut cmd, spec.user)?;
         // F-203: apply resource caps. On Linux: installs a pre_exec RLIMIT_AS/
         // RLIMIT_DATA hook for memory_bytes; cpu_millis is unsupported on native
         // (returns honest Err). No-op when limits are unlimited; Err on macOS cap.
