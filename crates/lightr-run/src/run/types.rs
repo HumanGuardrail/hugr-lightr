@@ -143,6 +143,29 @@ pub struct RunSpec {
     pub oom_score_adj: Option<i32>,    // --oom-score-adj
     pub pids_limit: Option<i64>,       // --pids-limit (cgroup pids.max)
     pub shm_size: Option<u64>,         // --shm-size (/dev/shm bytes)
+
+    // ── WP-C9 (ADR-0018) — vz container-networking carry-fields. RUNTIME-ONLY
+    // (like every RC-SEAM field above; like Docker, which keys on none of
+    // `--network`/`--network-alias`/`--add-host`/`--dns`). NONE enters
+    // `assemble_key`/`build_key`. `#[derive(Default)]` gives each its no-op
+    // default (`None`/empty), so a run that joins no network behaves EXACTLY as
+    // today — the single-NAT-NIC vz path is byte-identical. The detached `vz`
+    // supervisor reads these back (via `SpecOnDisk`) and, when `network` is
+    // `Some`, joins the per-network registry + attaches the shared L2 switch
+    // (mesh NIC `eth1`), keeping `eth0` (NAT egress) unchanged.
+    /// `--network <name>`: the user network this vz run joins. `None` ⇒ no mesh
+    /// NIC (today's single-NAT-NIC path, byte-identical).
+    pub network: Option<String>,
+    /// `--network-alias`: extra DNS names this member answers to on the network
+    /// (alongside its run/`--name`). Empty ⇒ name-only.
+    pub network_alias: Vec<String>,
+    /// `--add-host HOST:IP`: extra `/etc/hosts` entries, as raw `"host:ip"`
+    /// strings (parsed to `(host, ip)` pairs at the vz wiring site). Empty ⇒
+    /// none.
+    pub add_host: Vec<String>,
+    /// `--dns`: resolver addresses written into the guest's `/etc/resolv.conf`.
+    /// Empty ⇒ the network's embedded resolver / host upstream, as before.
+    pub dns: Vec<String>,
 }
 
 impl RunSpec {
