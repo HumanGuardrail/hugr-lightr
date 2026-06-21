@@ -30,6 +30,7 @@
 
 pub mod dhcp;
 pub mod dns;
+pub mod passfd;
 pub mod switch;
 
 use crate::network::{NetworkId, Subnet};
