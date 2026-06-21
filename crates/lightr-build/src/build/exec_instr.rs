@@ -97,5 +97,3 @@ pub(super) struct BuildCtx<'a> {
 fn interp_vec(v: &[String], scope: &VarScope, escape: bool) -> Result<Vec<String>> {
     v.iter().map(|s| interpolate(s, scope, escape)).collect()
 }
-
-
