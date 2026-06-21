@@ -84,6 +84,18 @@ fn spawn_child(
     // RC-SEAM-FREEZE: per-field runtime-config appliers from the persisted spec
     // (all no-ops today — behaviour-preserving; a future RC WP fills one slot).
     super::apply_cfg::apply_run_config_ondisk(spec, &mut cmd);
+    // WP-RESLIMITS: apply the persisted resource caps to the detached child. On
+    // Linux this installs the RLIMIT_AS/DATA pre_exec hook for `mem_limit_bytes`
+    // (a hard cap — an over-cap child is killed). `cpu_limit_millis` has no
+    // portable native cpu-share cap ⇒ honest Err (never silently enforced); a
+    // memory cap off Linux is likewise an honest Err. Unlimited (both `None`) ⇒
+    // no-op, so a run with no caps spawns byte-identically to before. Fail-closed:
+    // an unenforceable cap stops the spawn rather than silently dropping it.
+    let limits = lightr_core::ResourceLimits {
+        memory_bytes: spec.mem_limit_bytes,
+        cpu_millis: spec.cpu_limit_millis,
+    };
+    crate::limits::apply_native(&mut cmd, &limits)?;
 
     let child = cmd.spawn().map_err(LightrError::Io)?;
     let pid = child.id() as i32;

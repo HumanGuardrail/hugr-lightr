@@ -83,6 +83,19 @@ pub struct RunSpec {
     /// `restart`; like Docker, which does not key on `--stop-signal`). It never
     /// enters `assemble_key`/`build_key`.
     pub stop_signal: Option<String>,
+    /// WP-RESLIMITS: resource caps (`--memory`/`--cpus`; compose
+    /// `deploy.resources.limits`). `Default` ⇒ unlimited (every field `None`), so
+    /// a run that sets no caps is byte-identical to before. Carried to the detached
+    /// supervisor + the synchronous memo exec, where the enforceable part is
+    /// applied: `RLIMIT_AS`/`RLIMIT_DATA` for `memory_bytes` on Linux (a hard cap
+    /// — an over-cap child is killed); `cpu_millis` is NOT a portable native cap
+    /// (`RLIMIT_CPU` is total cpu-seconds, not a share) so it is RECORDED + honestly
+    /// surfaced, never silently pretended-enforced on the native engine.
+    ///
+    /// RUNTIME ONLY — never a memo-key input (like `ports`/`workdir`; like Docker,
+    /// which does not key on `--memory`/`--cpus`). It never enters
+    /// `assemble_key`/`build_key`.
+    pub limits: lightr_core::ResourceLimits,
 
     // ── RC-SEAM-FREEZE (skeleton-freeze) — additive RC carry-fields for the wide
     // runtime-config flag fan-out. EVERY field is RUNTIME-ONLY (like the fields

@@ -48,20 +48,22 @@ pub(crate) fn discovery_key(name: &str) -> String {
         .collect()
 }
 
-/// CMP-P1-DEPLOY: emit an honest stderr note for the deploy aspects this WP
-/// lowers + carries but cannot yet APPLY on the detached compose spawn path —
-/// the resource limits (the limits channel is in the non-owned `lightr-run`)
-/// and `replicas > 1` (multi-instance spawn is a separate WP). Never silently
-/// ignored: a declared-but-not-honored knob is logged so the user sees it.
-/// Services with no caps and no extra replicas produce no output (behavior-
-/// preserving — nothing to warn about).
+/// WP-RESLIMITS: emit an honest stderr note for the deploy aspects that are NOT
+/// fully enforced on the native compose spawn path. `deploy.resources.limits` now
+/// FLOW to the supervisor (via `RunSpec.limits` → `SpecOnDisk` → `apply_native`):
+/// `memory` is a hard cap on Linux (`RLIMIT_AS`); `cpus` has no portable native
+/// cpu-share cap so it is RECORDED only (honored under `--engine vz`). The note
+/// surfaces the cpu-recorded-not-enforced boundary so it is never a silent drop.
+/// `replicas > 1` (multi-instance spawn) is still a separate WP. Services with no
+/// caps and no extra replicas produce no output (behavior-preserving).
 fn note_unhonored_deploy(svc: &ServiceSpec) {
-    if svc.mem_limit_bytes.is_some() || svc.cpu_limit_millis.is_some() {
+    if svc.cpu_limit_millis.is_some() {
         eprintln!(
-            "lightr compose: service {:?}: deploy.resources.limits \
-             (memory={:?} bytes, cpu={:?} millis) parsed but NOT yet enforced on \
-             the compose runtime path (follow-up WP)",
-            svc.name, svc.mem_limit_bytes, svc.cpu_limit_millis
+            "lightr compose: service {:?}: deploy.resources.limits.cpus \
+             ({:?} millis) is RECORDED but not enforced as a cpu share on the \
+             native engine (no portable native cap); use `--engine vz` for vcpu \
+             caps. memory IS enforced on Linux (RLIMIT_AS).",
+            svc.name, svc.cpu_limit_millis
         );
     }
     if let Some(n) = svc.replicas {
@@ -89,15 +91,12 @@ pub(crate) fn start_service_detached(
     let store = Store::open(&store_root)?;
     let cwd = prepare_service_cwd(svc, &store)?;
 
-    // CMP-P1-DEPLOY: honest gaps on the detached spawn path. The deploy
-    // resource caps ARE parsed + carried on the spec (`mem_limit_bytes` /
-    // `cpu_limit_millis`), but the detached spawn channel
-    // (`spawn_detached_engine` / `SpecOnDisk`) carries no limits field and lives
-    // in `lightr-run`, which this WP does not own — so the caps cannot yet be
-    // ENFORCED here. Likewise `deploy.replicas > 1` (multi-instance spawn) is a
-    // separate WP. We log these once, per service, instead of silently dropping
-    // them (fail-loud, not fail-silent). `restart` IS honored (it flows through
-    // the existing `RunSpec.restart` channel below).
+    // WP-RESLIMITS: the deploy resource caps now FLOW to the supervisor — they are
+    // carried on `RunSpec.limits` below → `SpecOnDisk` → `apply_native` at spawn
+    // (memory is a hard RLIMIT_AS cap on Linux; cpus is recorded, honored under
+    // vz). The note surfaces the cpu-recorded boundary + the still-unhonored
+    // `replicas > 1` (multi-instance spawn is a separate WP); never a silent drop.
+    // `restart` flows through the existing `RunSpec.restart` channel.
     note_unhonored_deploy(svc);
 
     let to_store_files = |pairs: &[(String, String)]| -> Vec<StoreFile> {
@@ -136,6 +135,14 @@ pub(crate) fn start_service_detached(
         privileged: svc.privileged,
         cap_add: svc.cap_add.clone(),
         cap_drop: svc.cap_drop.clone(),
+        // WP-RESLIMITS: lower `deploy.resources.limits` (parsed in
+        // `lower_resources::lower_deploy`) onto `RunSpec.limits` so they reach the
+        // supervisor's `apply_native` (memory hard-capped on Linux; cpus recorded).
+        // Absent ⇒ `None`/`None` (unlimited) ⇒ today's spawn, byte-identical.
+        limits: lightr_core::ResourceLimits {
+            memory_bytes: svc.mem_limit_bytes,
+            cpu_millis: svc.cpu_limit_millis,
+        },
         // RC-SEAM-FREEZE (NON-OWNED site): remaining new RC fields (hostname/
         // labels/read_only/...) are future WPs' jobs → no-op defaults here.
         ..Default::default()

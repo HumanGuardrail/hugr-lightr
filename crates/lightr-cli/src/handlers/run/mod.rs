@@ -223,6 +223,10 @@ pub fn run(
             user: user.map(String::from),
             restart: restart.map(String::from),
             stop_signal: stop_signal.map(String::from),
+            // WP-RESLIMITS: carry the parsed `--memory`/`--cpus` to spec.json so
+            // the vz supervisor reads them back (the VM applies a hard mem/vcpu
+            // cap — `vz_caps`). RUNTIME-ONLY, never keyed.
+            limits,
             // WP-RC-FLAGS: the 11 run-config carry-fields (RUNTIME-ONLY, never
             // keyed). Persisted to spec.json + honored by the apply seam where the
             // native engine can; honest per-field note otherwise (see apply_cfg).
