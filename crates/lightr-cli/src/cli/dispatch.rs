@@ -210,6 +210,15 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             "unsupported on this host (Windows runtime is the WSL ring)",
         ),
         Cmd::Volume { subcmd } => handlers::volume::run(subcmd),
+        // ── Docker image-management verbs over the ref registry (WP-IMAGE-VERBS) ─
+        Cmd::Images { quiet } => handlers::images::run(quiet, json),
+        Cmd::Rmi { targets } => handlers::rmi::run(&targets),
+        Cmd::Tag { src, dst } => handlers::tag::run(&src, &dst),
+        Cmd::History { reference } => handlers::history::run(&reference, json),
+        Cmd::Commit {
+            container,
+            reference,
+        } => handlers::commit::run(&container, reference.as_deref()),
         Cmd::Gc {
             force,
             min_age,
