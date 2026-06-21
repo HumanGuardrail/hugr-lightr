@@ -152,49 +152,13 @@ pub(super) fn run_engine(
     code
 }
 
-/// Resolve the engine cwd for a `--rootfs` run, honoring the image WORKDIR with
-/// Docker precedence (WP-DF-IMGCFG): the CLI `-w/--workdir` flag wins over the
-/// image's recorded WORKDIR; absent both, the caller's `fallback` cwd is used.
-/// Only the CLI flag / image WORKDIR take effect WHEN a rootfs is present (the
-/// recorded path is in-rootfs); a rootfs-less engine run always keeps `fallback`.
-pub(super) fn resolve_run_cwd(
-    cli_workdir: Option<&str>,
-    image_workdir: Option<&str>,
-    has_rootfs: bool,
-    fallback: &std::path::Path,
-) -> std::path::PathBuf {
-    if !has_rootfs {
-        return fallback.to_path_buf();
-    }
-    match (cli_workdir, image_workdir) {
-        (Some(w), _) => std::path::PathBuf::from(w), // CLI > image (Docker precedence)
-        (None, Some(w)) => std::path::PathBuf::from(w),
-        (None, None) => fallback.to_path_buf(),
-    }
-}
-
-/// Merge the image's recorded `ENV` with the CLI `-e`/`--env-file` pairs into the
-/// final process-env overlay (WP-IMG-ENVUSER), Docker precedence: image ENV is
-/// the base, a CLI key with the SAME name OVERRIDES it (image ENV < CLI). Image
-/// insertion order is preserved; a CLI-only key is appended. Both empty ⇒ empty
-/// (the engine apply is then a no-op — behavior-preserving for a config-less
-/// image with no `-e`). Last-write-wins within each source is already resolved
-/// upstream (`env::resolve_env_explicit`); here a CLI key simply replaces the
-/// image value in place (so the overlay has one entry per key, image-first).
-pub(super) fn merge_image_env(
-    image_env: &[(String, String)],
-    cli_env: &[(String, String)],
-) -> Vec<(String, String)> {
-    let mut merged: Vec<(String, String)> = image_env.to_vec();
-    for (k, v) in cli_env {
-        if let Some(slot) = merged.iter_mut().find(|(mk, _)| mk == k) {
-            slot.1 = v.clone(); // CLI overrides the image value (image ENV < CLI)
-        } else {
-            merged.push((k.clone(), v.clone()));
-        }
-    }
-    merged
-}
+// `resolve_run_cwd` + `merge_image_env` (the pure `--rootfs` engine-path helpers)
+// live in `paths_engine.rs` (pulled in via `#[path]` to keep this file under the
+// 400-line godfile cap) and are re-exported so `paths::resolve_run_cwd` /
+// `paths::merge_image_env` callers + tests are unchanged.
+#[path = "paths_engine.rs"]
+mod engine_helpers;
+pub(super) use engine_helpers::{merge_image_env, resolve_run_cwd};
 
 #[cfg(test)]
 #[path = "paths_imgcfg_tests.rs"]
@@ -241,6 +205,12 @@ pub(super) struct NativeRun<'a> {
     /// carry-fields + honored by the apply seam (or honest per-field note).
     /// RUNTIME ONLY (never keyed); all-default ⇒ no-op (behavior-preserving).
     pub rc: RcConfig,
+    /// WP-RUNFLAGS: the resolved `-v/--volume` host binds, `--tmpfs` dirs,
+    /// `--name`, `--rm`, `--entrypoint`. RUNTIME ONLY (never keyed); all-default ⇒
+    /// no-op. Binds/tmpfs/entrypoint are honored on BOTH the synchronous memo exec
+    /// and the detached supervisor; `--name`/`--rm` are detached-only (a foreground
+    /// run has no run dir — guarded at the handler).
+    pub runflags: super::runflags::RunFlags,
 }
 
 pub(super) fn run_native_memo(req: NativeRun) -> i32 {
@@ -266,6 +236,7 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         restart,
         stop_signal,
         rc,
+        runflags,
     } = req;
     let input_paths: Vec<std::path::PathBuf> = if inputs.is_empty() {
         vec![cwd.clone()]
@@ -313,6 +284,14 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         oom_score_adj: rc.oom_score_adj,
         pids_limit: rc.pids_limit,
         shm_size: rc.shm_size,
+        // WP-RUNFLAGS: host binds / tmpfs / entrypoint / name / rm carry-fields.
+        // RUNTIME ONLY (never keyed). Binds + tmpfs force a memo MISS in
+        // `run_memoized_with`; all-default ⇒ no-op (behavior-preserving).
+        volumes: runflags.volumes,
+        tmpfs: runflags.tmpfs,
+        entrypoint: runflags.entrypoint,
+        name: runflags.name.clone(),
+        rm: runflags.rm,
     };
 
     // Detach path: spawn detached and print the run id. WP-RC-4: when a
@@ -330,10 +309,9 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
             None => spawn_detached(&spec, store),
         };
         match result {
-            Ok(handle) => {
-                println!("id={}", handle.id);
-                return 0;
-            }
+            // WP-RUNFLAGS: claim `--name` (if any) for the spawned id, then print
+            // it. `None` ⇒ just print the id (byte-identical to before).
+            Ok(handle) => return super::claim_name_and_print(&handle, runflags.name.as_deref()),
             Err(e) => return die_lightr(&e),
         }
     }

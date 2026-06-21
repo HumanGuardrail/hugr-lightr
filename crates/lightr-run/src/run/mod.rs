@@ -3,6 +3,7 @@
 
 mod ac;
 mod apply_cfg;
+mod bindmat;
 mod ctl;
 pub mod deepmemo;
 pub mod exec;

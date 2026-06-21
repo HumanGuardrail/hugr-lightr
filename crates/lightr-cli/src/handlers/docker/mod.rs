@@ -184,6 +184,9 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             // WP-CLI-TRIO / RC-FLAGS: the docker shim does not translate the 11
             // run-config flags ⇒ all-default ⇒ no-op carry (behavior-preserving).
             crate::handlers::run::RawRcFlags::default(),
+            // WP-RUNFLAGS: the docker shim does not translate `-v`/`--tmpfs`/
+            // `--name`/`--rm`/`--entrypoint` ⇒ all-default ⇒ no-op carry.
+            crate::handlers::run::RawRunFlags::default(),
         )
     } else if is_known_ref {
         // is_known_ref && cmd_args.is_empty()
@@ -227,6 +230,9 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             // WP-CLI-TRIO / RC-FLAGS: the docker shim does not translate the 11
             // run-config flags ⇒ all-default ⇒ no-op carry (behavior-preserving).
             crate::handlers::run::RawRcFlags::default(),
+            // WP-RUNFLAGS: the docker shim does not translate `-v`/`--tmpfs`/
+            // `--name`/`--rm`/`--entrypoint` ⇒ all-default ⇒ no-op carry.
+            crate::handlers::run::RawRunFlags::default(),
         )
     }
 }

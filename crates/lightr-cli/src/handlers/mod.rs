@@ -41,6 +41,14 @@ pub mod start;
 pub mod stats;
 pub mod status;
 pub mod stop;
+// WP-RUNFLAGS: the honest "not yet implemented" stub helper is now reached ONLY
+// from the `#[cfg(not(unix))]` `Cmd::Network` dispatch arm (the last run-flag
+// stub was removed when `-v`/`--tmpfs`/`--name`/`--rm`/`--entrypoint` were wired
+// and the networking flags moved to a specific honest error). On unix it is dead
+// code → `clippy -D` fails; gate it (and its tests) to the platform that uses it
+// (template 8a: cfg the item, not just the caller). A future WP that needs an
+// honest unix stub re-widens this gate.
+#[cfg(not(unix))]
 pub mod stub;
 pub mod supervise;
 pub mod system;

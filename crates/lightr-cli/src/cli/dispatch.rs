@@ -5,6 +5,10 @@
 use crate::cli::cmd::{Cli, Cmd, ComposeCmd, EngineCmd, OciCmd, Shell, SuperviseCmd};
 use crate::emit_event;
 use crate::handlers;
+// `stub` is now reached only from the `#[cfg(not(unix))]` Network arm (WP-RUNFLAGS
+// removed the last run-flag stub), so import it cfg-gated to avoid an unused-import
+// warning on unix (clippy -D). The windows gate still resolves it.
+#[cfg(not(unix))]
 use crate::handlers::stub::stub;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -51,26 +55,16 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                     return 2;
                 }
             }
-            // WP-CLI-TRIO / RC-FLAGS REMOVED the 11 run-config flags from this
-            // guard — `--hostname`, `-l/--label`, `--cap-add`/`--cap-drop`,
-            // `--privileged`, `-t/--tty`, `--init`, `--read-only`,
-            // `--oom-score-adj`, `--pids-limit`, `--shm-size` — they are now
-            // WIRED into RunSpec carry-fields (RUNTIME-ONLY, never keyed) +
-            // honored by the apply seam (or recorded with an honest per-field
-            // note). With none of the remaining stubbed flags set, `run` behaves
-            // exactly as before.
-            let new_flag_set = a.name.is_some()
-                || a.rm
-                || a.entrypoint.is_some()
-                || a.network.is_some()
-                || !a.network_alias.is_empty()
-                || !a.add_host.is_empty()
-                || !a.dns.is_empty()
-                || !a.volume.is_empty()
-                || !a.tmpfs.is_empty();
-            if new_flag_set {
-                stub("run (docker-parity flags)", "WP-RUNFLAGS")
-            } else {
+            // WP-RUNFLAGS REMOVED the last run flags from the stub guard:
+            // `--name`, `--rm`, `--entrypoint`, `-v/--volume`, `--tmpfs` are now
+            // WIRED (host bind / tmpfs / entrypoint / name-claim / auto-remove),
+            // and `--network`/`--network-alias`/`--add-host`/`--dns` get a
+            // SPECIFIC honest Phase-2 error inside `RawRunFlags::resolve` (the
+            // native engine shares the host network — no per-container netns),
+            // NOT the generic WP-RUNFLAGS stub. The guard is gone: every `run`
+            // flag now reaches the handler. With none of the new flags set, `run`
+            // behaves exactly as before (behavior-preserving).
+            {
                 // WP-RC-4: bundle the wired --health-* flags.
                 let health = handlers::run::HealthFlags {
                     cmd: a.health_cmd,
@@ -131,6 +125,20 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                         oom_score_adj: a.oom_score_adj,
                         pids_limit: a.pids_limit,
                         shm_size: a.shm_size,
+                    },
+                    // WP-RUNFLAGS: `-v`/`--tmpfs`/`--name`/`--rm`/`--entrypoint` +
+                    // the honest Phase-2 networking flags → resolved in the handler
+                    // into RunSpec carry-fields (RUNTIME-ONLY, never keyed).
+                    handlers::run::RawRunFlags {
+                        volume: a.volume,
+                        tmpfs: a.tmpfs,
+                        name: a.name,
+                        rm: a.rm,
+                        entrypoint: a.entrypoint,
+                        network: a.network,
+                        network_alias: a.network_alias,
+                        add_host: a.add_host,
+                        dns: a.dns,
                     },
                 )
             }

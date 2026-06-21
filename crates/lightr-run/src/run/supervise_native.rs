@@ -37,6 +37,11 @@ pub(super) fn supervise_native(
         lightr_index::hydrate(&dest, store, &m.ref_name)?;
     }
 
+    // WP-RUNFLAGS: materialize the persisted `-v/--volume` host binds + `--tmpfs`
+    // scratch dirs (the tagged `mounts2` shape) once for the run's lifetime, the
+    // same way the synchronous memo path does. Empty ⇒ no-op (behaviour-preserving).
+    super::bindmat::materialize_mounts2(&cwd, &spec.mounts2)?;
+
     // WP-RC-WORKDIR: honor `-w`/`--workdir` as the child's cwd (Docker WORKDIR),
     // creating it if absent. `None` ⇒ `cwd` unchanged + no mkdir.
     let run_cwd = super::spawn::resolve_workdir(&cwd, spec.workdir.as_deref())?;
@@ -71,8 +76,11 @@ fn spawn_child(
         .open(dir.join("stderr.log"))
         .map_err(LightrError::Io)?;
 
-    let mut cmd = std::process::Command::new(&spec.command[0]);
-    cmd.args(&spec.command[1..])
+    // WP-RUNFLAGS: `--entrypoint` prepends to the persisted command (Docker CMD).
+    // `None` ⇒ argv == command (byte-identical to before).
+    let argv = super::bindmat::effective_argv(spec.entrypoint.as_deref(), &spec.command);
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..])
         .current_dir(run_cwd)
         // WP-DISC: explicit per-child env (compose service discovery + service
         // env). Empty for a plain `lightr run -d` (byte-identical to before).
@@ -102,6 +110,24 @@ fn spawn_child(
     std::fs::write(dir.join("pid"), format!("{pid}")).map_err(LightrError::Io)?;
     std::fs::write(dir.join("status"), "running").map_err(LightrError::Io)?;
     Ok((child, pid))
+}
+
+/// WP-RUNFLAGS: `--rm` — when the run's supervisor reaches its final exit, remove
+/// the run dir + release its registry name (Docker `--rm` auto-clean). `rm=false`
+/// ⇒ no-op (the dir persists, today's behaviour). The run `home` is the dir's
+/// grandparent (`<home>/run/<id>`). Best-effort: a removal failure is swallowed —
+/// the supervisor is exiting anyway and must not error on a cleanup race.
+fn maybe_auto_remove(dir: &std::path::Path, spec: &SpecOnDisk) {
+    if !spec.rm {
+        return;
+    }
+    // Release the name FIRST (so it frees even if the dir removal races).
+    if let Some(name) = spec.name.as_deref() {
+        if let Some(home) = dir.parent().and_then(|p| p.parent()) {
+            let _ = super::registry::release(home, name);
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Start the port forwarders for the run (held for the run's lifetime, across
@@ -253,6 +279,8 @@ fn run_supervisor_loop(
 
     std::fs::write(dir.join("status"), format!("exited {final_exit}")).map_err(LightrError::Io)?;
     let _ = std::fs::remove_file(&sock_path);
+    // WP-RUNFLAGS: `--rm` auto-clean on final exit (no-op unless `rm`).
+    maybe_auto_remove(dir, spec);
     Ok(final_exit)
 }
 
@@ -339,6 +367,8 @@ fn run_supervisor_loop(
 
     std::fs::write(dir.join("status"), format!("exited {final_exit}")).map_err(LightrError::Io)?;
     let _ = std::fs::remove_file(&sentinel);
+    // WP-RUNFLAGS: `--rm` auto-clean on final exit (no-op unless `rm`).
+    maybe_auto_remove(dir, spec);
     Ok(final_exit)
 }
 

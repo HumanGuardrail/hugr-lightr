@@ -97,6 +97,34 @@ pub struct RunSpec {
     /// `assemble_key`/`build_key`.
     pub limits: lightr_core::ResourceLimits,
 
+    /// WP-RUNFLAGS: Docker `-v/--volume SRC:DST[:ro]` host binds. A bind makes a
+    /// HOST path visible at `cwd/<target>` (the native run's "container root" is
+    /// its cwd — same relative-target law as `mounts`). RUNTIME ONLY (a host path
+    /// is non-deterministic): never keyed, and its presence forces a memo MISS
+    /// with NO Action-Cache write (a bind run can't be replayed). `Default` ⇒
+    /// empty ⇒ byte-identical to before. Native realization: rw ⇒ a symlink
+    /// (live view); ro ⇒ a read-only snapshot copy (no mount namespace on native).
+    pub volumes: Vec<VolumeBind>,
+    /// WP-RUNFLAGS: Docker `--tmpfs DST` — an empty writable dir at `cwd/<target>`.
+    /// RUNTIME ONLY (writable scratch is non-deterministic): never keyed, forces a
+    /// memo MISS with no AC write. `Default` ⇒ empty ⇒ byte-identical to before.
+    pub tmpfs: Vec<String>,
+    /// WP-RUNFLAGS: Docker `--entrypoint CMD` — override the exec entrypoint for
+    /// this run. On the native path the effective argv is `[entrypoint] ++ command`
+    /// (Docker prepends the entrypoint to CMD). `None` ⇒ `command` unchanged
+    /// (byte-identical to before). RUNTIME ONLY on the native path (the run key
+    /// already folds the full `command`; the entrypoint prepends to it at exec).
+    pub entrypoint: Option<Vec<String>>,
+    /// WP-RUNFLAGS: Docker `--name NAME` — the detached run's name, claimed in the
+    /// name→id registry on spawn so `ps`/`stop`/`logs`/`rm` resolve it. `None` ⇒
+    /// no name (byte-identical to before). RUNTIME ONLY (never keyed). Detached
+    /// runs only (a foreground run has no run dir/id to name).
+    pub name: Option<String>,
+    /// WP-RUNFLAGS: Docker `--rm` — auto-remove the detached run's dir + release
+    /// its name when the supervisor exits. `false` ⇒ the run dir persists (today's
+    /// behaviour). RUNTIME ONLY (never keyed). Detached runs only.
+    pub rm: bool,
+
     // ── RC-SEAM-FREEZE (skeleton-freeze) — additive RC carry-fields for the wide
     // runtime-config flag fan-out. EVERY field is RUNTIME-ONLY (like the fields
     // above; like Docker, which keys on none of these) — NONE enters
@@ -133,6 +161,18 @@ impl RunSpec {
 pub struct Mount {
     pub ref_name: String,
     pub target: String,
+}
+
+/// WP-RUNFLAGS: a resolved Docker `-v/--volume` host bind. `source` is the HOST
+/// path (canonicalization deferred to materialization); `target` is the relative
+/// in-cwd destination (same law as [`Mount::target`]); `readonly` is the `:ro`
+/// option. Distinct from [`Mount`] (a CAS ref hydrated into cwd) — this binds a
+/// LIVE host path. Carried on `RunSpec.volumes`, never keyed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VolumeBind {
+    pub source: String,
+    pub target: String,
+    pub readonly: bool,
 }
 
 /// A store-backed file injected into a run. `ref_name` resolves via lightr_index.
@@ -192,7 +232,30 @@ mod specdisk;
 // Only the types referenced through `types::` by sibling `run` modules are
 // re-exported. `MountOnDisk2`/`PortOnDisk`/`default_engine`/`default_proto` are
 // used solely inside `specdisk.rs` (by `SpecOnDisk`'s fields + serde defaults).
-pub(super) use specdisk::{MountOnDisk, SpecOnDisk};
+pub(super) use specdisk::{MountOnDisk, MountOnDisk2, SpecOnDisk};
+
+/// WP-RUNFLAGS: lower a `RunSpec`'s `-v/--volume` host binds + `--tmpfs` dirs
+/// into the persisted, tagged `mounts2` shape so the detached supervisor reads
+/// them back and materializes them. Empty in / empty out (behaviour-preserving:
+/// a run with no `-v`/`--tmpfs` writes no `mounts2`). The legacy CAS-ref `mounts`
+/// channel stays on the separate `mounts` field — these two never mix.
+pub(super) fn mounts2_from_runspec(spec: &RunSpec) -> Vec<MountOnDisk2> {
+    let mut out: Vec<MountOnDisk2> = Vec::new();
+    for v in &spec.volumes {
+        out.push(MountOnDisk2::HostBind {
+            source: v.source.clone(),
+            target: v.target.clone(),
+            readonly: v.readonly,
+        });
+    }
+    for t in &spec.tmpfs {
+        out.push(MountOnDisk2::Tmpfs {
+            target: t.clone(),
+            opts: Vec::new(),
+        });
+    }
+    out
+}
 
 // ---------------------------------------------------------------------------
 // R4 additions — frozen contract: build-spec-r4.md §1 (bodies: R4-W1)
