@@ -231,3 +231,106 @@ fn explicit_stop_disables_restart() {
     );
     let _ = t.join();
 }
+
+// ── WP-RESLIMITS: the supervisor applies the persisted caps at spawn ─────────
+
+/// Build a run dir with a spec.json carrying resource caps, then run `supervise()`
+/// SYNCHRONOUSLY (no thread) and return its `Result`. Used to assert the
+/// apply-at-spawn honest boundary without racing a background loop.
+fn run_with_limits(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    command: Vec<String>,
+    mem: Option<u64>,
+    cpu: Option<u64>,
+) -> lightr_core::Result<()> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let id = format!("rl{}", nanos % 1_000_000_000);
+    let run_dir = home.join("run").join(&id);
+    fs::create_dir_all(&run_dir).unwrap();
+    lightr_store::Store::open(home.join("store")).expect("store open");
+
+    let spec = SpecOnDisk {
+        cwd: cwd.to_string_lossy().into_owned(),
+        command,
+        created_at_unix: nanos / 1_000_000_000,
+        engine: "native".to_string(),
+        mem_limit_bytes: mem,
+        cpu_limit_millis: cpu,
+        ..Default::default()
+    };
+    write_spec_json(&run_dir, &spec).unwrap();
+    supervise(&run_dir).map(|_| ())
+}
+
+/// `None`/`None` (unlimited) ⇒ the supervisor spawns the child unchanged and it
+/// runs to completion (behavior-preserving: a no-caps detached run is identical
+/// to before).
+#[test]
+fn supervisor_unlimited_runs_unchanged() {
+    let (home, _g) = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let counter = tmp.path().join("count");
+    let r = run_with_limits(
+        home.path(),
+        tmp.path(),
+        counting_child(&counter, 0),
+        None,
+        None,
+    );
+    assert!(r.is_ok(), "unlimited supervise must succeed: {r:?}");
+    assert_eq!(spawn_count(&counter), 1, "child runs exactly once");
+}
+
+/// A cpu *share* is NOT enforceable on the native engine (RLIMIT_CPU is total
+/// cpu-seconds, not a share) ⇒ the supervisor FAILS the spawn with an honest
+/// error rather than silently dropping the cap. Cross-platform on unix.
+#[test]
+fn supervisor_cpu_share_is_honest_err() {
+    let (home, _g) = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let counter = tmp.path().join("count");
+    let r = run_with_limits(
+        home.path(),
+        tmp.path(),
+        counting_child(&counter, 0),
+        None,
+        Some(500),
+    );
+    assert!(
+        r.is_err(),
+        "a cpu share must be an honest supervise error, not a silent drop"
+    );
+}
+
+/// A memory cap installs the RLIMIT_AS hook on Linux ⇒ the child spawns and runs
+/// (value plumbed, NOT a live OOM). Off Linux a native memory cap is an honest
+/// error (macOS ignores RLIMIT_AS). Either way the cap is NEVER silently dropped.
+#[test]
+fn supervisor_memory_cap_plumbed() {
+    let (home, _g) = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let counter = tmp.path().join("count");
+    let r = run_with_limits(
+        home.path(),
+        tmp.path(),
+        counting_child(&counter, 0),
+        Some(256 * 1024 * 1024),
+        None,
+    );
+    #[cfg(target_os = "linux")]
+    {
+        assert!(r.is_ok(), "Linux memory cap plumbs + runs: {r:?}");
+        assert_eq!(spawn_count(&counter), 1);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert!(
+            r.is_err(),
+            "off-Linux native memory cap is an honest err (no silent drop)"
+        );
+    }
+}

@@ -126,6 +126,11 @@ pub fn spawn_detached_engine(
         oom_score_adj: spec.oom_score_adj,
         pids_limit: spec.pids_limit,
         shm_size: spec.shm_size,
+        // WP-RESLIMITS: carry the resource caps to spec.json so the supervisor
+        // reads them back and applies the enforceable part (RLIMIT_AS on Linux) at
+        // spawn. `None`/`None` (unlimited) ⇒ today's spawn, byte-identical.
+        mem_limit_bytes: spec.limits.memory_bytes,
+        cpu_limit_millis: spec.limits.cpu_millis,
         // R-SPECDISK freeze-gate fields not owned by the RC seam: defaults until
         // the Wave-A/B WPs populate them (no behaviour change here).
         ..Default::default()

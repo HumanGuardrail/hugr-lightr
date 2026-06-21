@@ -170,6 +170,19 @@ pub(crate) struct SpecOnDisk {
     pub pids_limit: Option<i64>,
     #[serde(default)]
     pub shm_size: Option<u64>,
+
+    // ── WP-RESLIMITS — resource caps (#57), carried to the detached supervisor. ──
+    // Both `#[serde(default)]` (back-compat: a pre-WP-RESLIMITS spec.json with no
+    // limits parses to `None` ⇒ unlimited ⇒ today's spawn). RUNTIME-ONLY, never a
+    // memo-key input (detached runs aren't memoized anyway). The supervisor reads
+    // these back and applies the enforceable part (RLIMIT_AS on Linux) at spawn.
+    /// `--memory` in bytes (`deploy.resources.limits.memory`). `None` ⇒ unlimited.
+    #[serde(default)]
+    pub mem_limit_bytes: Option<u64>,
+    /// `--cpus` as milli-CPUs (`deploy.resources.limits.cpus`). `None` ⇒ unlimited.
+    /// RECORDED only — no portable native cpu-share cap (see `run::limits`).
+    #[serde(default)]
+    pub cpu_limit_millis: Option<u64>,
 }
 
 /// Serde default for [`SpecOnDisk::engine`] — the native supervisor branch, so a
@@ -222,6 +235,9 @@ impl Default for SpecOnDisk {
             oom_score_adj: None,
             pids_limit: None,
             shm_size: None,
+            // WP-RESLIMITS: unlimited (match serde defaults) ⇒ no-op spawn.
+            mem_limit_bytes: None,
+            cpu_limit_millis: None,
         }
     }
 }

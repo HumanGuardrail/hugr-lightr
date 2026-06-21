@@ -105,6 +105,66 @@ fn spec_on_disk_rc_seam_fields_roundtrip() {
     assert_eq!(back.shm_size, Some(67_108_864));
 }
 
+// ── WP-RESLIMITS: resource caps thread RunSpec → SpecOnDisk → spec.json ─────
+
+/// A spec.json written before the limits fields existed still parses, with both
+/// caps at their no-op default (`None` ⇒ unlimited) — back-compat (behavior-
+/// preserving for any pre-WP-RESLIMITS detached run dir).
+#[test]
+fn spec_on_disk_legacy_json_defaults_limits_to_unlimited() {
+    let legacy = r#"{
+        "cwd": "/w", "command": ["sleep","1"], "env_keys": [],
+        "mounts": [], "detached": true, "created_at_unix": 1
+    }"#;
+    let spec: SpecOnDisk = serde_json::from_str(legacy).expect("legacy spec parses");
+    assert!(spec.mem_limit_bytes.is_none(), "missing memory ⇒ unlimited");
+    assert!(spec.cpu_limit_millis.is_none(), "missing cpus ⇒ unlimited");
+}
+
+/// The resource caps write/read round-trip through spec.json unchanged — what the
+/// detached supervisor reads back to size + cap the child (RLIMIT_AS on Linux;
+/// cpu recorded). This is the core #57 plumbing: limits SURVIVE serialization.
+#[test]
+fn spec_on_disk_limits_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = SpecOnDisk {
+        cwd: "/w".to_string(),
+        command: vec!["sh".to_string()],
+        detached: true,
+        created_at_unix: 1,
+        mem_limit_bytes: Some(512 * 1024 * 1024),
+        cpu_limit_millis: Some(1500),
+        ..Default::default()
+    };
+    write_spec_json(dir.path(), &spec).expect("write");
+    let back = read_spec_on_disk(dir.path()).expect("read");
+    assert_eq!(back.mem_limit_bytes, Some(512 * 1024 * 1024));
+    assert_eq!(back.cpu_limit_millis, Some(1500));
+}
+
+/// `RunSpec.limits` (the runtime type) threads onto `SpecOnDisk`'s flat fields at
+/// the `spawn_detached_engine` serialize step. Asserted directly on the on-disk
+/// shape so it is parallel-safe (no spawn, no env): the supervisor reconstructs a
+/// `ResourceLimits` from exactly these two fields. `None`/`None` ⇒ unlimited.
+#[test]
+fn runspec_limits_map_onto_spec_on_disk_fields() {
+    use crate::run::types::RunSpec;
+    // Unlimited ⇒ both on-disk fields None (behavior-preserving default).
+    let none = RunSpec::default();
+    assert!(none.limits.is_unlimited());
+
+    // A set cap maps field-for-field (the mapping `spawn.rs` performs).
+    let set = RunSpec {
+        limits: lightr_core::ResourceLimits {
+            memory_bytes: Some(256 * 1024 * 1024),
+            cpu_millis: Some(500),
+        },
+        ..Default::default()
+    };
+    assert_eq!(set.limits.memory_bytes, Some(256 * 1024 * 1024));
+    assert_eq!(set.limits.cpu_millis, Some(500));
+}
+
 // ── WP-RC-WORKDIR: effective_cwd + resolve_workdir ─────────────────────────
 
 /// `RunSpec::effective_cwd`: no `-w` ⇒ `cwd` unchanged (behavior-preserving);

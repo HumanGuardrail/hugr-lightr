@@ -67,6 +67,13 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
     let vm_done = Arc::new(AtomicBool::new(false));
     let vm_code = Arc::new(Mutex::new(255i32));
     let command = spec.command.clone();
+    // WP-RESLIMITS: read the persisted resource caps back from spec.json so the
+    // VM is sized to them (`vz_caps`: a hard memory cap + ceil(cpus) vcpus). Both
+    // `None` (unlimited) ⇒ the shim baseline, byte-identical to before.
+    let limits = lightr_core::ResourceLimits {
+        memory_bytes: spec.mem_limit_bytes,
+        cpu_millis: spec.cpu_limit_millis,
+    };
     {
         let vm_done = Arc::clone(&vm_done);
         let vm_code = Arc::clone(&vm_code);
@@ -79,7 +86,7 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         cwd: &cwd,
                         command: &command,
                         rootfs: Some(&rootfs_dir),
-                        limits: lightr_core::ResourceLimits::default(),
+                        limits,
                         net: true,
                         // ADR-0018 dual-NIC: the L2 switch (WP-C9) will assign the
                         // guest-side socketpair fd here to attach the mesh NIC
