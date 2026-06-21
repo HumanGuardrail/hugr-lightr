@@ -111,6 +111,7 @@ mod tests {
             cap_add: Vec::new(),
             cap_drop: Vec::new(),
             container_name: None,
+            networks: Vec::new(),
         }
     }
 
