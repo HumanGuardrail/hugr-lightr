@@ -219,6 +219,10 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             container,
             reference,
         } => handlers::commit::run(&container, reference.as_deref()),
+        // ── Docker diagnostic / maintenance surface (WP-EDGE-VERBS) ────────────
+        Cmd::Version => handlers::version::run(json),
+        Cmd::Info => handlers::info::run(json),
+        Cmd::System { subcmd } => handlers::system::run(subcmd),
         Cmd::Gc {
             force,
             min_age,

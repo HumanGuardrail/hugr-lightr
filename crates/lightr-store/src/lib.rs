@@ -11,6 +11,7 @@ pub mod store;
 pub use store::cow::CowRung;
 pub use store::imgmeta::{ImageDescriptor, ImageManifestRecord};
 pub use store::lock::{GcGuard, WriteGuard};
+pub use store::usage::StoreUsage;
 pub use store::volume::{self, VolumeInfo, DRIVER_LOCAL};
 
 /// The lightr content-addressed store.
@@ -228,6 +229,15 @@ impl Store {
     /// Enumerate all raw AC values (decoded by caller). Order unspecified.
     pub fn list_ac(&self) -> Result<Vec<Vec<u8>>> {
         store::ac::list_ac(&self.root)
+    }
+
+    // ── usage (read-only diagnostics — WP-EDGE-VERBS) ──────────────────────────
+
+    /// Read-only CAS footprint: object count + summed bytes under `objects/`.
+    /// Takes no lock and mutates nothing — safe to call any time. Backs
+    /// `lightr info` and `lightr system df`.
+    pub fn store_usage(&self) -> Result<StoreUsage> {
+        store::usage::store_usage(&self.root)
     }
 }
 
