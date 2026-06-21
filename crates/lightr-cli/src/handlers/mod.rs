@@ -21,7 +21,9 @@ pub mod mcp;
 #[cfg(unix)]
 pub mod network;
 pub mod oci;
+pub mod pause;
 pub mod plan;
+pub mod port;
 pub mod ps;
 pub mod rename;
 pub mod restart;
@@ -38,5 +40,6 @@ pub mod stub;
 pub mod supervise;
 pub mod top;
 pub mod undo;
+pub mod unpause;
 pub mod volume;
 pub mod wait;

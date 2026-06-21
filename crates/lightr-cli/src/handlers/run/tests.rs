@@ -70,6 +70,7 @@ fn publish_without_detach_exits_2() {
         None, // restart (WP-RC-RESTART)
         None, // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
+        super::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
     );
     assert_eq!(code, 2, "-p without -d must exit 2");
 }
@@ -102,6 +103,7 @@ fn publish_on_engine_path_exits_2() {
         None, // restart (WP-RC-RESTART)
         None, // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
+        super::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
     );
     assert_eq!(code, 2, "-p on the engine path must exit 2 (Phase 2)");
 }
@@ -195,6 +197,7 @@ fn dash_e_runs_not_stubbed() {
         None,                     // restart (WP-RC-RESTART)
         None,                     // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
+        super::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
     );
     std::env::remove_var("LIGHTR_HOME");
     assert_eq!(
@@ -252,6 +255,7 @@ fn dash_w_runs_not_stubbed_and_honored() {
         None,           // restart (WP-RC-RESTART)
         None,           // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
+        super::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
     );
     std::env::remove_var("LIGHTR_HOME");
 
@@ -331,6 +335,7 @@ fn dash_u_current_uid_runs_not_stubbed() {
         None,       // restart (WP-RC-RESTART)
         None,       // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
+        super::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
     );
     std::env::remove_var("LIGHTR_HOME");
 
@@ -382,6 +387,7 @@ fn stop_signal_runs_not_stubbed() {
         None,           // restart
         Some("SIGINT"), // stop_signal (WP-RC-STOPSIGNAL) — must NOT be stubbed
         &HealthFlags::default(),
+        super::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
     );
     std::env::remove_var("LIGHTR_HOME");
 

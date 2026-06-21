@@ -51,11 +51,17 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                     return 2;
                 }
             }
+            // WP-CLI-TRIO / RC-FLAGS REMOVED the 11 run-config flags from this
+            // guard — `--hostname`, `-l/--label`, `--cap-add`/`--cap-drop`,
+            // `--privileged`, `-t/--tty`, `--init`, `--read-only`,
+            // `--oom-score-adj`, `--pids-limit`, `--shm-size` — they are now
+            // WIRED into RunSpec carry-fields (RUNTIME-ONLY, never keyed) +
+            // honored by the apply seam (or recorded with an honest per-field
+            // note). With none of the remaining stubbed flags set, `run` behaves
+            // exactly as before.
             let new_flag_set = a.name.is_some()
                 || a.rm
-                || !a.label.is_empty()
                 || a.entrypoint.is_some()
-                || a.hostname.is_some()
                 || a.network.is_some()
                 || !a.network_alias.is_empty()
                 || !a.add_host.is_empty()
@@ -108,6 +114,24 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                     // as before. Already validated above.
                     a.stop_signal.as_deref(),
                     &health,
+                    // WP-CLI-TRIO / RC-FLAGS: the 11 run-config flags → RunSpec
+                    // carry-fields (RUNTIME-ONLY, never keyed). The handler
+                    // resolves `--label` (KEY=VAL) + `--shm-size` (size)
+                    // fail-closed, then honors each via the apply seam (or records
+                    // an honest note).
+                    handlers::run::RawRcFlags {
+                        hostname: a.hostname,
+                        label: a.label,
+                        cap_add: a.cap_add,
+                        cap_drop: a.cap_drop,
+                        privileged: a.privileged,
+                        tty: a.tty,
+                        init: a.init,
+                        read_only: a.read_only,
+                        oom_score_adj: a.oom_score_adj,
+                        pids_limit: a.pids_limit,
+                        shm_size: a.shm_size,
+                    },
                 )
             }
         }
@@ -141,13 +165,37 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             stderr,
             both,
             follow,
-        } => handlers::logs::run(&id, stderr, both, follow),
+            tail,
+            since,
+            timestamps,
+        } => {
+            // `--tail all` (the default) ⇒ None (full log, preserving the
+            // no-flag dump). A non-numeric value other than `all` is treated as
+            // `all` (lenient, docker-faithful), keeping behavior predictable.
+            let tail = if tail.eq_ignore_ascii_case("all") {
+                None
+            } else {
+                tail.parse::<usize>().ok()
+            };
+            let opts = handlers::logs::LogOpts {
+                stderr,
+                both,
+                follow,
+                tail,
+                since: since.as_deref(),
+                timestamps,
+            };
+            handlers::logs::run(&id, &opts)
+        }
         Cmd::Stop { id, grace } => handlers::stop::run(&id, grace),
         Cmd::Exec { id, command } => handlers::exec::run(&id, &command),
         // ── Docker-parity container-lifecycle verbs (CLI-surface freeze) ───────
         Cmd::Rm { targets, force } => handlers::rm::run(&targets, force),
         Cmd::Kill { targets, signal } => handlers::kill::run(&targets, signal.as_deref()),
         Cmd::Start { targets } => handlers::start::run(&targets),
+        Cmd::Pause { targets } => handlers::pause::run(&targets),
+        Cmd::Unpause { targets } => handlers::unpause::run(&targets),
+        Cmd::Port { target, port } => handlers::port::run(&target, port.as_deref()),
         Cmd::Restart { targets, grace } => handlers::restart::run(&targets, grace),
         Cmd::Wait { targets } => handlers::wait::run(&targets),
         Cmd::Rename { target, new_name } => handlers::rename::run(&target, &new_name),

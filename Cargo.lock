@@ -662,6 +662,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "clap_mangen",
+ "libc",
  "lightr-build",
  "lightr-core",
  "lightr-engine",
