@@ -127,6 +127,29 @@ pub fn run(
         Err(e) => return die_lightr(&e),
     };
 
+    // WP-NET3: the vz container-networking flags (`--network`/`--network-alias`/
+    // `--add-host`/`--dns`) are honored ONLY on the `--engine vz --rootfs <img>`
+    // path — that is where a per-container mesh NIC + guest `/etc/hosts`/resolv.conf
+    // exist. The native engine SHARES the host network (no per-container netns) and
+    // has no container rootfs to write, so any networking flag on native (or vz
+    // without a rootfs) is an honest exit 2, never a silent drop. Guarded here,
+    // BEFORE any provisioning, because only the handler has the engine + rootfs.
+    {
+        let net_flag = runflags.network.is_some()
+            || !runflags.network_alias.is_empty()
+            || !runflags.add_host.is_empty()
+            || !runflags.dns.is_empty();
+        let vz_container = engine_kind == EngineKind::Vz && rootfs_ref.is_some();
+        if net_flag && !vz_container {
+            eprintln!(
+                "lightr: --network/--network-alias/--add-host/--dns require --engine vz \
+                 --rootfs <img> (the native engine shares the host network — no per-container \
+                 netns or rootfs)"
+            );
+            return 2;
+        }
+    }
+
     // Parse resource caps (F-203). Malformed ⇒ exit 2 (fail closed).
     let limits = match ResourceLimits::parse(memory, cpus) {
         Ok(l) => l,
@@ -278,11 +301,15 @@ pub fn run(
             entrypoint: runflags.entrypoint.clone(),
             name: runflags.name.clone(),
             rm: runflags.rm,
-            // WP-C9 seam: vz container-networking carry-fields (network /
-            // network_alias / add_host / dns). RUNTIME-ONLY, never keyed. The
-            // `--network` CLI surface is NET3's job; default ⇒ no-op (this vz
-            // spawn stays the single-NAT-NIC path until NET3 fills them).
-            ..Default::default()
+            // WP-NET3: the vz container-networking carry-fields, off the C9 seam.
+            // RUNTIME-ONLY, never keyed. `--network Some(..)` ⇒ the vz supervisor
+            // (svz) create-or-opens the per-network registry, joins it, and
+            // attaches the shared cross-process L2 switch (mesh NIC eth1). All
+            // empty/None ⇒ the single-NAT-NIC path, byte-identical to before.
+            network: runflags.network.clone(),
+            network_alias: runflags.network_alias.clone(),
+            add_host: runflags.add_host.clone(),
+            dns: runflags.dns.clone(),
         };
         return match spawn_detached_engine(
             &spec,

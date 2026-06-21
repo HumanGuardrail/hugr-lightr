@@ -15,3 +15,5 @@ mod g1;
 mod g2;
 mod g3;
 mod g4;
+#[cfg(unix)]
+mod net3;

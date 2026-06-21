@@ -1,6 +1,6 @@
-//! WP-RUNFLAGS — parsing + lowering for the core docker `run` flags wired by
-//! this WP: `-v/--volume`, `--tmpfs`, `--name`, `--rm`, `--entrypoint`, and the
-//! honest Phase-2 networking flags (`--network`/`--network-alias`/`--add-host`/
+//! WP-RUNFLAGS / WP-NET3 — parsing + lowering for the core docker `run` flags
+//! wired here: `-v/--volume`, `--tmpfs`, `--name`, `--rm`, `--entrypoint`, and
+//! the vz container-networking flags (`--network`/`--network-alias`/`--add-host`/
 //! `--dns`).
 //!
 //! The raw clap values arrive bundled in [`RawRunFlags`]; [`RawRunFlags::resolve`]
@@ -8,6 +8,15 @@
 //! Fail-closed: a bad value prints to stderr + returns `Err(exit_code)` (mirrors
 //! the other run-flag parsers). An all-default bundle resolves to all-default ⇒
 //! the no-flag run is byte-identical to before.
+//!
+//! WP-NET3: the networking flags are now WIRED (off the honest Phase-2 stub).
+//! `resolve` only does VALUE validation here — the engine/rootfs guardrails
+//! (`--network`/`--add-host`/`--dns` require `--engine vz --rootfs <img>`; the
+//! native engine shares the host network with no per-container netns) need the
+//! engine + rootfs context, so they live in the handler ([`super::run`]), not
+//! here. `--network` is a clap `Option<String>` so "single network per
+//! container" is structurally enforced (a 2nd `--network` is last-wins at the
+//! clap layer, exactly like docker).
 
 use lightr_run::{parse_v, MountKind, VolumeBind};
 
@@ -36,46 +45,43 @@ pub struct RunFlags {
     pub name: Option<String>,
     pub rm: bool,
     pub entrypoint: Option<Vec<String>>,
+    /// WP-NET3: `--network <name>` — the vz user network this run joins. `None` ⇒
+    /// the single-NAT-NIC vz path (byte-identical). The engine/rootfs guardrail
+    /// lives in the handler; here it is only carried through (value-validated).
+    pub network: Option<String>,
+    /// WP-NET3: `--network-alias` — extra DNS names this member answers to.
+    pub network_alias: Vec<String>,
+    /// WP-NET3: `--add-host HOST:IP` — extra `/etc/hosts` entries, carried as raw
+    /// `"host:ip"` strings (svz parses them to `(host, ip)` at the vz wiring site).
+    pub add_host: Vec<String>,
+    /// WP-NET3: `--dns` — resolver addresses for the guest's `/etc/resolv.conf`.
+    pub dns: Vec<String>,
 }
 
 impl RawRunFlags {
     /// Validate + lower. Fail-closed: bad input ⇒ printed error + `Err(exit_code)`.
     ///
-    /// The networking flags (`--network`/`--network-alias`/`--add-host`/`--dns`)
-    /// are NOT applicable on the native engine (no per-container network
-    /// namespace) — they get a SPECIFIC honest error here (exit 2), distinct from
-    /// the generic WP-RUNFLAGS stub. `--add-host` could in principle write the run
-    /// rootfs's `/etc/hosts`, but the native engine has NO rootfs (it shares the
-    /// host fs/cwd), so it too is honest Phase-2. The vz engine is where these
-    /// gain teeth (consistent with the DNS-in-compose Phase-2 boundary).
+    /// WP-NET3: the networking flags (`--network`/`--network-alias`/`--add-host`/
+    /// `--dns`) are now WIRED (off the honest Phase-2 stub) — they thread to
+    /// `RunSpec` and the vz supervisor joins the per-network L2 switch. This fn
+    /// VALUE-validates `--add-host` (each entry must be `HOST:IP`, so a typo is an
+    /// honest exit 2 rather than a silently dropped host); the ENGINE/ROOTFS
+    /// guardrail (these are vz-only — the native engine shares the host network
+    /// with no per-container netns) needs the engine + rootfs context and so lives
+    /// in the handler ([`super::run`]), not here.
     pub fn resolve(self) -> Result<RunFlags, i32> {
-        if let Some(net) = self.network.as_deref() {
-            eprintln!(
-                "lightr: --network ({net}) is wired for the vz engine / Phase 2; native runs \
-                 share the host network (no per-container netns)"
-            );
-            return Err(2);
-        }
-        if !self.network_alias.is_empty() {
-            eprintln!(
-                "lightr: --network-alias is wired for the vz engine / Phase 2; native runs \
-                 share the host network (no per-container netns)"
-            );
-            return Err(2);
-        }
-        if !self.add_host.is_empty() {
-            eprintln!(
-                "lightr: --add-host is wired for the vz engine / Phase 2; the native engine has \
-                 no container rootfs /etc/hosts to write (it shares the host fs)"
-            );
-            return Err(2);
-        }
-        if !self.dns.is_empty() {
-            eprintln!(
-                "lightr: --dns is wired for the vz engine / Phase 2; native runs share the host \
-                 resolver (no per-container netns)"
-            );
-            return Err(2);
+        // `--add-host HOST:IP`: validate the shape so a malformed entry is an
+        // honest error here (svz drops un-parsable entries; NET3 owns surfacing
+        // the parse error to the user). Carried as raw `"host:ip"` strings —
+        // svz re-splits to `(host, ip)` at the wiring site.
+        for raw in &self.add_host {
+            match raw.split_once(':') {
+                Some((h, ip)) if !h.is_empty() && !ip.is_empty() => {}
+                _ => {
+                    eprintln!("lightr: --add-host {raw}: expected HOST:IP");
+                    return Err(2);
+                }
+            }
         }
 
         // `-v/--volume`: parse via the frozen `parse_v` grammar, then require a
@@ -139,6 +145,12 @@ impl RawRunFlags {
             name: self.name,
             rm: self.rm,
             entrypoint,
+            // WP-NET3: carry the vz networking flags through to the handler, which
+            // applies the engine/rootfs guardrail then threads them into RunSpec.
+            network: self.network,
+            network_alias: self.network_alias,
+            add_host: self.add_host,
+            dns: self.dns,
         })
     }
 }

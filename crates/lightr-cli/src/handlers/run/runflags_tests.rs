@@ -15,6 +15,11 @@ fn default_resolves_to_all_default_noop() {
     assert!(f.name.is_none());
     assert!(!f.rm);
     assert!(f.entrypoint.is_none());
+    // WP-NET3: no networking flags ⇒ all-default ⇒ byte-identical no-op.
+    assert!(f.network.is_none());
+    assert!(f.network_alias.is_empty());
+    assert!(f.add_host.is_empty());
+    assert!(f.dns.is_empty());
 }
 
 #[test]
@@ -80,33 +85,56 @@ fn empty_entrypoint_is_error() {
 }
 
 #[test]
-fn network_flag_is_honest_phase2_error() {
-    let err = RawRunFlags {
+fn network_flag_threads_through_resolve() {
+    // WP-NET3: `--network` is now WIRED — `resolve` carries it through (the
+    // engine/rootfs guardrail lives in the handler, not here).
+    let f = RawRunFlags {
         network: Some("mynet".to_string()),
         ..raw()
     }
     .resolve()
-    .unwrap_err();
-    assert_eq!(err, 2, "--network is honest Phase 2 → exit 2");
+    .unwrap();
+    assert_eq!(f.network.as_deref(), Some("mynet"));
 }
 
 #[test]
-fn network_alias_add_host_dns_are_phase2_errors() {
-    for f in [
-        RawRunFlags {
-            network_alias: vec!["a".to_string()],
+fn network_alias_and_dns_thread_through_resolve() {
+    // WP-NET3: `--network-alias` + `--dns` are carried through verbatim.
+    let f = RawRunFlags {
+        network_alias: vec!["a".to_string(), "b".to_string()],
+        dns: vec!["1.1.1.1".to_string()],
+        ..raw()
+    }
+    .resolve()
+    .unwrap();
+    assert_eq!(f.network_alias, vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(f.dns, vec!["1.1.1.1".to_string()]);
+}
+
+#[test]
+fn add_host_well_formed_threads_through() {
+    // WP-NET3: a well-formed `HOST:IP` `--add-host` is carried as a raw string.
+    let f = RawRunFlags {
+        add_host: vec!["h:1.2.3.4".to_string()],
+        ..raw()
+    }
+    .resolve()
+    .unwrap();
+    assert_eq!(f.add_host, vec!["h:1.2.3.4".to_string()]);
+}
+
+#[test]
+fn add_host_malformed_is_honest_error() {
+    // WP-NET3: `resolve` value-validates `--add-host` shape (svz would silently
+    // drop a malformed entry — NET3 surfaces the parse error as exit 2).
+    for bad in ["nocolon", ":1.2.3.4", "host:", ""] {
+        let err = RawRunFlags {
+            add_host: vec![bad.to_string()],
             ..raw()
-        },
-        RawRunFlags {
-            add_host: vec!["h:1.2.3.4".to_string()],
-            ..raw()
-        },
-        RawRunFlags {
-            dns: vec!["1.1.1.1".to_string()],
-            ..raw()
-        },
-    ] {
-        assert_eq!(f.resolve().unwrap_err(), 2);
+        }
+        .resolve()
+        .unwrap_err();
+        assert_eq!(err, 2, "malformed --add-host {bad:?} must exit 2");
     }
 }
 

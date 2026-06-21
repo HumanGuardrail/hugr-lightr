@@ -206,10 +206,11 @@ fn rm_without_detach_is_exit_2() {
     assert_eq!(code, 2, "--rm without -d must exit 2");
 }
 
-/// A network flag (`--network`) is an honest Phase-2 error (exit 2), NOT the
-/// generic stub and NOT a silent drop.
+/// WP-NET3: `--network` on the NATIVE engine is an honest exit 2 — the native
+/// engine shares the host network (no per-container netns / rootfs). Not a silent
+/// drop. The guardrail fires in the handler, before any provisioning.
 #[test]
-fn network_flag_is_honest_phase2() {
+fn network_flag_on_native_is_exit_2() {
     let _g = crate::test_lock::ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -224,5 +225,59 @@ fn network_flag_is_honest_phase2() {
     };
     let code = run_fg(work.to_str().unwrap(), &["true".to_string()], flags);
     std::env::remove_var("LIGHTR_HOME");
-    assert_eq!(code, 2, "--network must be an honest Phase-2 error");
+    assert_eq!(code, 2, "--network on native must be an honest exit 2");
+}
+
+/// WP-NET3: `--add-host`/`--dns` are likewise vz-only — on native they reach no
+/// guest `/etc/hosts`/resolv.conf, so an honest exit 2 (never a silent drop).
+#[test]
+fn add_host_and_dns_on_native_are_exit_2() {
+    let _g = crate::test_lock::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    std::env::set_var("LIGHTR_HOME", tmp.path());
+    let work = tmp.path().join("work");
+    std::fs::create_dir_all(&work).expect("mkdir work");
+
+    for flags in [
+        RawRunFlags {
+            add_host: vec!["h:1.2.3.4".to_string()],
+            ..RawRunFlags::default()
+        },
+        RawRunFlags {
+            dns: vec!["1.1.1.1".to_string()],
+            ..RawRunFlags::default()
+        },
+        RawRunFlags {
+            network_alias: vec!["a".to_string()],
+            ..RawRunFlags::default()
+        },
+    ] {
+        let code = run_fg(work.to_str().unwrap(), &["true".to_string()], flags);
+        assert_eq!(code, 2, "vz-only networking flag on native must exit 2");
+    }
+    std::env::remove_var("LIGHTR_HOME");
+}
+
+/// WP-NET3: a malformed `--add-host` (no `HOST:IP`) is an honest exit 2 from the
+/// value-validation in `resolve` — even on native (validation precedes the
+/// engine guardrail). Guards against silently dropping a typo'd host.
+#[test]
+fn malformed_add_host_is_exit_2() {
+    let _g = crate::test_lock::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    std::env::set_var("LIGHTR_HOME", tmp.path());
+    let work = tmp.path().join("work");
+    std::fs::create_dir_all(&work).expect("mkdir work");
+
+    let flags = RawRunFlags {
+        add_host: vec!["nocolon".to_string()],
+        ..RawRunFlags::default()
+    };
+    let code = run_fg(work.to_str().unwrap(), &["true".to_string()], flags);
+    std::env::remove_var("LIGHTR_HOME");
+    assert_eq!(code, 2, "malformed --add-host must exit 2");
 }
