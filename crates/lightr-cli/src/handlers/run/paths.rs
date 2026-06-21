@@ -292,6 +292,11 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         entrypoint: runflags.entrypoint,
         name: runflags.name.clone(),
         rm: runflags.rm,
+        // WP-C9 seam: the vz container-networking carry-fields (network /
+        // network_alias / add_host / dns). RUNTIME-ONLY, never keyed. The CLI
+        // flag surface (`--network` etc.) is NET3's job; until then they default
+        // to no-op, so this run path is byte-identical to before.
+        ..Default::default()
     };
 
     // Detach path: spawn detached and print the run id. WP-RC-4: when a
