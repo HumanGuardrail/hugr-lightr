@@ -2,6 +2,10 @@
 // WP-DF-08: ARG instruction + --build-arg scoping (crate-internal).
 pub(crate) mod args;
 pub mod compose;
+// WP-DF-IGNORE: `.dockerignore` build-context matcher (crate-internal). Consumed
+// by the COPY/ADD executor (exclude from context) + the memo key (exclude from
+// the hashed context), so adding an ignored file never busts the cache.
+pub(crate) mod dockerignore;
 pub(crate) mod exec;
 // Filesystem/CAS helpers split out of exec.rs (behavior-preserving, <400 LOC).
 pub(crate) mod exec_fs;

@@ -12,6 +12,31 @@ use std::path::Path;
 pub(crate) mod tar_extract;
 use tar_extract::{archive_kind, extract_archive};
 
+use crate::build::dockerignore::DockerIgnore;
+
+/// WP-DF-IGNORE: the `.dockerignore` filter threaded through context COPY/ADD
+/// placement — `(context_root, matcher)`. `Some` ⇒ a source path whose
+/// context-relative path is excluded is NOT placed (recursively). `None` ⇒ no
+/// filtering (no `.dockerignore`, or `COPY --from=stage` where a prior-stage
+/// tree is not the build context). A helper keeps the per-entry check terse.
+pub(crate) type IgnoreFilter<'a> = Option<(&'a Path, &'a DockerIgnore)>;
+
+/// `true` if `path` (an absolute path under `context_root`) is excluded by the
+/// filter. `None` filter ⇒ never excluded (byte-identical to no filter). A path
+/// not under `context_root` (defensive) is kept.
+fn filtered_out(path: &Path, filter: IgnoreFilter) -> bool {
+    match filter {
+        Some((root, ignore)) => match path.strip_prefix(root) {
+            Ok(rel) => {
+                let rel = rel.to_string_lossy();
+                !rel.is_empty() && ignore.is_excluded(&rel)
+            }
+            Err(_) => false,
+        },
+        None => false,
+    }
+}
+
 /// Materialize a snapshot (identified by its manifest digest) into `dest`.
 /// Clears `dest` first so we get a clean layer.
 pub(crate) fn materialize_from_digest(
@@ -87,14 +112,25 @@ pub(crate) fn materialize_from_digest(
 /// `--chown`/`--chmod` (`meta`) to every copied file AND directory (Docker
 /// applies the flags recursively). A `CopyMeta::default()` (no flags) is
 /// byte-identical to a plain recursive copy (chmod/chown become no-ops).
-pub(crate) fn copy_dir_recursive_meta(src: &Path, dest: &Path, meta: &CopyMeta) -> Result<()> {
+pub(crate) fn copy_dir_recursive_meta(
+    src: &Path,
+    dest: &Path,
+    meta: &CopyMeta,
+    filter: IgnoreFilter,
+) -> Result<()> {
     for entry in std::fs::read_dir(src).map_err(LightrError::Io)? {
         let entry = entry.map_err(LightrError::Io)?;
+        // WP-DF-IGNORE: skip a child whose context-relative path is excluded —
+        // so `COPY . /dst` (or a copied subdir) never materializes ignored files.
+        // A `None` filter makes this a no-op (byte-identical recursive copy).
+        if filtered_out(&entry.path(), filter) {
+            continue;
+        }
         let ft = entry.file_type().map_err(LightrError::Io)?;
         let target = dest.join(entry.file_name());
         if ft.is_dir() {
             std::fs::create_dir_all(&target).map_err(LightrError::Io)?;
-            copy_dir_recursive_meta(&entry.path(), &target, meta)?;
+            copy_dir_recursive_meta(&entry.path(), &target, meta, filter)?;
             apply_meta(&target, meta)?;
         } else if ft.is_file() {
             std::fs::copy(entry.path(), &target).map_err(LightrError::Io)?;
@@ -247,6 +283,7 @@ pub(crate) fn place_sources(
     dest: &str,
     meta: &CopyMeta,
     extract: bool,
+    filter: IgnoreFilter,
 ) -> Result<()> {
     let dest_path = if dest.starts_with('/') {
         work_dir.join(dest.trim_start_matches('/'))
@@ -261,7 +298,7 @@ pub(crate) fn place_sources(
     if dest_is_dir {
         std::fs::create_dir_all(&dest_path).map_err(LightrError::Io)?;
         for src_path in sources {
-            place_one_into_dir(src_path, &dest_path, meta, extract)?;
+            place_one_into_dir(src_path, &dest_path, meta, extract, filter)?;
         }
     } else {
         // Single non-archive source, file-or-dir dest (COPY semantics exactly).
@@ -274,7 +311,8 @@ pub(crate) fn place_sources(
             apply_meta(&dest_path, meta)?;
         } else if src_path.is_dir() {
             std::fs::create_dir_all(&dest_path).map_err(LightrError::Io)?;
-            copy_dir_recursive_meta(src_path, &dest_path, meta)?;
+            // WP-DF-IGNORE: nested excluded files under a copied dir are skipped.
+            copy_dir_recursive_meta(src_path, &dest_path, meta, filter)?;
             apply_meta(&dest_path, meta)?;
         }
     }
@@ -289,6 +327,7 @@ fn place_one_into_dir(
     dest_dir: &Path,
     meta: &CopyMeta,
     extract: bool,
+    filter: IgnoreFilter,
 ) -> Result<()> {
     if extract && src_path.is_file() {
         if let Some(kind) = archive_kind(src_path) {
@@ -303,7 +342,9 @@ fn place_one_into_dir(
         std::fs::copy(src_path, &target).map_err(LightrError::Io)?;
         apply_meta(&target, meta)?;
     } else if src_path.is_dir() {
-        copy_dir_recursive_meta(src_path, dest_dir, meta)?;
+        // WP-DF-IGNORE: a dir source copies its CONTENTS; excluded nested files
+        // are skipped by the recursive copy (a `None` filter is unchanged).
+        copy_dir_recursive_meta(src_path, dest_dir, meta, filter)?;
     }
     Ok(())
 }

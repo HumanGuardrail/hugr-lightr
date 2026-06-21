@@ -53,11 +53,26 @@ pub(in crate::build) fn copy(
         // so a leading `/` is stripped before joining (a `Path::join` of an
         // absolute path would otherwise discard the stage root). `relative = true`.
         let sources = resolve_sources_in(&stage_guard.path, ctx, src, "COPY --from", true)?;
-        return place_sources(ctx.work_dir, &sources, dest, &meta, false);
+        // `--from` copies a PRIOR stage's tree, NOT the build context, so
+        // `.dockerignore` does NOT apply — pass `None` (no filter).
+        return place_sources(ctx.work_dir, &sources, dest, &meta, false, None);
     }
     let sources = resolve_sources(ctx, src, "COPY")?;
+    // WP-DF-IGNORE: a nested file under a copied DIR (e.g. `COPY . /dst`) that the
+    // matcher excludes is dropped during recursion. `Some((context_dir, ignore))`
+    // only when the matcher has rules — else `None` keeps the copy byte-identical.
+    let filter = ctx_filter(ctx);
     // COPY never auto-extracts (a `.tar` is copied as a file) — `extract = false`.
-    place_sources(ctx.work_dir, &sources, dest, &meta, false)
+    place_sources(ctx.work_dir, &sources, dest, &meta, false, filter)
+}
+
+/// The `.dockerignore` filter pair `(context_root, matcher)` for context COPY/ADD
+/// — `None` when there are no rules (so the copy path is byte-identical to before
+/// this WP). `COPY --from=stage` never uses it (a stage tree is not the context).
+fn ctx_filter<'a>(
+    ctx: &'a BuildCtx,
+) -> Option<(&'a Path, &'a crate::build::dockerignore::DockerIgnore)> {
+    (!ctx.ignore.is_inactive()).then_some((ctx.context_dir, ctx.ignore))
 }
 
 /// Interpolate + glob-expand a COPY/ADD `src` list against the build context. A
@@ -95,7 +110,27 @@ fn resolve_sources_in(
                 "{verb}: no source files match {token:?}"
             )));
         }
-        sources.extend(matched);
+        // WP-DF-IGNORE: for a CONTEXT source (`!relative`), drop any TOP-LEVEL
+        // glob match the matcher excludes (e.g. `COPY *.log` after `*.log` in
+        // `.dockerignore` ⇒ zero sources). Nested files under a copied DIR are
+        // filtered later, during recursive placement. `--from` (`relative`) is a
+        // prior-stage tree, not the context, so it is never filtered here.
+        if !relative && !ctx.ignore.is_inactive() {
+            for m in matched {
+                let keep = match m.strip_prefix(root) {
+                    Ok(rel) => {
+                        let rel = rel.to_string_lossy();
+                        rel.is_empty() || !ctx.ignore.is_excluded(&rel)
+                    }
+                    Err(_) => true,
+                };
+                if keep {
+                    sources.push(m);
+                }
+            }
+        } else {
+            sources.extend(matched);
+        }
     }
     Ok(sources)
 }
@@ -132,6 +167,8 @@ pub(in crate::build) fn add(
     let dest = &interpolate(dest, ctx.scope, ctx.escape)?;
     let sources = resolve_sources(ctx, src, "ADD")?;
     // ADD auto-extracts recognized archives (`extract = true`); the placement +
-    // dir/file rules are otherwise COPY's, shared via `place_sources`.
-    place_sources(ctx.work_dir, &sources, dest, &meta, true)
+    // dir/file rules are otherwise COPY's, shared via `place_sources`. The same
+    // `.dockerignore` filter as COPY applies to context sources (WP-DF-IGNORE).
+    let filter = ctx_filter(ctx);
+    place_sources(ctx.work_dir, &sources, dest, &meta, true, filter)
 }
