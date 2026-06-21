@@ -1,13 +1,29 @@
-# CI gate — fmt / clippy / test across the OS matrix, plus cross-typecheck for
-# the targets without a native runner. Mirrors scripts/gate.sh on each host.
-# GitHub-hosted runners honor rust-toolchain.toml (1.96.0); the founder-Mac
-# proxy workaround is NOT needed here.
+# CI gate — SELF-HOSTED runner (founder Intel Mac, labels `self-hosted, macOS`).
+#
+# WHY self-hosted: GitHub-hosted minutes repeatedly exhausted the org Actions
+# spending limit (3× blocks). The founder's Intel Mac runs every gate at $0.
+#
+# ONE-TIME RUNNER SETUP (owner): repo → Settings → Actions → Runners → New
+# self-hosted runner → macOS → follow the steps (it self-labels `self-hosted,
+# macOS, X64`). The runner box needs:
+#   - rustup (rust-toolchain.toml pins 1.96.0; `rustup show` installs on demand)
+#   - `brew install mingw-w64` + `rustup target add x86_64-pc-windows-gnu`
+#     (for the windows cross-clippy below)
+# The persistent `target/` makes runs fast; no cache action is used (self-hosted
+# keeps state between runs — caching actions can fight the persistent target).
+#
+# COVERAGE: `gate` runs the FULL workspace suite natively on macOS — the unix
+# runtime suite (incl. lightr-acceptance) executes here. `windows-cross` catches
+# windows-only cfg / dead-code / unused via a cross-clippy to x86_64-pc-windows-gnu
+# (the DF-06 / STATS-TOP class of bugs). Linux-specific cfg is NOT cross-checked
+# per-PR (the macOS-unix build + the windows cross cover the platform splits; the
+# codebase is unix / cfg(unix)). Add a self-hosted Linux runner (colima) later if
+# linux-specific coverage is ever needed.
 
 name: ci
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 concurrency:
@@ -15,147 +31,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # fmt (once, platform-agnostic) + clippy + test on each native host OS.
+  # Native macOS gate: fmt + clippy + the FULL workspace test suite (the unix
+  # integration suite runs natively here, so no per-OS matrix is needed).
   gate:
-    name: gate (${{ matrix.runner }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # Per-PR gate runs only on the CHEAP GitHub runners: ubuntu (1x) +
-        # windows (2x). macOS-arm64 GitHub runners bill ~10x (~$10/hr) — macOS is
-        # covered (a) locally on the founder box per-WP and (b) by a self-hosted
-        # macOS runner once registered (gate-macos, below). Windows runtime is WSL
-        # (future ring), so the unix integration suite (lightr-acceptance) runs on
-        # Linux; Windows does build + clippy + lib/bin tests via `--exclude`.
-        include:
-          - runner: ubuntu-latest
-            scope: "--workspace"
-          - runner: windows-latest
-            scope: "--workspace --exclude lightr-acceptance"
-
-  # macOS gate: TO BE ADDED as a SELF-HOSTED job (labels: self-hosted, macOS) on
-  # the founder box once a runner is registered (repo Settings → Actions →
-  # Runners → New self-hosted runner; mirror the lightr-cri runner) — $0 vs the
-  # ~$10/hr GitHub-hosted macOS. NOT wired yet: a self-hosted job with no online
-  # runner hangs pending and would block merges. Until the runner is up, macOS-
-  # Intel is gated LOCALLY on the founder box per-WP (the lead's cold-check), so
-  # coverage is not lost. When the runner is online, add a `gate-macos` job here
-  # (+ move vz-build to it) and this whole macOS gate becomes free.
-
+    name: gate (macOS native, full suite)
+    runs-on: [self-hosted, macOS]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install toolchain (honor rust-toolchain.toml)
+      - name: Toolchain (honor rust-toolchain.toml)
         run: |
           rustup show
           rustup component add rustfmt clippy
-
-      - name: Cache cargo registry + build artefacts
-        uses: Swatinem/rust-cache@v2
-
       - name: cargo fmt --check
-        if: ${{ matrix.runner == 'ubuntu-latest' }}
         run: cargo fmt --all -- --check
-
       - name: cargo clippy -D warnings
-        run: cargo clippy ${{ matrix.scope }} --all-targets -- -D warnings
-
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo build (fresh bin for acceptance)
-        run: cargo build ${{ matrix.scope }}
-        # The lightr-acceptance tests exec `target/debug/lightr` via assert_cmd,
-        # but `cargo test` builds *test* binaries — not the runnable bin artifact
-        # (lightr-acceptance has no lightr-cli dep to trigger it). Build it
-        # explicitly first so acceptance never runs against a stale binary (a
-        # stale-bin gate masked the F-309/scratch regression once — never again).
-
+        # lightr-acceptance execs target/debug/lightr via assert_cmd; build the
+        # runnable bin first so acceptance never runs against a stale binary.
+        run: cargo build --workspace
       - name: cargo test
-        # Windows runtime is WSL (a future ring): runtime-behavior tests (build
-        # RUN-exec, run, gc, compose) exercise unix commands and cannot pass
-        # windows-native. Windows validates build + clippy (cross-platform compile
-        # + lint); runtime tests run on Linux + macOS where the runtime exists.
-        if: ${{ matrix.runner != 'windows-latest' }}
-        run: cargo test ${{ matrix.scope }}
-        # LIGHTR_NET_TESTS intentionally unset; network tests excluded.
+        run: cargo test --workspace
 
-  # Cross-typecheck targets with no native runner above (linux/aarch64), so a
-  # cfg break is caught. macOS-arm64 is natively gated above; Windows x86_64-msvc
-  # (the SHIPPED triple) is natively built+tested by the windows-latest gate job
-  # above — this cross-check covers aarch64-linux which has no native runner.
-  cross-check:
-    name: cross-check (${{ matrix.target }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [aarch64-unknown-linux-gnu]
-
+  # Cross-clippy to windows-gnu: the ONLY way (on a macOS runner) to catch
+  # windows-only cfg dead-code / unused-var regressions — exactly the class that
+  # bit DF-06 and STATS-TOP. Build + clippy only; windows runtime is a future
+  # ring (WSL), so lightr-acceptance (unix integration) is excluded.
+  windows-cross:
+    name: windows cross-clippy (cfg/dead-code catch)
+    runs-on: [self-hosted, macOS]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install toolchain (honor rust-toolchain.toml)
-        run: rustup show
-
-      - name: Add target
-        run: rustup target add ${{ matrix.target }}
-
-      # blake3/ring have C build scripts; cross-checking to aarch64 needs the
-      # cross C toolchain (cc-rs resolves CC_<triple>) + the linker.
-      - name: Install aarch64 cross toolchain
+      - uses: actions/checkout@v4
+      - name: Toolchain + windows-gnu target
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          rustup show
+          rustup component add clippy
+          rustup target add x86_64-pc-windows-gnu
+      - name: cargo clippy --target x86_64-pc-windows-gnu -D warnings
+        run: cargo clippy --workspace --exclude lightr-acceptance --all-targets --target x86_64-pc-windows-gnu -- -D warnings
 
-      - name: Cache cargo registry + build artefacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: cargo check (cross)
-        run: cargo check --workspace --all-targets --target ${{ matrix.target }}
-
-  bench:
-    name: bench (perf-regression visibility)
-    runs-on: ubuntu-latest
-    needs: gate
-    # Visibility-only, codifying this job's documented intent: "a failure here is a
-    # regression signal to investigate, not an automatic merge block." It also
-    # immunizes CI against GitHub runner-provisioning hiccups (0-step/3s infra
-    # failures) that otherwise red the whole run. Bench budgets are dev-box-tuned
-    # and unreliable on hosted hardware; investigate reds, they never gate merges.
-    continue-on-error: true
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install toolchain (honor rust-toolchain.toml)
-        run: rustup show
-
-      - name: Cache cargo registry + build artefacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        run: cargo build --release
-
-      # Bench budgets are tuned to the dev box; a failure here is a regression
-      # signal to investigate, not an automatic merge block. Runs for visibility.
-      - name: Run bench --check
-        run: ./target/release/lightr bench --check
-
-  # Enforce the godfile invariant won by the split campaign: no source file may
-  # exceed 400 LOC. Cheap, deterministic, fails loudly on regression.
+  # Enforce the godfile invariant: no source .rs may exceed 400 LOC (examples
+  # exempt). Cheap, deterministic, fails loudly on regression.
   godfile-guard:
     name: godfile guard (<=400 LOC)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS]
     steps:
       - uses: actions/checkout@v4
       - name: No source .rs may exceed 400 LOC
         run: |
-          # src + tests are held to <400; validation examples (run-on-demand
-          # harnesses, e.g. the vz E2E) are exempt.
           BIG=$(find crates -name '*.rs' -not -path '*/target/*' -not -path '*/examples/*' -print0 \
             | xargs -0 wc -l | awk '$2!="total" && $1>400 {print}')
           if [ -n "$BIG" ]; then
@@ -163,27 +87,35 @@ jobs:
           fi
           echo "OK — every source file is <=400 LOC"
 
-  # vz feature builds the Swift shim (vz.swift) via build.rs and ad-hoc codesigns
-  # with the Virtualization entitlement. Until now ONLY the founder Intel Mac did
-  # this; this job validates the vz BUILD + codesign on a clean Apple-silicon
-  # runner. (The 2-VM E2E itself needs guest-boot support and stays box-gated for
-  # now.) continue-on-error while we confirm the runner's swiftc/codesign shape.
-  vz-build:
-    name: vz feature build (macOS)
-    runs-on: macos-14
-    # PAUSED to conserve the limited GitHub Actions credit: GitHub-hosted macOS
-    # bills ~10x (~$0.80/run) and this fired on every merge. vz is owner-gated
-    # (the 2-VM E2E is box-gated; the Swift-shim build is validated locally on the
-    # founder Intel Mac per-WP), so pausing loses no autonomous coverage. RE-ENABLE
-    # by restoring `if: github.event_name == 'push'` when doing vz work or once the
-    # self-hosted macOS runner ($0) is registered. continue-on-error either way.
+  # Perf-regression visibility (NOT a merge gate): bench budgets are dev-box
+  # tuned; a red here is a signal to investigate, never an automatic block.
+  bench:
+    name: bench (perf-regression visibility)
+    runs-on: [self-hosted, macOS]
+    needs: gate
     continue-on-error: true
-    if: ${{ false }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install toolchain (honor rust-toolchain.toml)
+      - name: Toolchain
         run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release
+      - name: Run bench --check
+        run: ./target/release/lightr bench --check
+
+  # vz feature build + ad-hoc codesign — RE-ENABLED on self-hosted (the founder
+  # Intel Mac has the swiftc/codesign toolchain; $0). Push-to-main only (1× per
+  # merge). The 2-VM E2E itself stays box-gated (needs interactive guest boot).
+  vz-build:
+    name: vz feature build (macOS native)
+    runs-on: [self-hosted, macOS]
+    needs: gate
+    if: ${{ github.event_name == 'push' }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup show
       - name: cargo build -p lightr-cli --features vz (Rust + Swift shim)
         run: cargo build -p lightr-cli --features vz
       - name: Ad-hoc codesign with vz entitlement
