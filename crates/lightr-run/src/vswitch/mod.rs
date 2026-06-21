@@ -32,6 +32,7 @@ pub mod dhcp;
 pub mod dns;
 pub mod passfd;
 pub mod switch;
+pub mod switch_host;
 
 use crate::network::{NetworkId, Subnet};
 use std::io;

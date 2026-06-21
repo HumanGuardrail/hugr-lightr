@@ -116,6 +116,24 @@ pub fn spawn_detached_engine(
         // default (None/empty/false) until a future RC WP sets one from its CLI
         // flag — RUNTIME ONLY, never keyed; behaviour-preserving here.
         hostname: spec.hostname.clone(),
+        // WP-C9: carry the vz container-networking fields to spec.json so the
+        // detached `vz` supervisor reads them back and (when `network` is Some)
+        // joins the per-network registry + attaches the shared L2 switch. All
+        // empty/None ⇒ today's single-NAT-NIC vz path, byte-identical. RUNTIME
+        // ONLY (never keyed). `--add-host "host:ip"` is parsed to `(host, ip)`
+        // here so SpecOnDisk/ExecSpec carry clean pairs; a malformed entry is
+        // dropped (the CLI — NET3 — owns surfacing a parse error to the user).
+        network: spec.network.clone(),
+        network_alias: spec.network_alias.clone(),
+        add_host: spec
+            .add_host
+            .iter()
+            .filter_map(|e| {
+                e.split_once(':')
+                    .map(|(h, ip)| (h.to_string(), ip.to_string()))
+            })
+            .collect(),
+        dns: spec.dns.clone(),
         labels: spec.labels.clone(),
         cap_add: spec.cap_add.clone(),
         cap_drop: spec.cap_drop.clone(),

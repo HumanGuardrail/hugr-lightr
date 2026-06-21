@@ -278,6 +278,11 @@ pub fn run(
             entrypoint: runflags.entrypoint.clone(),
             name: runflags.name.clone(),
             rm: runflags.rm,
+            // WP-C9 seam: vz container-networking carry-fields (network /
+            // network_alias / add_host / dns). RUNTIME-ONLY, never keyed. The
+            // `--network` CLI surface is NET3's job; default ⇒ no-op (this vz
+            // spawn stays the single-NAT-NIC path until NET3 fills them).
+            ..Default::default()
         };
         return match spawn_detached_engine(
             &spec,
