@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use super::model::{ServiceSpec, StackSpec};
 use super::supervise_deps::{topo_order, wait_for_deps};
+use super::supervise_replicas::{instance_count, replica_run_names};
 use super::up::lightr_home_pub as lightr_home;
 
 // Re-export the moved CMP-P0-DEPENDS helpers + the `DepCondition` they use so the
@@ -19,11 +20,19 @@ pub(crate) use super::supervise_deps::{dep_condition_met, dep_run_dir};
 
 /// Prepare a clean per-service run directory and, if the service declares an
 /// `image_ref`, hydrate that ref's filesystem into it.
-pub(crate) fn prepare_service_cwd(svc: &ServiceSpec, store: &Store) -> Result<PathBuf> {
+///
+/// `run_name` is the materialized run-dir name (WP-REPLICAS: one per replica
+/// instance, computed by [`replica_run_names`]; for N=1 this is the
+/// `container_name`-or-service-name as before).
+pub(crate) fn prepare_service_cwd(
+    svc: &ServiceSpec,
+    store: &Store,
+    run_name: &str,
+) -> Result<PathBuf> {
     // WP-CMP-CONFIG-LOWER: an explicit `container_name:` overrides the run-dir
-    // name; absent ⇒ the service name (today's behavior). Only the materialized
-    // dir is renamed — depends_on/discovery still key on `svc.name`.
-    let run_name = svc.container_name.as_deref().unwrap_or(&svc.name);
+    // name; absent ⇒ the service name (today's behavior). WP-REPLICAS: with N>1
+    // each instance gets `<service>_<i>`. Only the materialized dir is renamed —
+    // depends_on/discovery still key on `svc.name`.
     let cwd = std::env::temp_dir().join(format!("lightr-svc-{run_name}"));
     if cwd.exists() {
         std::fs::remove_dir_all(&cwd).map_err(LightrError::Io)?;
@@ -54,8 +63,10 @@ pub(crate) fn discovery_key(name: &str) -> String {
 /// `memory` is a hard cap on Linux (`RLIMIT_AS`); `cpus` has no portable native
 /// cpu-share cap so it is RECORDED only (honored under `--engine vz`). The note
 /// surfaces the cpu-recorded-not-enforced boundary so it is never a silent drop.
-/// `replicas > 1` (multi-instance spawn) is still a separate WP. Services with no
-/// caps and no extra replicas produce no output (behavior-preserving).
+/// WP-REPLICAS: `replicas > 1` now spawns N instances (handled in
+/// [`start_service_detached`]); the note here surfaces the discovery
+/// load-balancing gap (peers see ONE instance) so it is never silent. Services
+/// with no caps and no extra replicas produce no output (behavior-preserving).
 fn note_unhonored_deploy(svc: &ServiceSpec) {
     if svc.cpu_limit_millis.is_some() {
         eprintln!(
@@ -66,38 +77,57 @@ fn note_unhonored_deploy(svc: &ServiceSpec) {
             svc.name, svc.cpu_limit_millis
         );
     }
-    if let Some(n) = svc.replicas {
-        if n > 1 {
-            eprintln!(
-                "lightr compose: service {:?}: deploy.replicas={n} requested but \
-                 multi-instance spawn is not yet supported — starting a SINGLE \
-                 instance (follow-up WP)",
-                svc.name
-            );
-        }
+    if instance_count(svc) > 1 {
+        eprintln!(
+            "lightr compose: service {:?}: deploy.replicas={} — spawning {} \
+             instances; peer discovery (e.g. {}_HOST/_PORT) resolves to the FIRST \
+             instance only (no DNS round-robin load-balancing across replicas — a \
+             Phase-2/vz concern), never a silent drop.",
+            svc.name,
+            instance_count(svc),
+            instance_count(svc),
+            discovery_key(&svc.name)
+        );
     }
 }
 
-/// Spawn a service as a detached lightr run.
+/// Spawn a service as one-or-more detached lightr runs, honoring `deploy.replicas`.
+///
+/// WP-REPLICAS: N=1 (or absent) spawns a single instance with the existing run
+/// name (byte-identical to today). N>1 spawns N instances named `<service>_<i>`
+/// (after the fail-closed checks in [`replica_run_names`]). The first instance's
+/// run dir is the one recorded on the live `spec.json` (depends_on/discovery key
+/// on the service, which resolves to that first instance).
 pub(crate) fn start_service_detached(
     stack_dir: &Path,
     svc: &ServiceSpec,
     peers: &[(String, u16)],
+) -> Result<()> {
+    note_unhonored_deploy(svc);
+    // Fail-closed BEFORE spawning anything (static-port/container_name + N>1).
+    let run_names = replica_run_names(svc)?;
+    for (idx, run_name) in run_names.iter().enumerate() {
+        // Only the FIRST instance records its run dir on the live spec (the
+        // discovery/depends_on key resolves to one instance — see the LB note).
+        start_one_instance(stack_dir, svc, peers, run_name, idx == 0)?;
+    }
+    Ok(())
+}
+
+/// Spawn exactly ONE instance of a service into `run_name`'s run dir.
+fn start_one_instance(
+    stack_dir: &Path,
+    svc: &ServiceSpec,
+    peers: &[(String, u16)],
+    run_name: &str,
+    record_run_dir: bool,
 ) -> Result<()> {
     use lightr_run::healthcheck::Healthcheck;
     use lightr_run::{spawn_detached_engine, Mount, RunSpec, StoreFile};
 
     let store_root = lightr_home().join("store");
     let store = Store::open(&store_root)?;
-    let cwd = prepare_service_cwd(svc, &store)?;
-
-    // WP-RESLIMITS: the deploy resource caps now FLOW to the supervisor — they are
-    // carried on `RunSpec.limits` below → `SpecOnDisk` → `apply_native` at spawn
-    // (memory is a hard RLIMIT_AS cap on Linux; cpus is recorded, honored under
-    // vz). The note surfaces the cpu-recorded boundary + the still-unhonored
-    // `replicas > 1` (multi-instance spawn is a separate WP); never a silent drop.
-    // `restart` flows through the existing `RunSpec.restart` channel.
-    note_unhonored_deploy(svc);
+    let cwd = prepare_service_cwd(svc, &store, run_name)?;
 
     let to_store_files = |pairs: &[(String, String)]| -> Vec<StoreFile> {
         pairs
@@ -183,16 +213,21 @@ pub(crate) fn start_service_detached(
         &child_env,
     )?;
 
-    let spec_path = stack_dir.join("spec.json");
-    if let Ok(bytes) = std::fs::read(&spec_path) {
-        if let Ok(mut stack_spec) = serde_json::from_slice::<StackSpec>(&bytes) {
-            for s in &mut stack_spec.services {
-                if s.name == svc.name {
-                    s.run_dir = Some(handle.dir.to_string_lossy().into_owned());
+    // WP-REPLICAS: only the FIRST instance records its run dir on the live spec —
+    // the service's depends_on/discovery key resolves to one instance (see the
+    // load-balancing note). Subsequent replicas spawn but do not overwrite it.
+    if record_run_dir {
+        let spec_path = stack_dir.join("spec.json");
+        if let Ok(bytes) = std::fs::read(&spec_path) {
+            if let Ok(mut stack_spec) = serde_json::from_slice::<StackSpec>(&bytes) {
+                for s in &mut stack_spec.services {
+                    if s.name == svc.name {
+                        s.run_dir = Some(handle.dir.to_string_lossy().into_owned());
+                    }
                 }
-            }
-            if let Ok(new_bytes) = serde_json::to_vec_pretty(&stack_spec) {
-                let _ = std::fs::write(&spec_path, &new_bytes);
+                if let Ok(new_bytes) = serde_json::to_vec_pretty(&stack_spec) {
+                    let _ = std::fs::write(&spec_path, &new_bytes);
+                }
             }
         }
     }
