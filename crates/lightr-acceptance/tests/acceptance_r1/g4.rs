@@ -149,60 +149,61 @@ fn a16_events() {
 }
 
 // ---------------------------------------------------------------------------
-// a9b — unknown run ids (logs/stop/exec each exit 2 with "unknown run id")
+// a9b — unknown ids (logs/stop/exec each exit 1, "No such container" — Docker
+// parity, WP-EXIT-CODE; was lightr's pre-parity exit 2 / "unknown run id")
 // ---------------------------------------------------------------------------
 #[test]
 fn a9b_unknown_ids() {
     let home = TempDir::new().unwrap();
 
-    // logs nope → exit 2, stderr contains "unknown run id"
+    // logs nope → exit 1, stderr contains "No such container" (Docker parity)
     let logs_out = lightr_cmd(home.path())
         .args(["logs", "nope"])
         .output()
         .expect("logs must launch");
     assert_eq!(
         logs_out.status.code().unwrap_or(-1),
-        2,
-        "logs nope must exit 2; stderr: {}",
+        1,
+        "logs nope must exit 1 (Docker parity); stderr: {}",
         String::from_utf8_lossy(&logs_out.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&logs_out.stderr).contains("unknown run id"),
-        "logs nope stderr must contain 'unknown run id'; got: {}",
+        String::from_utf8_lossy(&logs_out.stderr).contains("No such container"),
+        "logs nope stderr must contain 'No such container'; got: {}",
         String::from_utf8_lossy(&logs_out.stderr)
     );
 
-    // stop nope → exit 2, stderr contains "unknown run id"
+    // stop nope → exit 1, stderr contains "No such container" (Docker parity)
     let stop_out = lightr_cmd(home.path())
         .args(["stop", "nope"])
         .output()
         .expect("stop must launch");
     assert_eq!(
         stop_out.status.code().unwrap_or(-1),
-        2,
-        "stop nope must exit 2; stderr: {}",
+        1,
+        "stop nope must exit 1 (Docker parity); stderr: {}",
         String::from_utf8_lossy(&stop_out.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&stop_out.stderr).contains("unknown run id"),
-        "stop nope stderr must contain 'unknown run id'; got: {}",
+        String::from_utf8_lossy(&stop_out.stderr).contains("No such container"),
+        "stop nope stderr must contain 'No such container'; got: {}",
         String::from_utf8_lossy(&stop_out.stderr)
     );
 
-    // exec nope -- true → exit 2, stderr contains "unknown run id"
+    // exec nope -- true → exit 1, stderr contains "No such container" (Docker parity)
     let exec_out = lightr_cmd(home.path())
         .args(["exec", "nope", "--", "true"])
         .output()
         .expect("exec must launch");
     assert_eq!(
         exec_out.status.code().unwrap_or(-1),
-        2,
-        "exec nope must exit 2; stderr: {}",
+        1,
+        "exec nope must exit 1 (Docker parity); stderr: {}",
         String::from_utf8_lossy(&exec_out.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&exec_out.stderr).contains("unknown run id"),
-        "exec nope stderr must contain 'unknown run id'; got: {}",
+        String::from_utf8_lossy(&exec_out.stderr).contains("No such container"),
+        "exec nope stderr must contain 'No such container'; got: {}",
         String::from_utf8_lossy(&exec_out.stderr)
     );
 }
