@@ -23,7 +23,11 @@
 name: ci
 
 on:
+  # push fires only on main (post-merge validation + the push-only vz-build);
+  # PRs are covered by pull_request. This avoids 2× CI per push on the single
+  # self-hosted runner (a branch push + its PR would otherwise both fire).
   push:
+    branches: [main]
   pull_request:
 
 concurrency:
