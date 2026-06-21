@@ -2,8 +2,8 @@
 //! inspect.rs under the 400-line godfile cap (house convention).
 //!
 //! Two groups:
-//!   1. Existing WP-INS1 exit-code contract (preserved verbatim): present run ⇒ 0,
-//!      missing id ⇒ 2, no run dir ⇒ 2, human path ⇒ 0.
+//!   1. Exit-code contract: present run ⇒ 0, human path ⇒ 0; missing id ⇒ 1,
+//!      no run dir ⇒ 1 (Docker "No such container" parity — WP-EXIT-CODE).
 //!   2. WP-INSPECT-ENRICH: the now-populated run-config fields are surfaced in the
 //!      Docker-faithful inspect locations, None/empty fields omitted/defaulted.
 //!
@@ -45,7 +45,7 @@ fn make_run_dir(base: &std::path::Path, id: &str, exit_code: Option<i32>) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Group 1 — existing WP-INS1 exit-code contract (UNCHANGED)
+// Group 1 — exit-code contract (no-such-container ⇒ 1, WP-EXIT-CODE)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -84,7 +84,8 @@ fn inspect_found_human_returns_0() {
 }
 
 #[test]
-fn inspect_missing_id_exits_2() {
+fn inspect_missing_id_exits_1() {
+    // Docker parity (WP-EXIT-CODE): inspect on a missing container → exit 1.
     let tmp = tempfile::tempdir().unwrap();
     // Don't create any run dirs — just an empty LIGHTR_HOME.
     fs::create_dir_all(tmp.path().join("run")).unwrap();
@@ -96,11 +97,15 @@ fn inspect_missing_id_exits_2() {
 
     unsafe { std::env::remove_var("LIGHTR_HOME") };
 
-    assert_eq!(code, 2, "inspect on unknown id must return 2");
+    assert_eq!(
+        code, 1,
+        "inspect on unknown id must return 1 (no such container)"
+    );
 }
 
 #[test]
-fn inspect_no_run_dir_exits_2() {
+fn inspect_no_run_dir_exits_1() {
+    // Docker parity (WP-EXIT-CODE): no such container → exit 1.
     let tmp = tempfile::tempdir().unwrap();
     // LIGHTR_HOME exists but no `run/` subdir — ps() returns empty Vec.
 
@@ -111,7 +116,10 @@ fn inspect_no_run_dir_exits_2() {
 
     unsafe { std::env::remove_var("LIGHTR_HOME") };
 
-    assert_eq!(code, 2, "inspect with no run dir must return 2");
+    assert_eq!(
+        code, 1,
+        "inspect with no run dir must return 1 (no such container)"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

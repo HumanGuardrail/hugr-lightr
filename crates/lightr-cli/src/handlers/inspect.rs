@@ -37,7 +37,8 @@
 //! ]
 //! ```
 //!
-//! Missing id → stderr + exit 2 (RefNotFound-class per exit.rs law).
+//! Missing id → stderr "No such container" + exit 1 (Docker parity,
+//! WP-EXIT-CODE — a missing container is not a usage error).
 //! Human path (no --json): compact single-line summary per field group.
 //! --json path: always the array above.
 
@@ -46,7 +47,7 @@ use std::collections::BTreeMap;
 use lightr_run::ps;
 use serde::{Deserialize, Serialize};
 
-use crate::{exit::die_internal, lightr_home};
+use crate::lightr_home;
 
 // ── spec.json mirror (read-only, CLI-side) ──────────────────────────────────────
 //
@@ -202,10 +203,9 @@ struct InspectJson {
 /// is printed. When true (or when called from `docker inspect`) the single-element
 /// array shape is printed.
 ///
-/// Exit codes per exit.rs law:
+/// Exit codes (Docker parity, WP-EXIT-CODE):
 ///   0 — found + printed
-///   2 — id not found (RefNotFound-class)
-///   1 — other I/O error
+///   1 — no such container (id not found) OR other I/O error
 pub fn run(id: &str, json: bool) -> i32 {
     let home = lightr_home();
 
@@ -220,7 +220,9 @@ pub fn run(id: &str, json: bool) -> i32 {
     let info = match runs.into_iter().find(|r| r.id == id) {
         Some(r) => r,
         None => {
-            return die_internal(&format!("inspect: id '{id}' not found"));
+            // Docker `inspect <missing>` → "No such container" + exit 1.
+            eprintln!("Error: No such container: {id}");
+            return 1;
         }
     };
 
