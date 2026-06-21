@@ -686,6 +686,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightr-cri-backend"
+version = "0.1.0"
+dependencies = [
+ "lightr-core",
+ "lightr-engine",
+ "lightr-oci",
+ "lightr-run",
+ "lightr-store",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lightr-engine"
 version = "0.1.0"
 dependencies = [
