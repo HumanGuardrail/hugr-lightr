@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/lightr-core",
+    "crates/lightr-cri-backend",
     "crates/lightr-store",
     "crates/lightr-index",
     "crates/lightr-run",

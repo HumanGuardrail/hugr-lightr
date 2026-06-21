@@ -1,0 +1,30 @@
+[package]
+name = "lightr-cri-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "CRI backend seam (transcribed CriBackend trait + vocab) and the LightrBackend impl over the hugr-lightr crates."
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["cri", "kubernetes", "container", "runtime", "daemonless"]
+categories = ["development-tools", "virtualization"]
+
+# DEPENDENCY FIREWALL (ADR-0017 decision 5): NO tonic/prost/gRPC here, ever.
+# gRPC belongs only to the future CRI shell, which sits in FRONT of this seam.
+# The shell never enters the hugr-lightr workspace as a backend dependency.
+[dependencies]
+# Seam vocab carries serde derives (state files load/round-trip wire-for-wire).
+serde = { workspace = true }
+# Later WPs persist sandbox/container state as JSON (crash-only law); declared
+# now so the state-owning WPs (WP-CRI-SANDBOX/-CONTAINER) only add code.
+serde_json = { workspace = true }
+# Backend wiring to the hugr-lightr crates — the planes the MVP WPs fill:
+# store/oci = image plane (lazy CAS), engine/run = exec + lifecycle, core =
+# shared vocab. Path deps (in-workspace), NOT a git dep on lightr-cri.
+lightr-core = { workspace = true }
+lightr-store = { workspace = true }
+lightr-oci = { workspace = true }
+lightr-engine = { workspace = true }
+lightr-run = { workspace = true }
