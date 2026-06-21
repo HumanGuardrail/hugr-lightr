@@ -39,6 +39,10 @@ pub mod supervise;
 /// CMP-P0-DEPENDS: `depends_on` topo-order (Kahn) + condition-wait helpers split
 /// out of `supervise.rs` for godfile headroom. Consumed by `supervise.rs`.
 pub(crate) mod supervise_deps;
+/// WP-REPLICAS: `deploy.replicas` planning helpers (instance count, static-port
+/// discriminator, per-instance run-name plan) split out of `supervise.rs` for
+/// godfile headroom. Consumed by `supervise.rs::start_service_detached`.
+pub(crate) mod supervise_replicas;
 pub mod up;
 
 pub use down::compose_down;
