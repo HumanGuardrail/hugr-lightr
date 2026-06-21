@@ -316,10 +316,8 @@ pub fn build(
             // The trigger text is `step.raw` with the leading `ONBUILD` keyword
             // stripped (the continuation-joined source the parser preserved).
             Instr::Onbuild { .. } => exec_instr::onbuild(&mut ctx, onbuild_trigger(&step.raw))?,
-            // WP-DF-01 parses these into the AST; execution is DF-02..15. Until
-            // then they route to the SAME "unsupported instruction" error path
-            // as before (fail-closed, behavior-preserving — these never built).
-            other => exec_instr::unsupported(other)?,
+            // All Dockerfile instructions are now implemented — the match is
+            // exhaustive (a new Instr variant fails to compile here until handled).
         }
 
         let snap = lightr_index::snapshot(work_dir, store, name)?;
