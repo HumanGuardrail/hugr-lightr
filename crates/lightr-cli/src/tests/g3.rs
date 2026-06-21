@@ -219,6 +219,7 @@ fn run_bad_engine_string_rejected_at_handler() {
         None, // restart (WP-RC-RESTART)
         None, // stop_signal (WP-RC-STOPSIGNAL)
         &crate::handlers::run::HealthFlags::default(),
+        crate::handlers::run::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
     );
     assert_eq!(code, 2, "bad engine string must exit 2");
 }

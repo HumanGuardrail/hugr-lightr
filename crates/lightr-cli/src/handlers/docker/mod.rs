@@ -181,6 +181,9 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             None, // restart (WP-RC-RESTART)
             None, // stop_signal (WP-RC-STOPSIGNAL) — untranslated by the docker shim
             &crate::handlers::run::HealthFlags::default(),
+            // WP-CLI-TRIO / RC-FLAGS: the docker shim does not translate the 11
+            // run-config flags ⇒ all-default ⇒ no-op carry (behavior-preserving).
+            crate::handlers::run::RawRcFlags::default(),
         )
     } else if is_known_ref {
         // is_known_ref && cmd_args.is_empty()
@@ -221,6 +224,9 @@ fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
             None, // restart (WP-RC-RESTART)
             None, // stop_signal (WP-RC-STOPSIGNAL) — untranslated by the docker shim
             &crate::handlers::run::HealthFlags::default(),
+            // WP-CLI-TRIO / RC-FLAGS: the docker shim does not translate the 11
+            // run-config flags ⇒ all-default ⇒ no-op carry (behavior-preserving).
+            crate::handlers::run::RawRcFlags::default(),
         )
     }
 }

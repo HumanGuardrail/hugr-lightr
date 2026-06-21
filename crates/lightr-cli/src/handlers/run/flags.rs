@@ -110,6 +110,124 @@ pub(crate) fn parse_publish(raw: &str) -> Result<PortMap, i32> {
     Ok(PortMap { host, container })
 }
 
+/// Parse a raw `--label`/`-l` value `KEY=VAL` into a `(key, value)` pair
+/// (WP-RC-FLAGS). A label is metadata only — it has no exec effect; it is
+/// recorded in spec.json and surfaced by `lightr inspect`. The key must be
+/// non-empty; the value may be empty (docker accepts `--label key=`). Splits on
+/// the FIRST `=`. On a missing `=` or empty key, prints to stderr + `Err(2)`
+/// (mirrors `parse_store_file`).
+pub(crate) fn parse_label(raw: &str) -> Result<(String, String), i32> {
+    let eq = raw.find('=').ok_or_else(|| {
+        eprintln!("lightr: invalid --label value (expected KEY=VAL): {raw}");
+        2i32
+    })?;
+    let key = &raw[..eq];
+    let value = &raw[eq + 1..];
+    if key.is_empty() {
+        eprintln!("lightr: invalid --label value (empty key): {raw}");
+        return Err(2);
+    }
+    Ok((key.to_string(), value.to_string()))
+}
+
+/// Parse a raw `--shm-size` value into bytes (WP-RC-FLAGS). Docker-style:
+/// `64m`, `1g`, `2048k`, or bare bytes. Must be `> 0`. On malformed input
+/// prints to stderr + `Err(2)` (mirrors `parse_publish`). The `b` suffix is
+/// accepted as bytes (docker's `--shm-size=64m` grammar permits a bare unit).
+pub(crate) fn parse_shm_size(raw: &str) -> Result<u64, i32> {
+    let s = raw.trim();
+    let bad = |s: &str| {
+        eprintln!("lightr: invalid --shm-size value (expected e.g. 64m, 1g, or bytes): {s}");
+        2i32
+    };
+    let last = s.chars().last().ok_or_else(|| bad(s))?;
+    let (num, mult): (&str, u64) = match last {
+        'k' | 'K' => (&s[..s.len() - 1], 1024),
+        'm' | 'M' => (&s[..s.len() - 1], 1024 * 1024),
+        'g' | 'G' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        'b' | 'B' => (&s[..s.len() - 1], 1),
+        '0'..='9' => (s, 1),
+        _ => return Err(bad(s)),
+    };
+    let val: u64 = num.trim().parse().map_err(|_| bad(s))?;
+    if val == 0 {
+        eprintln!("lightr: invalid --shm-size value (must be > 0): {s}");
+        return Err(2);
+    }
+    val.checked_mul(mult).ok_or_else(|| {
+        eprintln!("lightr: --shm-size overflow: {s}");
+        2i32
+    })
+}
+
+/// The 11 WP-RC-FLAGS run-config flags, bundled as RAW clap values (WP-RC-FLAGS).
+/// Built from the parsed `Cmd` in dispatch and lowered to a [`RcConfig`] by
+/// [`RawRcFlags::resolve`], which parses `--label` (KEY=VAL) and `--shm-size`
+/// (size string). Bundling keeps `run()`'s arity flat. RUNTIME-ONLY — none of
+/// these enters the memo key.
+#[derive(Clone, Debug, Default)]
+pub struct RawRcFlags {
+    pub hostname: Option<String>,
+    pub label: Vec<String>,
+    pub cap_add: Vec<String>,
+    pub cap_drop: Vec<String>,
+    pub privileged: bool,
+    pub tty: bool,
+    pub init: bool,
+    pub read_only: bool,
+    pub oom_score_adj: Option<i32>,
+    pub pids_limit: Option<i64>,
+    pub shm_size: Option<String>,
+}
+
+/// The resolved WP-RC-FLAGS config: `--label` parsed to `(key,value)` pairs and
+/// `--shm-size` parsed to bytes; the rest pass through. Lowered into the
+/// `RunSpec` carry-fields by the handler. All fields are RUNTIME-ONLY.
+#[derive(Clone, Debug, Default)]
+pub struct RcConfig {
+    pub hostname: Option<String>,
+    pub labels: Vec<(String, String)>,
+    pub cap_add: Vec<String>,
+    pub cap_drop: Vec<String>,
+    pub privileged: bool,
+    pub tty: bool,
+    pub init: bool,
+    pub read_only: bool,
+    pub oom_score_adj: Option<i32>,
+    pub pids_limit: Option<i64>,
+    pub shm_size: Option<u64>,
+}
+
+impl RawRcFlags {
+    /// Parse the raw flags into a [`RcConfig`]. `--label` and `--shm-size` are
+    /// validated (fail-closed: bad input ⇒ printed error + `Err(exit_code)`,
+    /// mirroring the other run-flag parsers). All-default raw flags resolve to an
+    /// all-default `RcConfig` (behavior-preserving: no flag set ⇒ no-op carry).
+    pub fn resolve(self) -> Result<RcConfig, i32> {
+        let mut labels: Vec<(String, String)> = Vec::new();
+        for raw in &self.label {
+            labels.push(parse_label(raw)?);
+        }
+        let shm_size = match self.shm_size.as_deref() {
+            None => None,
+            Some(s) => Some(parse_shm_size(s)?),
+        };
+        Ok(RcConfig {
+            hostname: self.hostname,
+            labels,
+            cap_add: self.cap_add,
+            cap_drop: self.cap_drop,
+            privileged: self.privileged,
+            tty: self.tty,
+            init: self.init,
+            read_only: self.read_only,
+            oom_score_adj: self.oom_score_adj,
+            pids_limit: self.pids_limit,
+            shm_size,
+        })
+    }
+}
+
 /// The `--health-*` CLI flags, bundled (WP-RC-4). Built from the parsed `Cmd`
 /// in dispatch and lowered to a [`Healthcheck`] by [`HealthFlags::build`].
 ///
@@ -144,3 +262,7 @@ impl HealthFlags {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "flags_rc_tests.rs"]
+mod rc_tests;

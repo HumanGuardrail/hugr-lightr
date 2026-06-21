@@ -41,8 +41,8 @@ mod paths;
 // Flag parsing + value types live in `flags.rs` (skeleton-split for headroom).
 // Re-exported at the `run` module root so sibling files + tests reach them via
 // `super::Item` / `super::super::Item` exactly as before (zero-diff siblings).
-pub use flags::HealthFlags;
-pub(super) use flags::{parse_mount, parse_publish, parse_store_file, RunJson};
+pub(super) use flags::{parse_mount, parse_publish, parse_store_file, RcConfig, RunJson};
+pub use flags::{HealthFlags, RawRcFlags};
 
 #[cfg(test)]
 mod tests;
@@ -82,7 +82,16 @@ pub fn run(
     // WP-RC-4: healthcheck flags, WIRED — lowered to a Healthcheck run by the
     // supervisor's watchdog. Never a memo-key input (runtime probe, §0).
     health: &HealthFlags,
+    // WP-RC-FLAGS: the 11 run-config flags (raw clap values). Resolved (labels
+    // KEY=VAL parsed, shm-size parsed) then lowered into RunSpec carry-fields.
+    // RUNTIME-ONLY — none enters the memo key. All-default ⇒ no-op carry.
+    rc: RawRcFlags,
 ) -> i32 {
+    // WP-RC-FLAGS: parse `--label`/`--shm-size` (fail-closed: bad value ⇒ exit 2).
+    let rc = match rc.resolve() {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
     // Parse engine kind — bad value ⇒ exit 2
     let engine_kind = match engine_str.parse::<EngineKind>() {
         Ok(k) => k,
@@ -214,9 +223,20 @@ pub fn run(
             user: user.map(String::from),
             restart: restart.map(String::from),
             stop_signal: stop_signal.map(String::from),
-            // RC-SEAM-FREEZE (NON-OWNED site): the vz detached path does not yet
-            // parse the new RC flags → no-op defaults (RUNTIME-ONLY, never keyed).
-            ..Default::default()
+            // WP-RC-FLAGS: the 11 run-config carry-fields (RUNTIME-ONLY, never
+            // keyed). Persisted to spec.json + honored by the apply seam where the
+            // native engine can; honest per-field note otherwise (see apply_cfg).
+            hostname: rc.hostname.clone(),
+            labels: rc.labels.clone(),
+            cap_add: rc.cap_add.clone(),
+            cap_drop: rc.cap_drop.clone(),
+            privileged: rc.privileged,
+            tty: rc.tty,
+            init: rc.init,
+            read_only: rc.read_only,
+            oom_score_adj: rc.oom_score_adj,
+            pids_limit: rc.pids_limit,
+            shm_size: rc.shm_size,
         };
         return match spawn_detached_engine(
             &spec,
@@ -269,5 +289,7 @@ pub fn run(
         user: user.map(String::from),
         restart: restart.map(String::from),
         stop_signal: stop_signal.map(String::from),
+        // WP-RC-FLAGS: the resolved 11 run-config flags (RUNTIME-ONLY).
+        rc,
     })
 }

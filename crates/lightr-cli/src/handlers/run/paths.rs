@@ -19,7 +19,7 @@ use lightr_store::Store;
 
 use crate::exit::die_lightr;
 
-use super::{parse_publish, RunJson};
+use super::{parse_publish, RcConfig, RunJson};
 
 // The vz-memo path helper lives in `paths_vz.rs`, pulled in as a child module
 // via `#[path]` to keep this file under the 400-line godfile cap, and re-exported
@@ -194,6 +194,11 @@ pub(super) struct NativeRun<'a> {
     /// WP-RC-STOPSIGNAL: `--stop-signal` — honored by `lightr stop`/restart-stop.
     /// `None` ⇒ SIGTERM. RUNTIME ONLY (never keyed).
     pub stop_signal: Option<String>,
+    /// WP-RC-FLAGS: the resolved 11 run-config flags (hostname/labels/caps/
+    /// privileged/tty/init/read-only/oom/pids/shm). Lowered into the RunSpec
+    /// carry-fields + honored by the apply seam (or honest per-field note).
+    /// RUNTIME ONLY (never keyed); all-default ⇒ no-op (behavior-preserving).
+    pub rc: RcConfig,
 }
 
 pub(super) fn run_native_memo(req: NativeRun) -> i32 {
@@ -218,6 +223,7 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         user,
         restart,
         stop_signal,
+        rc,
     } = req;
     let input_paths: Vec<std::path::PathBuf> = if inputs.is_empty() {
         vec![cwd.clone()]
@@ -250,9 +256,21 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         user,        // WP-RC-USER: honored as the child uid/gid (cfg unix; memo + supervisor).
         restart,     // WP-RC-RESTART: honored by the detached supervisor's re-spawn loop.
         stop_signal, // WP-RC-STOPSIGNAL: honored by `lightr stop`/restart-stop.
-        // RC-SEAM-FREEZE (NON-OWNED site): the native run path does not yet parse
-        // the new RC flags → no-op defaults (RUNTIME-ONLY, never keyed).
-        ..Default::default()
+        // WP-RC-FLAGS: the resolved 11 run-config carry-fields. RUNTIME-ONLY
+        // (never keyed). Honored by the apply seam (apply_cfg) on the native exec
+        // + the detached supervisor; persisted to spec.json + shown by inspect
+        // (labels/hostname). All-default ⇒ no-op (behavior-preserving).
+        hostname: rc.hostname,
+        labels: rc.labels,
+        cap_add: rc.cap_add,
+        cap_drop: rc.cap_drop,
+        privileged: rc.privileged,
+        tty: rc.tty,
+        init: rc.init,
+        read_only: rc.read_only,
+        oom_score_adj: rc.oom_score_adj,
+        pids_limit: rc.pids_limit,
+        shm_size: rc.shm_size,
     };
 
     // Detach path: spawn detached and print the run id. WP-RC-4: when a
