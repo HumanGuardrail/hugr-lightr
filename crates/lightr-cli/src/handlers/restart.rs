@@ -9,7 +9,10 @@ use std::time::Duration;
 
 use lightr_run::{resolve, respawn_run, run_status, signal_run, RunStatus};
 
-use crate::{exit::die_lightr, lightr_home};
+use crate::{
+    exit::{die_lightr, die_resolve},
+    lightr_home,
+};
 
 /// POSIX signal numbers (portable subset we issue).
 const SIGTERM: i32 = 15;
@@ -54,7 +57,9 @@ pub fn run(targets: &[String], grace: u64) -> i32 {
 /// caller). On failure the diagnostic is already emitted and a non-zero code is
 /// returned so the caller can remember the failure.
 fn restart_one(home: &std::path::Path, token: &str, grace: u64) -> Result<String, i32> {
-    let id = resolve(home, token).map_err(|e| die_lightr(&e))?;
+    // No-such-container resolution path → Docker parity (exit 1, "No such
+    // container"); InvalidRef stays usage-class 2 (WP-EXIT-CODE).
+    let id = resolve(home, token).map_err(|e| die_resolve(&e, token))?;
 
     let status = run_status(home, &id).map_err(|e| die_lightr(&e))?;
 
@@ -115,5 +120,19 @@ mod tests {
     #[test]
     fn empty_targets_is_exit_2() {
         assert_eq!(run(&[], 10), 2);
+    }
+
+    /// Docker parity (WP-EXIT-CODE): `restart <missing>` → exit 1, not 2.
+    /// Arg-error path (empty targets, above) stays 2.
+    #[test]
+    fn missing_container_exits_1() {
+        let _g = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::TempDir::new().expect("tmp dir");
+        std::env::set_var("LIGHTR_HOME", tmp.path());
+        let code = run(&["does-not-exist".to_string()], 10);
+        std::env::remove_var("LIGHTR_HOME");
+        assert_eq!(code, 1, "restart on a missing container must exit 1");
     }
 }

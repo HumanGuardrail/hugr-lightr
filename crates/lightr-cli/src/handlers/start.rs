@@ -10,7 +10,10 @@
 
 use lightr_run::{resolve, respawn_run, run_status, RunStatus};
 
-use crate::{exit::die_lightr, lightr_home};
+use crate::{
+    exit::{die_lightr, die_resolve},
+    lightr_home,
+};
 
 pub fn run(targets: &[String]) -> i32 {
     if targets.is_empty() {
@@ -26,9 +29,10 @@ pub fn run(targets: &[String]) -> i32 {
         let id = match resolve(&home, token) {
             Ok(id) => id,
             Err(e) => {
-                // die_lightr prints `lightr: <msg>` and returns its mapped code;
-                // we discard the code (continue-on-error) and only flag failure.
-                let _ = die_lightr(&e);
+                // No-such-container resolution path → Docker parity (exit 1),
+                // honest "No such container" message (WP-EXIT-CODE). The code is
+                // discarded (continue-on-error); the batch flags failure → 1.
+                let _ = die_resolve(&e, token);
                 any_failed = true;
                 continue;
             }
@@ -68,5 +72,19 @@ mod tests {
     #[test]
     fn empty_targets_is_usage_error() {
         assert_eq!(run(&[]), 2);
+    }
+
+    /// Docker parity (WP-EXIT-CODE): `start <missing>` → exit 1, not 2.
+    /// Arg-error path (empty targets, above) stays 2.
+    #[test]
+    fn missing_container_exits_1() {
+        let _g = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::TempDir::new().expect("tmp dir");
+        std::env::set_var("LIGHTR_HOME", tmp.path());
+        let code = run(&["does-not-exist".to_string()]);
+        std::env::remove_var("LIGHTR_HOME");
+        assert_eq!(code, 1, "start on a missing container must exit 1");
     }
 }
