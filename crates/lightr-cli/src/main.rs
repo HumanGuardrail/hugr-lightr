@@ -64,7 +64,7 @@ fn main() {
         Cmd::Snapshot { .. } => "snapshot",
         Cmd::Hydrate { .. } => "hydrate",
         Cmd::Status { .. } => "status",
-        Cmd::Run { .. } => "run",
+        Cmd::Run(_) => "run",
         Cmd::Engine { subcmd } => match subcmd {
             EngineCmd::Ls => "engine-ls",
             EngineCmd::InstallPack { .. } => "engine-install-pack",

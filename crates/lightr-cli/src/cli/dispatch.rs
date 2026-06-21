@@ -18,46 +18,7 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             handlers::hydrate::run(&dest, &name, verify, json, explain)
         }
         Cmd::Status { dir, name } => handlers::status::run(&dir, &name, json, explain),
-        Cmd::Run {
-            dir,
-            input,
-            env,
-            detach,
-            publish,
-            mount,
-            engine,
-            rootfs,
-            deep_memo,
-            memory,
-            cpus,
-            secret,
-            config,
-            health_cmd,
-            health_interval,
-            health_timeout,
-            health_start_period,
-            health_retries,
-            no_healthcheck,
-            // ── Docker-parity run flags (CLI-surface freeze) ──────────────────
-            name,
-            rm,
-            workdir,
-            user,
-            env_set,
-            env_file,
-            label,
-            entrypoint,
-            hostname,
-            restart,
-            stop_signal,
-            network,
-            network_alias,
-            add_host,
-            dns,
-            volume,
-            tmpfs,
-            command,
-        } => {
+        Cmd::Run(a) => {
             // Fail-closed: if ANY still-stubbed docker-parity run flag is set,
             // honest error naming WP-RUNFLAGS — NEVER silently ignore a flag.
             // WP-RC-1 REMOVED `-e`/`--env`/`--env-file` (env_set/env_file) from
@@ -74,7 +35,7 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             // WP-RC-RESTART: validate the `--restart` policy string up-front
             // (fail-closed: a bad policy is an honest exit 2, never silently
             // ignored). The validated string is threaded to the handler as-is.
-            if let Some(ref p) = restart {
+            if let Some(ref p) = a.restart {
                 if let Err(e) = lightr_run::restart::RestartPolicy::parse(p) {
                     eprintln!("lightr: {e}");
                     return 2;
@@ -84,68 +45,68 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             // portable-name/numeric contract as `kill -s` (fail-closed: a bad
             // signal is an honest exit 2, never silently ignored). The validated
             // string threads to RunSpec.stop_signal; `None` ⇒ SIGTERM, as before.
-            if let Some(ref s) = stop_signal {
+            if let Some(ref s) = a.stop_signal {
                 if handlers::kill::parse_signal(s).is_none() {
                     eprintln!("lightr: invalid signal: {s}");
                     return 2;
                 }
             }
-            let new_flag_set = name.is_some()
-                || rm
-                || !label.is_empty()
-                || entrypoint.is_some()
-                || hostname.is_some()
-                || network.is_some()
-                || !network_alias.is_empty()
-                || !add_host.is_empty()
-                || !dns.is_empty()
-                || !volume.is_empty()
-                || !tmpfs.is_empty();
+            let new_flag_set = a.name.is_some()
+                || a.rm
+                || !a.label.is_empty()
+                || a.entrypoint.is_some()
+                || a.hostname.is_some()
+                || a.network.is_some()
+                || !a.network_alias.is_empty()
+                || !a.add_host.is_empty()
+                || !a.dns.is_empty()
+                || !a.volume.is_empty()
+                || !a.tmpfs.is_empty();
             if new_flag_set {
                 stub("run (docker-parity flags)", "WP-RUNFLAGS")
             } else {
                 // WP-RC-4: bundle the wired --health-* flags.
                 let health = handlers::run::HealthFlags {
-                    cmd: health_cmd,
-                    interval: health_interval,
-                    timeout: health_timeout,
-                    start_period: health_start_period,
-                    retries: health_retries,
-                    no_healthcheck,
+                    cmd: a.health_cmd,
+                    interval: a.health_interval,
+                    timeout: a.health_timeout,
+                    start_period: a.health_start_period,
+                    retries: a.health_retries,
+                    no_healthcheck: a.no_healthcheck,
                 };
                 handlers::run::run(
-                    &dir,
-                    &input,
-                    &env,
-                    &command,
+                    &a.dir,
+                    &a.input,
+                    &a.env,
+                    &a.command,
                     json,
                     explain,
-                    detach,
-                    &publish,
-                    &mount,
-                    &engine,
-                    rootfs.as_deref(),
-                    deep_memo,
-                    memory.as_deref(),
-                    cpus.as_deref(),
-                    &secret,
-                    &config,
-                    &env_set,
-                    env_file.as_deref(),
+                    a.detach,
+                    &a.publish,
+                    &a.mount,
+                    &a.engine,
+                    a.rootfs.as_deref(),
+                    a.deep_memo,
+                    a.memory.as_deref(),
+                    a.cpus.as_deref(),
+                    &a.secret,
+                    &a.config,
+                    &a.env_set,
+                    a.env_file.as_deref(),
                     // WP-RC-WORKDIR: `-w`/`--workdir` → RunSpec.workdir (honored
                     // as the child's cwd at exec). `None` ⇒ run in `dir`, as before.
-                    workdir.as_deref(),
+                    a.workdir.as_deref(),
                     // WP-RC-USER: `-u`/`--user` → RunSpec.user (honored as the
                     // child's uid/gid at exec, cfg(unix)). `None` ⇒ current user.
-                    user.as_deref(),
+                    a.user.as_deref(),
                     // WP-RC-RESTART: `--restart` → RunSpec.restart (honored by the
                     // detached supervisor's re-spawn loop). `None` ⇒ `no` (run
                     // once + exit, as before). Already validated above.
-                    restart.as_deref(),
+                    a.restart.as_deref(),
                     // WP-RC-STOPSIGNAL: `--stop-signal` → RunSpec.stop_signal
                     // (honored by `lightr stop`/restart-stop). `None` ⇒ SIGTERM,
                     // as before. Already validated above.
-                    stop_signal.as_deref(),
+                    a.stop_signal.as_deref(),
                     &health,
                 )
             }
