@@ -1,4 +1,4 @@
-use super::{parse_mount, parse_publish, run, HealthFlags};
+use super::{parse_publish, run, HealthFlags};
 
 // ── parse_publish ───────────────────────────────────────────────────────
 
@@ -70,7 +70,8 @@ fn publish_without_detach_exits_2() {
         None, // restart (WP-RC-RESTART)
         None, // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
-        super::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
+        super::RawRcFlags::default(),  // WP-CLI-TRIO / RC-FLAGS
+        super::RawRunFlags::default(), // WP-RUNFLAGS
     );
     assert_eq!(code, 2, "-p without -d must exit 2");
 }
@@ -103,7 +104,8 @@ fn publish_on_engine_path_exits_2() {
         None, // restart (WP-RC-RESTART)
         None, // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
-        super::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
+        super::RawRcFlags::default(),  // WP-CLI-TRIO / RC-FLAGS
+        super::RawRunFlags::default(), // WP-RUNFLAGS
     );
     assert_eq!(code, 2, "-p on the engine path must exit 2 (Phase 2)");
 }
@@ -112,49 +114,7 @@ fn publish_on_engine_path_exits_2() {
 
 // ── parse_mount (existing) ────────────────────────────────────────────────
 
-#[test]
-fn mount_parse_splits_on_first_colon() {
-    let m = parse_mount("myref:some/target").expect("should parse");
-    assert_eq!(m.ref_name, "myref");
-    assert_eq!(m.target, "some/target");
-}
-
-#[test]
-fn mount_parse_splits_on_first_colon_extra_colons() {
-    // "ref:sub:extra" → ref_name="ref", target="sub:extra" (split on FIRST colon)
-    let m = parse_mount("ref:sub:extra").expect("should parse");
-    assert_eq!(m.ref_name, "ref");
-    assert_eq!(m.target, "sub:extra");
-}
-
-#[test]
-fn mount_rejects_absolute_target() {
-    let result = parse_mount("ref:/abs/path");
-    assert!(result.is_err());
-    assert_eq!(result.err().unwrap(), 2);
-}
-
-#[test]
-fn mount_rejects_invalid_ref_name() {
-    // Uppercase ref name is invalid
-    let result = parse_mount("INVALID:target");
-    assert!(result.is_err());
-    assert_eq!(result.err().unwrap(), 2);
-}
-
-#[test]
-fn mount_rejects_missing_colon() {
-    let result = parse_mount("nocoton");
-    assert!(result.is_err());
-    assert_eq!(result.err().unwrap(), 2);
-}
-
-#[test]
-fn mount_accepts_relative_target() {
-    let m = parse_mount("valid-ref:sub/dir").expect("should parse");
-    assert_eq!(m.ref_name, "valid-ref");
-    assert_eq!(m.target, "sub/dir");
-}
+// The `mount_*` parse tests moved to `tests_runflags.rs` (godfile-cap split).
 
 // ── WP-RC-1: `-e` is WIRED (no longer the WP-RUNFLAGS stub) ────────────────
 
@@ -197,7 +157,8 @@ fn dash_e_runs_not_stubbed() {
         None,                     // restart (WP-RC-RESTART)
         None,                     // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
-        super::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
+        super::RawRcFlags::default(),  // WP-CLI-TRIO / RC-FLAGS
+        super::RawRunFlags::default(), // WP-RUNFLAGS
     );
     std::env::remove_var("LIGHTR_HOME");
     assert_eq!(
@@ -255,7 +216,8 @@ fn dash_w_runs_not_stubbed_and_honored() {
         None,           // restart (WP-RC-RESTART)
         None,           // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
-        super::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
+        super::RawRcFlags::default(),  // WP-CLI-TRIO / RC-FLAGS
+        super::RawRunFlags::default(), // WP-RUNFLAGS
     );
     std::env::remove_var("LIGHTR_HOME");
 
@@ -335,7 +297,8 @@ fn dash_u_current_uid_runs_not_stubbed() {
         None,       // restart (WP-RC-RESTART)
         None,       // stop_signal (WP-RC-STOPSIGNAL)
         &HealthFlags::default(),
-        super::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
+        super::RawRcFlags::default(),  // WP-CLI-TRIO / RC-FLAGS
+        super::RawRunFlags::default(), // WP-RUNFLAGS
     );
     std::env::remove_var("LIGHTR_HOME");
 
@@ -387,7 +350,8 @@ fn stop_signal_runs_not_stubbed() {
         None,           // restart
         Some("SIGINT"), // stop_signal (WP-RC-STOPSIGNAL) — must NOT be stubbed
         &HealthFlags::default(),
-        super::RawRcFlags::default(), // WP-CLI-TRIO / RC-FLAGS
+        super::RawRcFlags::default(),  // WP-CLI-TRIO / RC-FLAGS
+        super::RawRunFlags::default(), // WP-RUNFLAGS
     );
     std::env::remove_var("LIGHTR_HOME");
 

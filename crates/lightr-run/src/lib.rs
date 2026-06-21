@@ -35,7 +35,7 @@ mod run;
 // private in the flat lib.rs and remain so inside run::types as pub(super))
 pub use run::types::{
     DeepMemoConfig, LogStream, Mount, PortMap, RunHandle, RunInfo, RunOutcome, RunSpec, StoreFile,
-    VzMemoKey,
+    VolumeBind, VzMemoKey,
 };
 
 // R-MOUNT (parity-contract.md §0): frozen volume TYPES. PARSING is WP-VOL-1.

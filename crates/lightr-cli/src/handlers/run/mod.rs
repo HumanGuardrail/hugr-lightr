@@ -37,17 +37,23 @@ use crate::exit::die_lightr;
 mod env;
 mod flags;
 mod paths;
+mod runflags;
 
 // Flag parsing + value types live in `flags.rs` (skeleton-split for headroom).
 // Re-exported at the `run` module root so sibling files + tests reach them via
 // `super::Item` / `super::super::Item` exactly as before (zero-diff siblings).
 pub(super) use flags::{parse_mount, parse_publish, parse_store_file, RcConfig, RunJson};
 pub use flags::{HealthFlags, RawRcFlags};
+// WP-RUNFLAGS: `-v/--volume`, `--tmpfs`, `--name`, `--rm`, `--entrypoint` (+
+// honest Phase-2 networking flags) bundle, resolved into RunSpec carry-fields.
+pub use runflags::RawRunFlags;
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_health;
+#[cfg(test)]
+mod tests_runflags;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -86,12 +92,35 @@ pub fn run(
     // KEY=VAL parsed, shm-size parsed) then lowered into RunSpec carry-fields.
     // RUNTIME-ONLY — none enters the memo key. All-default ⇒ no-op carry.
     rc: RawRcFlags,
+    // WP-RUNFLAGS: `-v/--volume`, `--tmpfs`, `--name`, `--rm`, `--entrypoint` (+
+    // honest Phase-2 networking flags). Resolved (binds parsed, entrypoint split,
+    // network flags honest-errored) then lowered into RunSpec carry-fields.
+    // RUNTIME-ONLY — none enters the memo key. All-default ⇒ no-op carry.
+    runflags: RawRunFlags,
 ) -> i32 {
     // WP-RC-FLAGS: parse `--label`/`--shm-size` (fail-closed: bad value ⇒ exit 2).
     let rc = match rc.resolve() {
         Ok(c) => c,
         Err(code) => return code,
     };
+    // WP-RUNFLAGS: parse `-v`/`--entrypoint` + honest-error the networking flags
+    // (fail-closed: bad value / Phase-2 flag ⇒ exit 2).
+    let runflags = match runflags.resolve() {
+        Ok(f) => f,
+        Err(code) => return code,
+    };
+    // WP-RUNFLAGS: `--name` + `--rm` need a run dir/id, which only the DETACHED
+    // path creates (a foreground run is stateless — just the Action Cache). So
+    // they are detached-only; using them without `-d` is an honest exit 2, never
+    // a silent no-op.
+    if runflags.name.is_some() && !detach {
+        eprintln!("lightr: --name requires -d (a named run is a detached container)");
+        return 2;
+    }
+    if runflags.rm && !detach {
+        eprintln!("lightr: --rm requires -d (a foreground run leaves no run dir to remove)");
+        return 2;
+    }
     // Parse engine kind — bad value ⇒ exit 2
     let engine_kind = match engine_str.parse::<EngineKind>() {
         Ok(k) => k,
@@ -241,6 +270,14 @@ pub fn run(
             oom_score_adj: rc.oom_score_adj,
             pids_limit: rc.pids_limit,
             shm_size: rc.shm_size,
+            // WP-RUNFLAGS: `--name`/`--rm`/`--entrypoint` + `-v`/`--tmpfs` carry-
+            // fields. Persisted to spec.json; honored on the native supervisor
+            // path. RUNTIME-ONLY (never keyed). All-default ⇒ no-op.
+            volumes: runflags.volumes.clone(),
+            tmpfs: runflags.tmpfs.clone(),
+            entrypoint: runflags.entrypoint.clone(),
+            name: runflags.name.clone(),
+            rm: runflags.rm,
         };
         return match spawn_detached_engine(
             &spec,
@@ -250,10 +287,7 @@ pub fn run(
             Some(ref_name),
             &[],
         ) {
-            Ok(handle) => {
-                println!("id={}", handle.id);
-                0
-            }
+            Ok(handle) => claim_name_and_print(&handle, runflags.name.as_deref()),
             Err(e) => die_lightr(&e),
         };
     }
@@ -301,5 +335,25 @@ pub fn run(
         stop_signal: stop_signal.map(String::from),
         // WP-RC-FLAGS: the resolved 11 run-config flags (RUNTIME-ONLY).
         rc,
+        // WP-RUNFLAGS: the resolved `-v`/`--tmpfs`/`--name`/`--rm`/`--entrypoint`.
+        runflags,
     })
+}
+
+/// WP-RUNFLAGS: claim `--name` for a just-spawned detached run, then print its id
+/// (the success line). On a duplicate name the run is rolled back (removed) and an
+/// honest exit 1 returned — Docker refuses a duplicate name. `None` ⇒ no claim,
+/// just print the id (byte-identical to before). Used by every detached path.
+pub(super) fn claim_name_and_print(handle: &lightr_run::RunHandle, name: Option<&str>) -> i32 {
+    if let Some(name) = name {
+        let home = crate::lightr_home();
+        if let Err(e) = lightr_run::claim(&home, name, &handle.id) {
+            // Roll back the run we just spawned so a failed name claim leaves no
+            // orphan (Docker creates nothing on a duplicate name). Best-effort.
+            let _ = lightr_run::remove_run(&home, &handle.id, true);
+            return die_lightr(&e);
+        }
+    }
+    println!("id={}", handle.id);
+    0
 }

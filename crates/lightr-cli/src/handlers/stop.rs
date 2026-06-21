@@ -6,7 +6,17 @@ use crate::{exit::die_lightr, lightr_home};
 
 pub fn run(id: &str, grace: u64) -> i32 {
     let home = lightr_home();
-    let run_dir = home.join("run").join(id);
+    // WP-RUNFLAGS: resolve a `--name` (or id-prefix) to the run id, like `rm`, so
+    // `stop <name>` works. Unresolvable ⇒ "No such container" + exit 1 (Docker
+    // parity, WP-EXIT-CODE). A bare existing id still resolves to itself.
+    let resolved = match lightr_run::resolve(&home, id) {
+        Ok(rid) => rid,
+        Err(_) => {
+            eprintln!("Error: No such container: {id}");
+            return 1;
+        }
+    };
+    let run_dir = home.join("run").join(&resolved);
 
     // Docker `stop <missing>` → "No such container" + exit 1 (WP-EXIT-CODE).
     if !run_dir.exists() {

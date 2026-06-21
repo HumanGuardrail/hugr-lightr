@@ -43,7 +43,10 @@ use super::types::{RunOutcome, RunSpec};
 /// A `\x03env_explicit\0` domain tag prefixes the block so it can't collide
 /// with the `env_keys` folds above; an EMPTY slice writes nothing, so a run
 /// with no `-e`/`--env-file` keys byte-identically to before (behavior-preserved).
-fn contribute_env_explicit(hasher: &mut blake3::Hasher, env_explicit: &[(String, String)]) {
+pub(super) fn contribute_env_explicit(
+    hasher: &mut blake3::Hasher,
+    env_explicit: &[(String, String)],
+) {
     if env_explicit.is_empty() {
         return;
     }
@@ -189,76 +192,12 @@ pub(super) fn assemble_key(spec: &RunSpec, store: &Store, hydrate_mounts: bool) 
     Ok(Digest(*hasher.finalize().as_bytes()))
 }
 
-// Keep the old build_key for backward-compat within existing tests. Used only
-// on the fast path (no mounts AND no secrets/configs), so it needs no store;
-// `run_memoized_with`/`predict` route any spec with secrets/configs through
-// `assemble_key` (which resolves refs against the store).
-pub(super) fn build_key(spec: &RunSpec) -> Result<Digest> {
-    // No store needed for no-mounts case; but we must handle it.
-    // For the unmounted path (used by existing tests), we short-circuit.
-    use std::path::PathBuf;
-
-    let mut hasher = blake3::Hasher::new();
-
-    hasher.update(b"lightr/run/v1\0");
-
-    let inputs: Vec<&PathBuf> = if spec.inputs.is_empty() {
-        vec![&spec.cwd]
-    } else {
-        spec.inputs.iter().collect()
-    };
-
-    for input_path in inputs {
-        let abs_path = if input_path.is_absolute() {
-            input_path.clone()
-        } else {
-            spec.cwd.join(input_path)
-        };
-        let canonical = abs_path.canonicalize().map_err(LightrError::Io)?;
-        let mut index = Index::load_for(&canonical)?;
-        let report = scan(&canonical, &mut index)?;
-        let rel_path_bytes = input_path.as_os_str().as_encoded_bytes();
-        hasher.update(rel_path_bytes);
-        hasher.update(b"\0");
-        hasher.update(&report.manifest.digest().0);
-    }
-
-    for arg in &spec.command {
-        let len = arg.len() as u64;
-        hasher.update(&len.to_le_bytes());
-        hasher.update(arg.as_bytes());
-    }
-
-    let mut sorted_keys = spec.env_keys.clone();
-    sorted_keys.sort();
-    for key in &sorted_keys {
-        if let Some(val) = std::env::var_os(key) {
-            hasher.update(key.as_bytes());
-            hasher.update(b"=");
-            hasher.update(val.as_encoded_bytes());
-            hasher.update(b"\0");
-        } else {
-            hasher.update(key.as_bytes());
-            hasher.update(b"\x01");
-        }
-    }
-
-    // WP-RC-1 (R-KEY): explicit env — must match `assemble_key` exactly so the
-    // fast path and the store path agree. Empty ⇒ no-op (behavior-preserving).
-    contribute_env_explicit(&mut hasher, &spec.env_explicit);
-
-    let triple = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    hasher.update(triple.as_bytes());
-
-    // No mount contribution (this fast path is only taken when mounts are empty).
-    // No secrets/configs contribution either: this storeless fast path is only
-    // reached when secrets AND configs are empty (a non-empty spec routes through
-    // `assemble_key`, which has the store to resolve refs — F-309 §0). An empty
-    // contribution is a no-op, so the key is identical to today's for the 16
-    // existing (empty-vec) callers.
-
-    Ok(Digest(*hasher.finalize().as_bytes()))
-}
+// The storeless fast-path `build_key` lives in `memo_key.rs` (pulled in via
+// `#[path]` to keep this file under the 400-line godfile cap) and is re-exported
+// so existing `super::memo::build_key` callers + tests are unchanged.
+#[path = "memo_key.rs"]
+mod memo_key;
+pub(super) use memo_key::build_key;
 
 pub fn run_memoized(spec: &RunSpec, store: &Store) -> Result<RunOutcome> {
     run_memoized_with(spec, store, &lightr_core::ResourceLimits::default())
@@ -295,19 +234,28 @@ pub fn run_memoized_with(
         assemble_key(spec, store, false)?
     };
 
-    // --- Hit path ---
-    if let Ok(Some(record_bytes)) = store.ac_get(&key) {
-        if let Some((exit_code, stdout_d, stderr_d)) = decode_ac_record(&record_bytes) {
-            let stdout_res = store.get_bytes(&stdout_d);
-            let stderr_res = store.get_bytes(&stderr_d);
-            if let (Ok(stdout), Ok(stderr)) = (stdout_res, stderr_res) {
-                return Ok(RunOutcome {
-                    key,
-                    hit: true,
-                    exit_code,
-                    stdout,
-                    stderr,
-                });
+    // WP-RUNFLAGS: a `-v/--volume` host bind or a `--tmpfs` scratch dir makes the
+    // run non-reproducible (a live host path / fresh writable dir is not content-
+    // addressed). Force a MISS — never replay a cached result for a bind run, and
+    // never write one to the AC below. Empty (the common case) ⇒ caching is
+    // byte-identical to before.
+    let non_reproducible = !spec.volumes.is_empty() || !spec.tmpfs.is_empty();
+
+    // --- Hit path (skipped for non-reproducible bind/tmpfs runs) ---
+    if !non_reproducible {
+        if let Ok(Some(record_bytes)) = store.ac_get(&key) {
+            if let Some((exit_code, stdout_d, stderr_d)) = decode_ac_record(&record_bytes) {
+                let stdout_res = store.get_bytes(&stdout_d);
+                let stderr_res = store.get_bytes(&stderr_d);
+                if let (Ok(stdout), Ok(stderr)) = (stdout_res, stderr_res) {
+                    return Ok(RunOutcome {
+                        key,
+                        hit: true,
+                        exit_code,
+                        stdout,
+                        stderr,
+                    });
+                }
             }
         }
     }
@@ -322,21 +270,30 @@ pub fn run_memoized_with(
         }
     }
 
+    // WP-RUNFLAGS: materialize `-v/--volume` host binds + `--tmpfs` scratch dirs
+    // into the run cwd (only on miss — and a bind/tmpfs run is always a forced
+    // miss above). Empty ⇒ no-op (behaviour-preserving).
+    super::bindmat::materialize_volumes(&spec.cwd, &spec.volumes)?;
+    super::bindmat::materialize_tmpfs(&spec.cwd, &spec.tmpfs)?;
+
     // F-309: hydrate secrets/configs into the run cwd (only on miss) — mode 0600
     // (secret) / 0644 (config), content-verified against the sealed CAS first.
     crate::secrets::hydrate(&spec.cwd, store, &spec.secrets, &spec.configs)?;
 
-    if spec.command.is_empty() {
+    // WP-RUNFLAGS: `--entrypoint` prepends to the CLI command (Docker CMD). `None`
+    // ⇒ argv == command (byte-identical to before).
+    let argv = super::bindmat::effective_argv(spec.entrypoint.as_deref(), &spec.command);
+    if argv.is_empty() {
         return Err(LightrError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "command is empty",
         )));
     }
 
-    let mut cmd = std::process::Command::new(&spec.command[0]);
+    let mut cmd = std::process::Command::new(&argv[0]);
     // WP-RC-WORKDIR: honor `-w` as the child cwd (auto-created; None ⇒ spec.cwd).
     let run_cwd = super::spawn::resolve_workdir(&spec.cwd, spec.workdir.as_deref())?;
-    cmd.args(&spec.command[1..]).current_dir(&run_cwd);
+    cmd.args(&argv[1..]).current_dir(&run_cwd);
     super::spawn::apply_user(&mut cmd, spec.user.as_deref())?; // WP-RC-USER (-u; None ⇒ no-op)
     super::apply_cfg::apply_run_config_spec(spec, &mut cmd); // RC-SEAM-FREEZE (no-op)
                                                              // F-203: apply resource caps (RLIMIT_AS/DATA via pre_exec); no-op when unlimited.
@@ -361,7 +318,13 @@ pub fn run_memoized_with(
     let stdout = output.stdout;
     let stderr = output.stderr;
 
-    if exit_code == 0 && stdout.len() <= OUTPUT_CAP_BYTES && stderr.len() <= OUTPUT_CAP_BYTES {
+    // WP-RUNFLAGS: never write a cache record for a non-reproducible bind/tmpfs
+    // run — its output depends on live host state outside the key.
+    if !non_reproducible
+        && exit_code == 0
+        && stdout.len() <= OUTPUT_CAP_BYTES
+        && stderr.len() <= OUTPUT_CAP_BYTES
+    {
         let stdout_d = store.put_bytes(&stdout)?;
         let stderr_d = store.put_bytes(&stderr)?;
         let record = encode_ac_record(exit_code, &stdout_d, &stderr_d);

@@ -131,6 +131,14 @@ pub fn spawn_detached_engine(
         // spawn. `None`/`None` (unlimited) ⇒ today's spawn, byte-identical.
         mem_limit_bytes: spec.limits.memory_bytes,
         cpu_limit_millis: spec.limits.cpu_millis,
+        // WP-RUNFLAGS: persist `--name`/`--rm`/`--entrypoint` + the `-v/--volume`
+        // host binds and `--tmpfs` dirs (via the tagged `mounts2` shape) so the
+        // detached supervisor materializes them + auto-removes on exit. All empty/
+        // None/false ⇒ today's spawn, byte-identical. RUNTIME ONLY (never keyed).
+        name: spec.name.clone(),
+        rm: spec.rm,
+        entrypoint: spec.entrypoint.clone(),
+        mounts2: super::types::mounts2_from_runspec(spec),
         // R-SPECDISK freeze-gate fields not owned by the RC seam: defaults until
         // the Wave-A/B WPs populate them (no behaviour change here).
         ..Default::default()
