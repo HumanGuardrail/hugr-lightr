@@ -186,6 +186,40 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         subcmd: VolumeCmd,
     },
+    // ── Docker image-management verbs over the ref registry (WP-IMAGE-VERBS) ───
+    // LEAD DESIGN (frozen): a Docker "image" = a named lightr ref. These verbs
+    // transcribe `docker images/rmi/tag/history/commit` onto the ref registry.
+    /// List images (named refs) — docker images
+    Images {
+        /// Only show image IDs (docker -q/--quiet)
+        #[arg(short = 'q', long)]
+        quiet: bool,
+    },
+    /// Remove one or more images (untag refs) — docker rmi
+    Rmi {
+        /// Image refs to remove
+        #[arg(required = true)]
+        targets: Vec<String>,
+    },
+    /// Tag an image under a new name (alias a ref) — docker tag
+    Tag {
+        /// Source image ref
+        src: String,
+        /// New image ref (alias)
+        dst: String,
+    },
+    /// Show the version history of an image (ref log) — docker history
+    History {
+        /// Image ref
+        reference: String,
+    },
+    /// Create a new image from a container's filesystem — docker commit
+    Commit {
+        /// Container (detached run id/name) to commit
+        container: String,
+        /// Ref name for the new image (generated if omitted)
+        reference: Option<String>,
+    },
     /// Garbage collect unreachable objects
     Gc {
         #[arg(long)]
