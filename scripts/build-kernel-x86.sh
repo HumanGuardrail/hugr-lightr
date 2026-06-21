@@ -23,6 +23,26 @@
 # as virtio-pci), virtio-console (the guest's only console, hvc0), virtiofs +
 # FUSE (the rootfs/store shares + the host<->guest file channel).
 #
+# ── BOOT NETWORKING: two NICs, two DIFFERENT IP mechanisms (ADR-0018) ─────────
+# A networked guest has a DUAL-NIC layout (ADR-0018 §Decision 2):
+#   • eth0 — VZNATNetworkDeviceAttachment (internet egress). Its IP is acquired
+#     by the KERNEL at boot from the `ip=dhcp` cmdline the vz shim appends
+#     (crates/lightr-engine/shim/vz.swift). THIS is exactly what CONFIG_IP_PNP +
+#     CONFIG_IP_PNP_DHCP enable — kernel-level IP autoconfig brings eth0 up with
+#     an address BEFORE PID1 runs, so lightr-init reads the leased eth0 address
+#     immediately on the boot path (crates/lightr-init/src/bin/init.rs).
+#   • eth1 — VZFileHandleNetworkDeviceAttachment (the userspace L2 mesh switch).
+#     Its IP is leased in USERSPACE, NOT by the kernel: the guest runs busybox
+#     `udhcpc -i eth1` against the host-side switch's embedded DHCP server
+#     (crates/lightr-run/src/vswitch/dhcp.rs). Kernel IP-PNP autoconfigures only
+#     the FIRST NIC, so eth1 is deliberately a userspace-DHCP NIC — no kernel
+#     change is needed (or possible) for the eth1 mesh IP.
+# Both NICs are virtio-net (VZ exposes the file-handle NIC as virtio-pci too), so
+# VIRTIO_NET (enabled below) is the SINGLE driver for eth0 AND eth1 — no extra
+# driver is needed for the mesh NIC. The full split is validated end-to-end by
+# crates/lightr-run/examples/s5-vz-switch.rs (eth0 kernel ip=dhcp + eth1 udhcpc
+# lease from our switch).
+#
 # ── NO-DOCKER NOTES ──────────────────────────────────────────────────────────
 # lightr-init (the guest PID 1 binary) is built DOCKER-FREE via
 #   scripts/build-init.sh
@@ -89,9 +109,16 @@ scripts/config \
 make olddefconfig >/dev/null
 echo "[config] boot-critical options:"
 grep -E "^CONFIG_(PVH|VIRTIO_PCI|VIRTIO_CONSOLE|VIRTIO_FS|FUSE_FS|BLK_DEV_INITRD|DEVTMPFS)=" .config
-# ADR-0018: guest DHCP lease from the userspace switch's embedded DHCP server
+# ADR-0018: kernel-level DHCP autoconfig (`ip=dhcp` cmdline) brings up eth0 (the
+# NAT egress NIC) at boot — see the BOOT NETWORKING block in the header. (eth1,
+# the mesh NIC, leases separately in userspace via udhcpc; it does not depend on
+# kernel IP-PNP.) Fail closed if either option silently drops from defconfig.
 grep -q "^CONFIG_IP_PNP=y"      .config || { echo "[config] MISSING: CONFIG_IP_PNP=y"      >&2; exit 1; }
 grep -q "^CONFIG_IP_PNP_DHCP=y" .config || { echo "[config] MISSING: CONFIG_IP_PNP_DHCP=y" >&2; exit 1; }
+# VIRTIO_NET is the single driver for BOTH eth0 (NAT) and eth1 (file-handle mesh
+# NIC — VZ exposes it as virtio-pci too). Without it neither NIC appears, so no
+# boot IP on either. Fail closed.
+grep -q "^CONFIG_VIRTIO_NET=y"  .config || { echo "[config] MISSING: CONFIG_VIRTIO_NET=y"  >&2; exit 1; }
 make -j"$(nproc)" vmlinux bzImage 2>&1 | tail -4
 cp vmlinux /out/vmlinux
 cp arch/x86/boot/bzImage /out/bzImage
