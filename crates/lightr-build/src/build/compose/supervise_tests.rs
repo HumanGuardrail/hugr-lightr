@@ -33,6 +33,7 @@ fn svc_with_deps(name: &str, deps: Vec<(&str, DepCondition)>) -> ServiceSpec {
         cap_add: Vec::new(),
         cap_drop: Vec::new(),
         container_name: None,
+        networks: Vec::new(),
     }
 }
 

@@ -39,6 +39,11 @@ pub mod supervise;
 /// CMP-P0-DEPENDS: `depends_on` topo-order (Kahn) + condition-wait helpers split
 /// out of `supervise.rs` for godfile headroom. Consumed by `supervise.rs`.
 pub(crate) mod supervise_deps;
+/// WP-CMP-NET: the named-networks routing decision (engine + RunSpec network
+/// fields) split out of `supervise.rs` for godfile headroom. A service that
+/// declares `networks:` routes to the vz engine + the shared L2 switch; a plain
+/// service stays native. Consumed by `supervise.rs::start_one_instance`.
+pub(crate) mod supervise_net;
 /// WP-REPLICAS: `deploy.replicas` planning helpers (instance count, static-port
 /// discriminator, per-instance run-name plan) split out of `supervise.rs` for
 /// godfile headroom. Consumed by `supervise.rs::start_service_detached`.

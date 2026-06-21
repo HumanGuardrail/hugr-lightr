@@ -226,6 +226,11 @@ pub fn compose_up(
             cap_add: s.cap_add.clone(),
             cap_drop: s.cap_drop.clone(),
             container_name: s.container_name.clone(),
+            // WP-CMP-NET: carry the lowered `(network, aliases)` attachments to
+            // the on-disk spec so the supervisor can route a networked service to
+            // the vz engine + set `RunSpec.network` (= `<project>_<network>`).
+            // Empty ⇒ native spawn (today's behavior, byte-identical).
+            networks: s.networks.clone(),
         })
         .collect();
 

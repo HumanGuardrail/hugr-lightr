@@ -1,7 +1,8 @@
-//! compose_supervise + helpers: start_service_detached, proxy_bidirectional, discovery_key,
+//! compose_supervise + helpers: start_service_detached, discovery_key,
 //! prepare_service_cwd. The CMP-P0-DEPENDS topo-order + condition-wait helpers
-//! live in the sibling `supervise_deps` module (godfile headroom for the
-//! compose-lowering WPs that fill the `start_service_detached` RunSpec literal).
+//! live in the sibling `supervise_deps` module; the WP-CMP-NET routing decision
+//! and the `proxy_bidirectional` TCP plumbing live in `supervise_net` (godfile
+//! headroom for the compose-lowering WPs that fill the RunSpec literal).
 use lightr_core::{LightrError, Result};
 use lightr_store::Store;
 use std::path::{Path, PathBuf};
@@ -102,6 +103,7 @@ pub(crate) fn start_service_detached(
     stack_dir: &Path,
     svc: &ServiceSpec,
     peers: &[(String, u16)],
+    project: &str,
 ) -> Result<()> {
     note_unhonored_deploy(svc);
     // Fail-closed BEFORE spawning anything (static-port/container_name + N>1).
@@ -109,7 +111,7 @@ pub(crate) fn start_service_detached(
     for (idx, run_name) in run_names.iter().enumerate() {
         // Only the FIRST instance records its run dir on the live spec (the
         // discovery/depends_on key resolves to one instance — see the LB note).
-        start_one_instance(stack_dir, svc, peers, run_name, idx == 0)?;
+        start_one_instance(stack_dir, svc, peers, run_name, idx == 0, project)?;
     }
     Ok(())
 }
@@ -121,12 +123,25 @@ fn start_one_instance(
     peers: &[(String, u16)],
     run_name: &str,
     record_run_dir: bool,
+    project: &str,
 ) -> Result<()> {
+    use super::supervise_net::{route_networking, NetRouting};
     use lightr_run::healthcheck::Healthcheck;
     use lightr_run::{spawn_detached_engine, Mount, RunSpec, StoreFile};
 
     let store_root = lightr_home().join("store");
     let store = Store::open(&store_root)?;
+
+    // WP-CMP-NET: the hybrid routing decision — a declared-network service → vz +
+    // the shared L2 switch (fail-closed if it has no image); a plain service →
+    // native (byte-identical). See `supervise_net.rs`.
+    let NetRouting {
+        engine,
+        ports,
+        run_name_for_dns,
+        network,
+        network_alias,
+    } = route_networking(svc, project)?;
     let cwd = prepare_service_cwd(svc, &store, run_name)?;
 
     let to_store_files = |pairs: &[(String, String)]| -> Vec<StoreFile> {
@@ -147,7 +162,13 @@ fn start_one_instance(
         mounts: Vec::new() as Vec<Mount>,
         secrets: to_store_files(&svc.secrets),
         configs: to_store_files(&svc.configs),
-        ports: Vec::new(),
+        ports,
+        // WP-CMP-NET: vz path names the run after the SERVICE (switch/DNS member
+        // name → `curl http://web`); `network` triggers C9's svz join + attach.
+        // All default on the native path ⇒ byte-identical to today.
+        name: run_name_for_dns,
+        network,
+        network_alias,
         // WP-RC-1 (R-KEY): compose env is the UNKEYED discovery channel, NOT keyed.
         env_explicit: Vec::new(),
         // CMP-LOWER-RUNCFG: lowered from the compose service (working_dir/user/
@@ -204,14 +225,14 @@ fn start_one_instance(
                 },
             );
 
-    let handle = spawn_detached_engine(
-        &spec,
-        &store,
-        hc.as_ref(),
-        lightr_engine::EngineKind::Native,
-        None,
-        &child_env,
-    )?;
+    // WP-CMP-NET: vz boots the image as its rootfs (route_networking already
+    // fail-closed-checked it is non-empty); native has none.
+    let rootfs_ref = match engine {
+        lightr_engine::EngineKind::Vz => Some(svc.image_ref.as_str()),
+        _ => None,
+    };
+
+    let handle = spawn_detached_engine(&spec, &store, hc.as_ref(), engine, rootfs_ref, &child_env)?;
 
     // WP-REPLICAS: only the FIRST instance records its run dir on the live spec —
     // the service's depends_on/discovery key resolves to one instance (see the
@@ -233,52 +254,6 @@ fn start_one_instance(
     }
 
     Ok(())
-}
-
-/// Simple bidirectional byte proxy between two TCP streams.
-pub(crate) fn proxy_bidirectional(a: std::net::TcpStream, b: std::net::TcpStream) {
-    use std::io::{Read, Write};
-
-    let a2 = a.try_clone();
-    let b2 = b.try_clone();
-    if a2.is_err() || b2.is_err() {
-        return;
-    }
-    let mut a_read = a;
-    let mut b_read = b;
-    let mut a_write = a2.unwrap();
-    let mut b_write = b2.unwrap();
-
-    let t1 = std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        loop {
-            match a_read.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if b_write.write_all(&buf[..n]).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    let t2 = std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        loop {
-            match b_read.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if a_write.write_all(&buf[..n]).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    let _ = t1.join();
-    let _ = t2.join();
 }
 
 /// Compose supervisor -- called by `lightr __compose-supervise <stack_dir>`.
@@ -316,12 +291,15 @@ pub fn compose_supervise(stack_dir: &Path) -> Result<()> {
     // waits out its `depends_on` conditions (service_started/healthy/completed)
     // before it is spawned. With no depends_on edges this is exactly the prior
     // declaration-order eager loop (topo_order returns 0..n; wait is a no-op).
+    // WP-CMP-NET: project namespaces each network id (`<project>_<network>`).
+    let project = spec.project.clone();
+
     let order = topo_order(&spec.services)?;
     for &i in &order {
         let svc = &spec.services[i];
         if svc.eager && !svc.command.is_empty() {
             wait_for_deps(stack_dir, svc);
-            start_service_detached(stack_dir, svc, &peers)?;
+            start_service_detached(stack_dir, svc, &peers, &project)?;
         }
     }
 
@@ -346,18 +324,22 @@ pub fn compose_supervise(stack_dir: &Path) -> Result<()> {
             let svc_clone = svc_spec.clone();
             let stack_dir_clone = stack_dir.to_path_buf();
             let peers_clone = peers.clone();
+            let project_clone = project.clone();
             let jh = std::thread::spawn(move || {
                 if let Ok((inbound, _)) = listener.accept() {
-                    if let Err(e) =
-                        start_service_detached(&stack_dir_clone, &svc_clone, &peers_clone)
-                    {
+                    if let Err(e) = start_service_detached(
+                        &stack_dir_clone,
+                        &svc_clone,
+                        &peers_clone,
+                        &project_clone,
+                    ) {
                         eprintln!("lightr compose: failed to start {}: {e}", svc_clone.name);
                         return;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
                     let svc_addr = format!("127.0.0.1:{container_port}");
                     if let Ok(outbound) = std::net::TcpStream::connect(&svc_addr) {
-                        proxy_bidirectional(inbound, outbound);
+                        super::supervise_net::proxy_bidirectional(inbound, outbound);
                     }
                 }
             });

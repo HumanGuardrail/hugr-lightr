@@ -11,7 +11,7 @@
 //! `_` bindings document an intentionally-unconsumed source field (no
 //! `#[allow(unused)]`, no debt).
 use super::model::{DepCondition, Service};
-use super::spec::{DependsOn, ServiceDef};
+use super::spec::{DependsOn, ServiceDef, ServiceNetworks};
 
 /// `depends_on` (CMP-P0-DEPENDS): startup ordering / health-gated dependencies.
 ///
@@ -47,10 +47,41 @@ pub(super) fn lower_depends_on(def: &ServiceDef, svc: &mut Service) {
     };
 }
 
-/// `networks` (CMP-P1-NETWORKS): service network attachments + aliases.
-/// Stub — Lightr publishes on loopback today; no per-network model yet.
-pub(super) fn lower_networks(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.networks;
+/// `networks` (WP-CMP-NET): the service's network attachments + per-network
+/// aliases — the headline "multi-service app talks by name".
+///
+/// Transcribes the two Docker-faithful shapes onto `svc.networks` as
+/// `(network_name, aliases)` in declaration order:
+///  * SHORT list (`networks: [frontend, backend]`) ⇒ each name with NO aliases;
+///  * LONG map (`networks: {frontend: {aliases: [web]}}`) ⇒ each name with its
+///    declared `aliases` (a null attachment value ⇒ empty aliases).
+///
+/// The names are held UN-prefixed (the lowering has no project name); the
+/// supervisor prepends `<project>_` to form the registry network id, matching
+/// Docker's per-project network namespacing (`<project>_<network>`).
+///
+/// Behavior-preserving: a service that declares NO `networks:` lowers to an
+/// EMPTY list ⇒ the supervisor spawns it NATIVE with loopback+env discovery,
+/// byte-identical to today. A NON-EMPTY list routes the service to the `vz`
+/// engine + the shared L2 switch (the hybrid model — only declared-network
+/// services attach the switch; plain services stay native). The DNS-by-service-
+/// name resolution then comes for free: the service joins the switch under its
+/// service name (C9/registry NameTable seeding), so a peer's `curl http://web`
+/// resolves automatically.
+pub(super) fn lower_networks(def: &ServiceDef, svc: &mut Service) {
+    let Some(networks) = &def.networks else {
+        return;
+    };
+    svc.networks = match networks {
+        ServiceNetworks::List(names) => names.iter().map(|n| (n.clone(), Vec::new())).collect(),
+        ServiceNetworks::Map(map) => map
+            .iter()
+            .map(|(name, att)| {
+                let aliases = att.as_ref().map(|a| a.aliases.clone()).unwrap_or_default();
+                (name.clone(), aliases)
+            })
+            .collect(),
+    };
 }
 
 /// `extra_hosts`: additional `/etc/hosts` entries (`["host:ip", ...]`).
