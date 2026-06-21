@@ -105,6 +105,12 @@ fn main() {
         Cmd::Tag { .. } => "tag",
         Cmd::History { .. } => "history",
         Cmd::Commit { .. } => "commit",
+        Cmd::Version => "version",
+        Cmd::Info => "info",
+        Cmd::System { subcmd } => match subcmd {
+            cli::cmd::SystemCmd::Df { .. } => "system-df",
+            cli::cmd::SystemCmd::Prune { .. } => "system-prune",
+        },
         Cmd::Gc { .. } => "gc",
         Cmd::Undo { .. } => "undo",
         Cmd::Diff { .. } => "diff",

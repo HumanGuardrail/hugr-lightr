@@ -220,6 +220,16 @@ pub(crate) enum Cmd {
         /// Ref name for the new image (generated if omitted)
         reference: Option<String>,
     },
+    // ── Docker diagnostic / maintenance surface (WP-EDGE-VERBS) ────────────────
+    /// Show the lightr version (docker version) — daemonless, no server section
+    Version,
+    /// Display system-wide information (docker info)
+    Info,
+    /// Manage lightr data (docker system): df, prune
+    System {
+        #[command(subcommand)]
+        subcmd: SystemCmd,
+    },
     /// Garbage collect unreachable objects
     Gc {
         #[arg(long)]

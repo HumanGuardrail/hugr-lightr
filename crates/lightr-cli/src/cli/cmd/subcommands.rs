@@ -247,6 +247,30 @@ pub enum VolumeCmd {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// SystemCmd sub-enum (docker system — WP-EDGE-VERBS)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum SystemCmd {
+    /// Show docker disk usage (docker system df)
+    Df {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove unused data (docker system prune). Reuses `gc`; never untags refs.
+    Prune {
+        /// Do not prompt for confirmation (docker -f/--force)
+        #[arg(short = 'f', long)]
+        force: bool,
+        /// Minimum object age in seconds before it is reclaimable (mirrors gc)
+        #[arg(long, default_value_t = 3600)]
+        min_age: u64,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // SuperviseCmd sub-enum (F-308 — OS-supervisor unit generation)
 // ──────────────────────────────────────────────────────────────────────────────
 
