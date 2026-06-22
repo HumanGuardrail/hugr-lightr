@@ -7,8 +7,10 @@
 //!   (reuses DF-06's CopyMeta/copy infra).
 //! - Tar auto-extract: a `.tar` and a `.tar.gz` EXTRACT their entries into dest
 //!   (Docker semantics) — the archive FILE itself never lands.
-//! - `.tar.bz2` / `.tar.xz` → honest fail-closed "unsupported" (no decompressor).
-//! - `ADD <url>` → honest "non-hermetic, unsupported" error.
+//! - `.tar.bz2` / `.tar.xz` EXTRACT in-process (WP-G); a corrupt stream fails
+//!   closed (never a silent copy).
+//! - `ADD <url>` FETCHES (WP-G): the fetch path is wired and fails closed when
+//!   the URL is unreachable/4xx (no silent success, never auto-extracted).
 //! - MEMO no-false-hit: a differing --chmod busts the cache; identical ADD hits.
 //!
 //! Parallel-safe by construction: each test owns its tempdirs + store and never
@@ -87,6 +89,13 @@ fn write_tar_gz(path: &std::path::Path) {
     append_bytes(&mut ar, "dir/b.txt", b"beta");
     ar.into_inner().unwrap().finish().unwrap();
 }
+
+// WP-G: ADD `.tar.bz2`/`.tar.xz` extraction + ADD URL fetch tests live in a
+// sibling module (godfile cap <400 LOC/file). Declared as a `#[path]` child of
+// THIS test module so the moved tests reach the shared `fix`/`build_df`/
+// `build_err`/`hydrate`/`append_bytes` helpers via `super::`.
+#[path = "exec_wpg_tests.rs"]
+mod wpg_tests;
 
 fn append_bytes<W: Write>(ar: &mut tar::Builder<W>, name: &str, data: &[u8]) {
     let mut h = tar::Header::new_gnu();
@@ -251,65 +260,6 @@ fn add_tar_gz_auto_extracts() {
         "beta"
     );
     assert!(!dest.join("opt/bundle.tar.gz").exists());
-}
-
-#[test]
-fn add_tar_bz2_is_honest_unsupported() {
-    // No bzip2 decompressor is vendored: fail-closed, never a silent copy.
-    let f = fix();
-    // Content does not matter — classification is by suffix, and the error fires
-    // before decompression.
-    std::fs::write(f.ctx_path.join("x.tar.bz2"), b"not really bz2").unwrap();
-    let err = build_err(&f, "df07-bz2", "FROM scratch\nADD x.tar.bz2 /opt/\n");
-    assert!(
-        err.contains("bzip2") && err.to_lowercase().contains("unsupported"),
-        "a .tar.bz2 must be an honest unsupported error, got: {err}"
-    );
-}
-
-#[test]
-fn add_tar_xz_is_honest_unsupported() {
-    let f = fix();
-    std::fs::write(f.ctx_path.join("x.tar.xz"), b"not really xz").unwrap();
-    let err = build_err(&f, "df07-xz", "FROM scratch\nADD x.tar.xz /opt/\n");
-    assert!(
-        err.contains("xz") && err.to_lowercase().contains("unsupported"),
-        "a .tar.xz must be an honest unsupported error, got: {err}"
-    );
-}
-
-// ── Remote URL → honest unsupported ──────────────────────────────────────────
-
-#[test]
-fn add_url_is_honest_unsupported() {
-    let f = fix();
-    let err = build_err(
-        &f,
-        "df07-url",
-        "FROM scratch\nADD https://example.com/app.tar.gz /opt/\n",
-    );
-    assert!(
-        err.to_lowercase().contains("url") && err.to_lowercase().contains("unsupported"),
-        "ADD from a URL must be an honest non-hermetic error, got: {err}"
-    );
-    assert!(
-        err.to_lowercase().contains("hermetic") || err.to_lowercase().contains("copy"),
-        "the error should explain WHY (non-hermetic) / the COPY alternative, got: {err}"
-    );
-}
-
-#[test]
-fn add_http_url_also_unsupported() {
-    let f = fix();
-    let err = build_err(
-        &f,
-        "df07-http",
-        "FROM scratch\nADD http://example.com/f.txt /f.txt\n",
-    );
-    assert!(
-        err.to_lowercase().contains("url"),
-        "http:// must also fail, got: {err}"
-    );
 }
 
 // ── MEMO no-false-hit (chown/chmod) ──────────────────────────────────────────
