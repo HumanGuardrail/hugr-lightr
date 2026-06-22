@@ -38,6 +38,10 @@ pub(super) fn publish_all_policy_error(
 /// (the success line). On a duplicate name the run is rolled back (removed) and an
 /// honest exit 1 returned — Docker refuses a duplicate name. `None` ⇒ no claim,
 /// just print the id (byte-identical to before). Used by every detached path.
+///
+/// FIX #77: print the BARE id (Docker's `docker run -d` prints the container id
+/// alone on stdout). The old `id=<id>` prefix broke `$(docker run -d …)` capture
+/// and tool parity; the bare id is now the only success line.
 pub(crate) fn claim_name_and_print(handle: &lightr_run::RunHandle, name: Option<&str>) -> i32 {
     if let Some(name) = name {
         let home = crate::lightr_home();
@@ -48,7 +52,7 @@ pub(crate) fn claim_name_and_print(handle: &lightr_run::RunHandle, name: Option<
             return die_lightr(&e);
         }
     }
-    println!("id={}", handle.id);
+    println!("{}", handle.id);
     0
 }
 

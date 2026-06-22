@@ -1,8 +1,23 @@
 //! `docker compose up/down` → `lightr compose` translation, split from the
-//! docker shim's `mod.rs` for godfile headroom. Behavior is identical to the
-//! inlined form; only the location changed.
+//! docker shim's `mod.rs` for godfile headroom.
+//!
+//! FIX #74: the flag loop no longer SILENTLY ignores unrecognized flags (the
+//! old `_ => {}` arm). `-d/--detach` is accepted (lightr compose is supervised /
+//! daemonless — detached IS its model). The docker flags native genuinely does
+//! not support yet (`--build`/`--remove-orphans`/`--volumes`) are honest errors,
+//! never a silent drop; an unrecognized flag is likewise an honest error.
 
+use super::flag_err::unsupported_flag;
 use super::note_translation;
+
+/// Honest error for a `docker compose` flag native does not support yet (exit 2).
+fn unsupported_compose(flag: &str) -> i32 {
+    eprintln!(
+        "lightr docker: compose: {flag} is not yet supported by the shim (lightr compose has no \
+         equivalent) — not silently dropped"
+    );
+    2
+}
 
 /// Translate `docker compose <up|down> [...]` to the corresponding lightr
 /// compose handler. Flag parsing is the minimal docker-compatible subset.
@@ -59,7 +74,24 @@ fn translate_up(rest: &[String], json: bool) -> i32 {
                     ttl = rest[i].parse().unwrap_or(3600);
                 }
             }
-            _ => {}
+            // `-d/--detach`: lightr compose runs under a supervisor (daemonless,
+            // detached by design), so docker's `-d` maps to the natural mode —
+            // accepted as a no-op rather than errored.
+            "-d" | "--detach" => {}
+            // Docker flags native compose does not implement yet — honest error.
+            "--build" | "--remove-orphans" | "--volumes" => {
+                return unsupported_compose(rest[i].as_str())
+            }
+            other if other.starts_with('-') => return unsupported_flag("compose up", other),
+            // A bare positional in `compose up` is a SERVICE name filter, which
+            // lightr compose does not implement — honest error, never a drop.
+            other => {
+                eprintln!(
+                    "lightr docker: compose up: service filter '{other}' is not yet supported by \
+                     the shim (lightr compose starts the whole stack)"
+                );
+                return 2;
+            }
         }
         i += 1;
     }
@@ -93,7 +125,18 @@ fn translate_down(rest: &[String]) -> i32 {
                     project = Some(rest[i].clone());
                 }
             }
-            _ => {}
+            // Docker flags native `compose down` does not implement yet.
+            "--remove-orphans" | "--volumes" | "-v" => {
+                return unsupported_compose(rest[i].as_str())
+            }
+            other if other.starts_with('-') => return unsupported_flag("compose down", other),
+            other => {
+                eprintln!(
+                    "lightr docker: compose down: unexpected argument '{other}' (lightr compose \
+                     down takes no positionals)"
+                );
+                return 2;
+            }
         }
         i += 1;
     }

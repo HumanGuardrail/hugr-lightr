@@ -17,7 +17,8 @@ use crate::{
 
 pub fn run(targets: &[String]) -> i32 {
     if targets.is_empty() {
-        eprintln!("lightr: \"start\" requires at least 1 argument");
+        // FIX #77: standardize the prefix to `Error:` (was `lightr:`).
+        eprintln!("Error: \"start\" requires at least 1 argument");
         return 2;
     }
 
