@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use lightr_cri_backend::{
     BackendError, ContainerConfig, ContainerFilter, ContainerState, CriBackend, LightrBackend,
-    SandboxId,
+    SandboxConfig, SandboxId,
 };
 
 fn temp_home() -> PathBuf {
@@ -46,12 +46,32 @@ fn cfg(name: &str, command: Vec<&str>) -> ContainerConfig {
     }
 }
 
+/// Run a Ready sandbox and return its id. create_container is now gated on a
+/// Ready sandbox (WP-CRI-SANDBOX closed the contract gate), so every container
+/// test must first create the pod. On macOS there is no CNI → ip=None.
+fn ready_sandbox(b: &LightrBackend) -> SandboxId {
+    b.run_sandbox(SandboxConfig {
+        name: "pod".into(),
+        uid: "uid".into(),
+        namespace: "ns".into(),
+        attempt: 0,
+        labels: BTreeMap::new(),
+        annotations: BTreeMap::new(),
+        log_directory: String::new(),
+        hostname: String::new(),
+        host_network: false,
+        dns: None,
+        port_mappings: Vec::new(),
+    })
+    .unwrap()
+}
+
 // ── container lifecycle: create → status → list → remove ─────────────────────
 
 #[test]
 fn container_lifecycle_create_status_list_remove() {
     let b = LightrBackend::new(temp_home());
-    let sb = SandboxId("sb-test".into());
+    let sb = ready_sandbox(&b);
 
     let id = b.create_container(&sb, cfg("c1", vec![])).unwrap();
 
@@ -90,7 +110,7 @@ fn container_lifecycle_create_status_list_remove() {
 #[test]
 fn start_then_keepalive_is_running_and_stops_with_grace() {
     let b = LightrBackend::new(temp_home());
-    let sb = SandboxId("sb".into());
+    let sb = ready_sandbox(&b);
     // Empty command ⇒ keep-alive `tail -f /dev/null` (transcribed from fake).
     let id = b.create_container(&sb, cfg("k", vec![])).unwrap();
     b.start_container(&id).unwrap();
@@ -114,7 +134,7 @@ fn start_then_keepalive_is_running_and_stops_with_grace() {
 #[test]
 fn short_lived_command_exits_completed() {
     let b = LightrBackend::new(temp_home());
-    let sb = SandboxId("sb".into());
+    let sb = ready_sandbox(&b);
     let id = b.create_container(&sb, cfg("t", vec!["true"])).unwrap();
     b.start_container(&id).unwrap();
 
@@ -136,7 +156,7 @@ fn short_lived_command_exits_completed() {
 #[test]
 fn start_requires_created_state() {
     let b = LightrBackend::new(temp_home());
-    let sb = SandboxId("sb".into());
+    let sb = ready_sandbox(&b);
     let id = b.create_container(&sb, cfg("k", vec![])).unwrap();
     b.start_container(&id).unwrap();
     // Second start from Running ⇒ FailedPrecondition.
@@ -150,7 +170,7 @@ fn start_requires_created_state() {
 #[test]
 fn remove_force_stops_a_running_container() {
     let b = LightrBackend::new(temp_home());
-    let sb = SandboxId("sb".into());
+    let sb = ready_sandbox(&b);
     let id = b.create_container(&sb, cfg("k", vec![])).unwrap();
     b.start_container(&id).unwrap();
     assert_eq!(
@@ -172,8 +192,8 @@ fn state_survives_a_fresh_backend_over_the_same_home() {
     let home = temp_home();
     let id = {
         let b = LightrBackend::new(&home);
-        b.create_container(&SandboxId("sb".into()), cfg("c", vec![]))
-            .unwrap()
+        let sb = ready_sandbox(&b);
+        b.create_container(&sb, cfg("c", vec![])).unwrap()
     };
     // A brand-new backend over the same home rebuilds the cache from disk.
     let b2 = LightrBackend::new(&home);
@@ -186,7 +206,7 @@ fn state_survives_a_fresh_backend_over_the_same_home() {
 #[test]
 fn exec_sync_captures_output_and_exit() {
     let b = LightrBackend::new(temp_home());
-    let sb = SandboxId("sb".into());
+    let sb = ready_sandbox(&b);
     let id = b.create_container(&sb, cfg("k", vec![])).unwrap();
     b.start_container(&id).unwrap();
 
@@ -207,7 +227,7 @@ fn exec_sync_captures_output_and_exit() {
 #[test]
 fn exec_sync_honors_timeout() {
     let b = LightrBackend::new(temp_home());
-    let sb = SandboxId("sb".into());
+    let sb = ready_sandbox(&b);
     let id = b.create_container(&sb, cfg("k", vec![])).unwrap();
     b.start_container(&id).unwrap();
     // sleep 30 with a 1s timeout ⇒ killed ⇒ Internal("exec timeout").
@@ -219,7 +239,7 @@ fn exec_sync_honors_timeout() {
 #[test]
 fn exec_sync_requires_running() {
     let b = LightrBackend::new(temp_home());
-    let sb = SandboxId("sb".into());
+    let sb = ready_sandbox(&b);
     let id = b.create_container(&sb, cfg("k", vec![])).unwrap();
     // Not started ⇒ FailedPrecondition.
     assert!(matches!(
@@ -233,7 +253,7 @@ fn exec_sync_requires_running() {
 #[test]
 fn stats_running_container_is_truthful() {
     let b = LightrBackend::new(temp_home());
-    let sb = SandboxId("sb".into());
+    let sb = ready_sandbox(&b);
     let id = b.create_container(&sb, cfg("k", vec![])).unwrap();
     b.start_container(&id).unwrap();
 
@@ -253,7 +273,7 @@ fn stats_running_container_is_truthful() {
 #[test]
 fn stats_of_unstarted_container_is_zero() {
     let b = LightrBackend::new(temp_home());
-    let sb = SandboxId("sb".into());
+    let sb = ready_sandbox(&b);
     let id = b.create_container(&sb, cfg("k", vec![])).unwrap();
     let s = b.container_stats(&id).unwrap();
     assert_eq!(s.cpu_usage_core_nanos, 0);

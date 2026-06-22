@@ -24,11 +24,13 @@
 pub mod vocab;
 
 // WP-CRI-MVP planes (split by concern, each <400 LOC). The trait impl below
-// delegates to the inherent `_impl` methods defined in these modules. Sandbox
-// + streaming stay fail-closed here (WP-CRI-SANDBOX / WP-CRI-STREAM).
+// delegates to the inherent `_impl` methods defined in these modules. Streaming
+// stays fail-closed here (WP-CRI-STREAM); the sandbox/pod plane is now wired
+// (WP-CRI-SANDBOX).
 mod container;
 mod exec;
 mod images;
+mod sandbox;
 mod stats;
 mod stream;
 // Streaming I/O machinery (io-table, fan-out, fd primitives, waiters) — unix
@@ -169,13 +171,16 @@ impl LightrBackend {
         let home = home.into();
         let _ = std::fs::create_dir_all(home.join("cri").join("containers"));
         let _ = std::fs::create_dir_all(home.join("cri").join("images"));
+        let _ = std::fs::create_dir_all(home.join("cri").join("sandboxes"));
         let backend = Self {
             home,
             cache: std::sync::Arc::new(std::sync::Mutex::new(container::Cache::default())),
             #[cfg(unix)]
             io_table: std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         };
-        let cache = backend.load_container_cache();
+        // Crash-only recovery: rebuild both cache halves from disk on open.
+        let mut cache = backend.load_container_cache();
+        cache.sandboxes = backend.load_sandbox_cache();
         *backend.cache.lock().unwrap() = cache;
         backend
     }
@@ -195,12 +200,9 @@ impl LightrBackend {
         self.home.join("cri").join("images")
     }
 
-    /// The sandbox's CRI `log_directory`, used to absolutize a container's log
-    /// path. Sandbox records are persisted by WP-CRI-SANDBOX; until then no
-    /// sandbox state is on disk, so this returns empty (the relative log_path is
-    /// used as-is — probe-truthful, never invented).
-    pub(crate) fn sandbox_log_dir(&self, _sandbox: &SandboxId) -> String {
-        String::new()
+    /// Directory holding per-sandbox CRI record sidecars.
+    pub(crate) fn sandboxes_dir(&self) -> PathBuf {
+        self.home.join("cri").join("sandboxes")
     }
 }
 
@@ -212,21 +214,21 @@ fn not_yet(method: &str, wp: &str) -> BackendError {
 }
 
 impl CriBackend for LightrBackend {
-    // sandbox plane — WP-CRI-SANDBOX
-    fn run_sandbox(&self, _cfg: SandboxConfig) -> Result<SandboxId> {
-        Err(not_yet("run_sandbox", "WP-CRI-SANDBOX"))
+    // sandbox plane — WP-CRI-SANDBOX (wired: state machine + cfg(linux) netns/CNI)
+    fn run_sandbox(&self, cfg: SandboxConfig) -> Result<SandboxId> {
+        self.run_sandbox_impl(cfg)
     }
-    fn stop_sandbox(&self, _id: &SandboxId) -> Result<()> {
-        Err(not_yet("stop_sandbox", "WP-CRI-SANDBOX"))
+    fn stop_sandbox(&self, id: &SandboxId) -> Result<()> {
+        self.stop_sandbox_impl(id)
     }
-    fn remove_sandbox(&self, _id: &SandboxId) -> Result<()> {
-        Err(not_yet("remove_sandbox", "WP-CRI-SANDBOX"))
+    fn remove_sandbox(&self, id: &SandboxId) -> Result<()> {
+        self.remove_sandbox_impl(id)
     }
-    fn sandbox_status(&self, _id: &SandboxId) -> Result<SandboxStatus> {
-        Err(not_yet("sandbox_status", "WP-CRI-SANDBOX"))
+    fn sandbox_status(&self, id: &SandboxId) -> Result<SandboxStatus> {
+        self.sandbox_status_impl(id)
     }
-    fn list_sandboxes(&self, _filter: &SandboxFilter) -> Result<Vec<SandboxStatus>> {
-        Err(not_yet("list_sandboxes", "WP-CRI-SANDBOX"))
+    fn list_sandboxes(&self, filter: &SandboxFilter) -> Result<Vec<SandboxStatus>> {
+        self.list_sandboxes_impl(filter)
     }
 
     // container plane — WP-CRI-MVP (wired to the engine via inherent methods)
@@ -282,13 +284,18 @@ impl CriBackend for LightrBackend {
         self.image_fs_info_impl()
     }
 
+    // network_ready — WP-CRI-SANDBOX. Overrides the trait default (false) to
+    // reflect REAL CNI state (probe-truthful, contract §D): true iff CNI is
+    // wired+available, which on macOS / unprivileged is false (host-network).
+    fn network_ready(&self) -> bool {
+        self.network_ready_impl()
+    }
+
     // v1.1 streaming — WP-CRI-STREAM. Wired to the inherent impls in `stream`:
     // open_exec spawns `cmd` (piped or pty stdio) and returns a real waiter;
     // open_attach registers a fan-out sink (or dups the pty master) against the
-    // running container's live stdio held by `start_container`. unix-only (the
-    // impls fail closed honestly on non-unix). `pull_image_with_auth` keeps the
-    // trait default (delegates to pull_image), and `network_ready` keeps the
-    // trait default (false = probe-truthful: this skeleton wires no CNI).
+    // running container's live stdio held by `start_container`. unix-only (fail
+    // closed on non-unix). `pull_image_with_auth` keeps the trait default.
     fn open_exec(
         &self,
         id: &ContainerId,
@@ -329,34 +336,31 @@ mod tests {
         assert!(home.join("cri").join("containers").is_dir());
     }
 
-    /// Sandbox plane is the NEXT WP — it fails closed with an honest,
-    /// WP-attributed error and NEVER panics. Streaming is now WIRED
-    /// (WP-CRI-STREAM): open_exec on a missing container fails closed with a
-    /// faithful `NotFound` (not the old generic skeleton error) and never panics.
+    /// Both planes are now WIRED: run_sandbox creates a Ready sandbox (on macOS
+    /// no CNI → ip=None, probe-truthful); streaming (WP-CRI-STREAM) fails closed
+    /// with a faithful `NotFound` on a missing container and never panics.
     #[test]
-    fn sandbox_fail_closed_streaming_wired() {
+    fn sandbox_runs_and_streaming_fails_closed() {
         let b = LightrBackend::new(temp_home());
-        let e = b.run_sandbox(SandboxConfig {
-            name: "s".into(),
-            uid: "u".into(),
-            namespace: "ns".into(),
-            attempt: 0,
-            labels: Default::default(),
-            annotations: Default::default(),
-            log_directory: String::new(),
-            hostname: String::new(),
-            host_network: false,
-            dns: None,
-            port_mappings: Vec::new(),
-        });
-        match e {
-            Err(BackendError::Internal(m)) => {
-                assert!(m.contains("not yet implemented"), "msg: {m}");
-                assert!(m.contains("run_sandbox"), "msg: {m}");
-                assert!(m.contains("WP-CRI-SANDBOX"), "msg: {m}");
-            }
-            other => panic!("expected fail-closed Internal error, got {other:?}"),
-        }
+        let id = b
+            .run_sandbox(SandboxConfig {
+                name: "s".into(),
+                uid: "u".into(),
+                namespace: "ns".into(),
+                attempt: 0,
+                labels: Default::default(),
+                annotations: Default::default(),
+                log_directory: String::new(),
+                hostname: String::new(),
+                host_network: false,
+                dns: None,
+                port_mappings: Vec::new(),
+            })
+            .expect("run_sandbox succeeds");
+        let st = b.sandbox_status(&id).unwrap();
+        assert_eq!(st.state, SandboxState::Ready);
+        // macOS gate: no CNI → no pod IP (probe-truthful).
+        assert!(st.ip.is_none());
         // Streaming is wired: a missing container fails closed with NotFound
         // (the seam never panics), and open_attach on the same id likewise.
         assert!(matches!(
