@@ -5,17 +5,54 @@
 
 use std::path::PathBuf;
 
-/// A published-port mapping: `host` (on 127.0.0.1) → `container` (on 127.0.0.1
-/// where the run's server listens). TCP only in v1 (Networking Phase 1).
+/// A published-port mapping: `host` (on `host_ip`) → `container` (on 127.0.0.1
+/// where the run's server listens, or the guest IP for a vz container). TCP
+/// only in v1 (Networking Phase 1).
+///
+/// `host_ip` is the interface the forwarder BINDS the host port on (Docker's
+/// `-p HOST_IP:HOST:CONTAINER`). Empty string means the default `0.0.0.0` (all
+/// interfaces) — see [`PortMap::bind_ip`]. It is kept as an empty-able `String`
+/// (rather than a parsed `IpAddr`) for two reasons: (1) `Default`/`Copy` stay
+/// trivial for the many `PortMap { host, container, .. }` construction sites,
+/// and (2) the bind site re-validates anyway. The CLI parser
+/// (`flags_publish::parse_publish_spec`) already validates the IP grammar, so an
+/// invalid string never reaches here on the user path.
 ///
 /// Ports are a **runtime** parameter, NOT a memo-key input — exactly like
 /// resource limits, and exactly like Docker, which does not key on `-p`. They
 /// never enter `build_key`/`assemble_key` (see the `ports_excluded_from_key`
 /// test).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PortMap {
     pub host: u16,
     pub container: u16,
+    /// The host interface to bind the published port on. Empty ⇒ `0.0.0.0`
+    /// (all interfaces, the default). A non-empty value is an IP literal
+    /// (`127.0.0.1`, `::1`) validated upstream by the CLI parser.
+    pub host_ip: String,
+}
+
+impl PortMap {
+    /// Construct a `PortMap` binding the default host interface (`0.0.0.0`).
+    /// Convenience for the common `host:container` (no explicit host-ip) case.
+    pub fn new(host: u16, container: u16) -> Self {
+        PortMap {
+            host,
+            container,
+            host_ip: String::new(),
+        }
+    }
+
+    /// The concrete interface the forwarder binds on: the configured `host_ip`,
+    /// or `0.0.0.0` when empty (the default — all interfaces). Centralizes the
+    /// empty-means-default rule so every bind site stays consistent.
+    pub fn bind_ip(&self) -> &str {
+        if self.host_ip.is_empty() {
+            "0.0.0.0"
+        } else {
+            &self.host_ip
+        }
+    }
 }
 
 #[derive(Default)]
@@ -253,9 +290,9 @@ pub enum LogStream {
 #[path = "specdisk.rs"]
 mod specdisk;
 // Only the types referenced through `types::` by sibling `run` modules are
-// re-exported. `MountOnDisk2`/`PortOnDisk`/`default_engine`/`default_proto` are
-// used solely inside `specdisk.rs` (by `SpecOnDisk`'s fields + serde defaults).
-pub(super) use specdisk::{MountOnDisk, MountOnDisk2, SpecOnDisk};
+// re-exported. WP-B2 adds `PortOnDisk`/`default_proto`: `spawn.rs` writes the
+// go-forward host-ip-tagged `ports2` channel and the supervisors read it back.
+pub(super) use specdisk::{default_proto, MountOnDisk, MountOnDisk2, PortOnDisk, SpecOnDisk};
 
 /// WP-RUNFLAGS: lower a `RunSpec`'s `-v/--volume` host binds + `--tmpfs` dirs
 /// into the persisted, tagged `mounts2` shape so the detached supervisor reads

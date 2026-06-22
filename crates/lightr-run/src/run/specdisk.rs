@@ -61,6 +61,12 @@ pub(crate) struct PortOnDisk {
     /// `"tcp"` (default) or `"udp"`.
     #[serde(default = "default_proto")]
     pub proto: String,
+    /// WP-B2: the host interface the published port binds on (Docker
+    /// `-p HOST_IP:H:C`). `#[serde(default)]` ⇒ empty for spec.json written
+    /// before this field existed (and for the default-interface case), which the
+    /// supervisor maps to `0.0.0.0` via [`crate::run::types::PortMap::bind_ip`].
+    #[serde(default)]
+    pub host_ip: String,
 }
 
 /// Serde default for [`PortOnDisk::proto`] — TCP, matching the legacy
@@ -191,6 +197,30 @@ pub fn default_engine() -> String {
     "native".to_string()
 }
 
+impl SpecOnDisk {
+    /// WP-B2: the published ports to forward, as `(host_ip, host_port,
+    /// container_port)`, with the host interface resolved. PREFERS the go-forward
+    /// `ports2` channel (carries `host_ip`); falls back to the legacy
+    /// `ports: Vec<(u16,u16)>` (host_ip empty ⇒ `0.0.0.0`) for spec.json written
+    /// before `ports2` existed. UDP entries in `ports2` are skipped (Phase-1 is
+    /// tcp-only). Centralizes the channel-precedence + default so both supervisors
+    /// (native + vz) bind identically.
+    pub(crate) fn published_ports(&self) -> Vec<(String, u16, u16)> {
+        if !self.ports2.is_empty() {
+            self.ports2
+                .iter()
+                .filter(|p| p.proto != "udp")
+                .map(|p| (p.host_ip.clone(), p.host, p.container))
+                .collect()
+        } else {
+            self.ports
+                .iter()
+                .map(|&(host, container)| (String::new(), host, container))
+                .collect()
+        }
+    }
+}
+
 // R-SPECDISK (parity-contract.md §0): a manual `Default` whose field values
 // MATCH the serde defaults exactly (notably `engine = "native"`, NOT the empty
 // string a derive would give). This lets every existing `SpecOnDisk { … }`
@@ -239,5 +269,89 @@ impl Default for SpecOnDisk {
             mem_limit_bytes: None,
             cpu_limit_millis: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WP-B2: `published_ports` PREFERS the host-ip-tagged `ports2` channel, and
+    /// each tuple carries the requested host_ip through to the supervisor's bind.
+    #[test]
+    fn published_ports_prefers_ports2_with_host_ip() {
+        let spec = SpecOnDisk {
+            // Legacy channel says 0.0.0.0; ports2 must WIN with the loopback bind.
+            ports: vec![(1111, 2222)],
+            ports2: vec![PortOnDisk {
+                host: 8080,
+                container: 80,
+                proto: "tcp".to_string(),
+                host_ip: "127.0.0.1".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            spec.published_ports(),
+            vec![("127.0.0.1".to_string(), 8080, 80)]
+        );
+    }
+
+    /// A `ports2` UDP entry is skipped (Phase-1 is tcp-only) so the supervisor
+    /// never tries to TCP-bind a UDP publish.
+    #[test]
+    fn published_ports_skips_udp_in_ports2() {
+        let spec = SpecOnDisk {
+            ports2: vec![
+                PortOnDisk {
+                    host: 80,
+                    container: 80,
+                    proto: "tcp".to_string(),
+                    host_ip: String::new(),
+                },
+                PortOnDisk {
+                    host: 53,
+                    container: 53,
+                    proto: "udp".to_string(),
+                    host_ip: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(spec.published_ports(), vec![(String::new(), 80, 80)]);
+    }
+
+    /// Back-compat: a spec.json written before `ports2` existed (only the legacy
+    /// `ports` tuples) still publishes — with the default (empty ⇒ 0.0.0.0) bind.
+    #[test]
+    fn published_ports_falls_back_to_legacy_tuples() {
+        let spec = SpecOnDisk {
+            ports: vec![(8080, 80), (9090, 90)],
+            ..Default::default()
+        };
+        assert_eq!(
+            spec.published_ports(),
+            vec![(String::new(), 8080, 80), (String::new(), 9090, 90)]
+        );
+    }
+
+    /// `PortOnDisk` round-trips host_ip through serde, and an OLD spec.json with no
+    /// `host_ip` key deserializes to the empty default (no break on read).
+    #[test]
+    fn port_on_disk_host_ip_serde_back_compat() {
+        let p = PortOnDisk {
+            host: 8080,
+            container: 80,
+            proto: "tcp".to_string(),
+            host_ip: "127.0.0.1".to_string(),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: PortOnDisk = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.host_ip, "127.0.0.1");
+
+        // Pre-WP-B2 shape: no host_ip field present ⇒ serde default "".
+        let old = r#"{"host":8080,"container":80,"proto":"tcp"}"#;
+        let parsed: PortOnDisk = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.host_ip, "");
     }
 }

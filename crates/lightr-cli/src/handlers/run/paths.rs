@@ -19,7 +19,7 @@ use lightr_store::Store;
 
 use crate::exit::die_lightr;
 
-use super::{parse_publish, RcConfig, RunJson};
+use super::{RcConfig, RunJson};
 
 // The vz-memo path helper lives in `paths_vz.rs`, pulled in as a child module
 // via `#[path]` to keep this file under the 400-line godfile cap, and re-exported
@@ -246,11 +246,15 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
 
     // Parse published ports (Phase 1). Policy above already guaranteed this is
     // the native detached path when `publish_raw` is non-empty. Empty ⇒ no-op,
-    // so the non-published path is byte-identical to before.
+    // so the non-published path is byte-identical to before. WP-B2: consume the
+    // range-aware, host-ip-carrying parser so `-p 8000-8002:8000-8002` yields 3
+    // PortMaps and `-p 127.0.0.1:H:C` binds loopback. (`-P/--publish-all` has no
+    // EXPOSE source on the native path — no rootfs image — so it is a no-op here;
+    // it auto-publishes only on the rootfs-bearing vz container path.)
     let mut ports: Vec<PortMap> = Vec::new();
     for raw in publish_raw {
-        match parse_publish(raw) {
-            Ok(p) => ports.push(p),
+        match super::flags::publish::parse_publish_spec(raw) {
+            Ok(mut maps) => ports.append(&mut maps),
             Err(code) => return code,
         }
     }

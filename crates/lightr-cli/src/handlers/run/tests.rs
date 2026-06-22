@@ -55,6 +55,7 @@ fn publish_without_detach_exits_2() {
         false, // explain
         false, // detach  ← NOT detached
         &["39000:39001".to_string()],
+        false, // publish_all (WP-B2)
         &[],
         "native",
         None,
@@ -89,6 +90,7 @@ fn publish_on_engine_path_exits_2() {
         false,
         true, // detach
         &["39000:39001".to_string()],
+        false, // publish_all (WP-B2)
         &[],
         "vz", // engine path ⇒ Phase 2
         None,
@@ -142,6 +144,7 @@ fn dash_e_runs_not_stubbed() {
         false, // explain
         false, // detach
         &[],   // publish
+        false, // publish_all (WP-B2)
         &[],   // mounts
         "native",
         None,                     // rootfs
@@ -201,6 +204,7 @@ fn dash_w_runs_not_stubbed_and_honored() {
         false, // explain
         false, // detach
         &[],   // publish
+        false, // publish_all (WP-B2)
         &[],   // mounts
         "native",
         None,           // rootfs
@@ -282,6 +286,7 @@ fn dash_u_current_uid_runs_not_stubbed() {
         false, // explain
         false, // detach
         &[],   // publish
+        false, // publish_all (WP-B2)
         &[],   // mounts
         "native",
         None,       // rootfs
@@ -335,6 +340,7 @@ fn stop_signal_runs_not_stubbed() {
         false, // explain
         false, // detach
         &[],   // publish
+        false, // publish_all (WP-B2)
         &[],   // mounts
         "native",
         None,           // rootfs

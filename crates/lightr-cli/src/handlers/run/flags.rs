@@ -67,9 +67,11 @@ pub(crate) fn parse_store_file(raw: &str, kind: &str) -> Result<StoreFile, i32> 
 
 #[path = "flags_publish.rs"]
 pub(crate) mod publish;
-// Only `parse_publish` is consumed by the (non-owned) run-path call sites; the
-// range-aware `parse_publish_spec` and the `-P` `synth_publish_all` builder are
-// reached via `publish::…` (tests today, the non-owned `-P`/range wiring next).
+// WP-B2: the run path now consumes the range-aware `parse_publish_spec` and the
+// `-P` `synth_publish_all` builder directly via `publish::…`. The single-port
+// `parse_publish` wrapper is retained for its single-vs-range contract test only,
+// so its re-export is `#[cfg(test)]` (no unused-import warning in the binary).
+#[cfg(test)]
 pub(crate) use publish::parse_publish;
 
 /// Parse a raw `--label`/`-l` value `KEY=VAL` into a `(key, value)` pair

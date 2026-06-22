@@ -83,7 +83,22 @@ pub fn spawn_detached_engine(
             .collect(),
         detached: true,
         created_at_unix,
+        // Legacy TCP-only `(host, container)` channel — kept for read back-compat
+        // (old `lightr` builds + tools that only know this shape). DROPS host_ip.
         ports: spec.ports.iter().map(|p| (p.host, p.container)).collect(),
+        // WP-B2: go-forward proto+host-ip-tagged channel. The supervisor PREFERS
+        // this when present so the published port binds the requested host_ip
+        // (Docker `-p HOST_IP:H:C`); empty `host_ip` ⇒ `0.0.0.0` (the default).
+        ports2: spec
+            .ports
+            .iter()
+            .map(|p| super::types::PortOnDisk {
+                host: p.host,
+                container: p.container,
+                proto: super::types::default_proto(),
+                host_ip: p.host_ip.clone(),
+            })
+            .collect(),
         engine: engine.as_str().to_string(),
         rootfs_ref: rootfs_ref.map(|s| s.to_string()),
         env: env.to_vec(),
@@ -157,9 +172,9 @@ pub fn spawn_detached_engine(
         rm: spec.rm,
         entrypoint: spec.entrypoint.clone(),
         mounts2: super::types::mounts2_from_runspec(spec),
-        // R-SPECDISK freeze-gate fields not owned by the RC seam: defaults until
-        // the Wave-A/B WPs populate them (no behaviour change here).
-        ..Default::default()
+        // WP-B2: with `ports2` now populated above, every `SpecOnDisk` field is
+        // set explicitly here — the prior `..Default::default()` (which only
+        // covered `ports2`) is gone (clippy::needless_update). Behaviour unchanged.
     };
     write_spec_json(&dir, &spec_on_disk)?;
 
