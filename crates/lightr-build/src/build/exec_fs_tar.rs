@@ -1,9 +1,15 @@
-//! ADD tar auto-extract (WP-DF-07): archive classification + extraction.
+//! ADD tar auto-extract (WP-DF-07, completed by WP-G): archive classification +
+//! extraction.
 //!
 //! Split from `exec_fs.rs` (godfile cap) and scoped to the ADD-specific feature.
-//! `.tar`/`.tar.gz` are extracted in-process via the existing `tar`+`flate2`
-//! workspace deps; `.tar.bz2`/`.tar.xz` are honestly deferred (no decompressor
-//! dep, and WP-DF-07 forbids adding one) — fail-closed, never a silent copy.
+//! ALL four Docker-recognized local tar archives extract in-process via a `Read`
+//! decoder feeding `tar::Archive`, one decoder per compression family:
+//!   `.tar`            -> raw file              (no decoder)
+//!   `.tar.gz`/`.tgz`  -> `flate2::read::GzDecoder`
+//!   `.tar.bz2`/`.tbz2`-> `bzip2::read::BzDecoder`   (WP-G)
+//!   `.tar.xz`/`.txz`  -> `xz2::read::XzDecoder`     (WP-G)
+//! Every family fails CLOSED on a malformed stream (the decoder surfaces an IO
+//! error through `unpack`), never a silent copy.
 // Declared as a `#[path]` submodule of `exec_fs` (see exec_fs.rs), so `super`
 // is the `exec_fs` module — `CopyMeta`/`apply_meta` live there.
 use super::{apply_meta, CopyMeta};
@@ -13,8 +19,8 @@ use std::path::Path;
 /// Recognized LOCAL archive kinds for ADD's auto-extract (Docker semantics:
 /// ADD of a local archive EXTRACTS it into dest rather than copying the file).
 ///
-/// `Tar` (uncompressed) and `TarGz` (gzip) are handled in-process. `TarBz2`/
-/// `TarXz` are RECOGNIZED but honestly deferred (no bzip2/xz dep).
+/// All four kinds are handled in-process (WP-G wired bzip2/xz decoders); the
+/// classification is purely suffix-driven and shared with the memo key path.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ArchiveKind {
     Tar,
@@ -47,8 +53,9 @@ pub(crate) fn archive_kind(path: &Path) -> Option<ArchiveKind> {
 /// recursively to the extracted tree AFTER unpacking, mirroring COPY's per-entry
 /// flag application — so an ADD with flags keys+behaves like the COPY equivalent.
 ///
-/// `.tar` and `.tar.gz`/`.tgz` extract via `tar`(+`flate2`). `.tar.bz2`/`.tar.xz`
-/// are HONESTLY DEFERRED — a fail-closed error, never a silent copy.
+/// Each kind picks its decompressor and unpacks through the shared `unpack_tar`:
+/// `.tar` raw, `.tar.gz` via `flate2`, `.tar.bz2` via `bzip2`, `.tar.xz` via
+/// `xz2` (WP-G). A corrupt stream fails closed through the decoder's IO error.
 pub(crate) fn extract_archive(
     src: &Path,
     dest: &Path,
@@ -63,16 +70,13 @@ pub(crate) fn extract_archive(
             let gz = flate2::read::GzDecoder::new(file);
             unpack_tar(tar::Archive::new(gz), dest)?;
         }
-        ArchiveKind::TarBz2 | ArchiveKind::TarXz => {
-            let fmt = if kind == ArchiveKind::TarBz2 {
-                "bzip2 (.tar.bz2)"
-            } else {
-                "xz (.tar.xz)"
-            };
-            return Err(LightrError::InvalidManifest(format!(
-                "ADD auto-extract of {fmt} is unsupported (no decompressor vendored); \
-                 re-pack as .tar or .tar.gz, or COPY the archive and decompress in a RUN step"
-            )));
+        ArchiveKind::TarBz2 => {
+            let bz = bzip2::read::BzDecoder::new(file);
+            unpack_tar(tar::Archive::new(bz), dest)?;
+        }
+        ArchiveKind::TarXz => {
+            let xz = xz2::read::XzDecoder::new(file);
+            unpack_tar(tar::Archive::new(xz), dest)?;
         }
     }
     // Apply --chown/--chmod recursively to the extracted tree (mirrors COPY's
@@ -105,4 +109,84 @@ fn apply_meta_recursive(root: &Path, meta: &CopyMeta) -> Result<()> {
         apply_meta(&p, meta)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Build a single-entry tar (`hello.txt` = `payload`) into a `Vec<u8>`.
+    fn make_tar(payload: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "hello.txt", payload)
+            .unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    /// Write `bytes` to `dir/<name>` and return the path (a fixture archive).
+    fn write_fixture(dir: &Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    /// Round-trip: classify by suffix, extract, assert `hello.txt` content.
+    fn assert_extracts(name: &str, archive_bytes: &[u8], expect: &[u8]) {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = write_fixture(tmp.path(), name, archive_bytes);
+        let kind = archive_kind(&src).unwrap_or_else(|| panic!("{name} not classified"));
+        let dest = tmp.path().join("out");
+        extract_archive(&src, &dest, kind, &CopyMeta::default()).unwrap();
+        let got = std::fs::read(dest.join("hello.txt")).unwrap();
+        assert_eq!(got, expect, "extracted content mismatch for {name}");
+    }
+
+    #[test]
+    fn tar_plain_extracts() {
+        let tar = make_tar(b"plain-payload");
+        assert_extracts("a.tar", &tar, b"plain-payload");
+    }
+
+    #[test]
+    fn tar_gz_extracts() {
+        let tar = make_tar(b"gz-payload");
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&tar).unwrap();
+        let gz = enc.finish().unwrap();
+        assert_extracts("a.tar.gz", &gz, b"gz-payload");
+    }
+
+    #[test]
+    fn tar_bz2_extracts() {
+        let tar = make_tar(b"bz2-payload");
+        let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        enc.write_all(&tar).unwrap();
+        let bz = enc.finish().unwrap();
+        assert_extracts("a.tar.bz2", &bz, b"bz2-payload");
+    }
+
+    #[test]
+    fn tar_xz_extracts() {
+        let tar = make_tar(b"xz-payload");
+        let mut enc = xz2::write::XzEncoder::new(Vec::new(), 6);
+        enc.write_all(&tar).unwrap();
+        let xz = enc.finish().unwrap();
+        assert_extracts("a.tar.xz", &xz, b"xz-payload");
+    }
+
+    #[test]
+    fn corrupt_compressed_stream_fails_closed() {
+        // Bytes that are NOT a valid xz stream must error, never silently no-op.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = write_fixture(tmp.path(), "bad.tar.xz", b"not-an-xz-stream");
+        let kind = archive_kind(&src).unwrap();
+        let dest = tmp.path().join("out");
+        assert!(extract_archive(&src, &dest, kind, &CopyMeta::default()).is_err());
+    }
 }
