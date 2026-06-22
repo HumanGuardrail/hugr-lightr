@@ -105,6 +105,8 @@ fn lower_service(name: String, mut def: ServiceDef, base_dir: Option<&Path>) -> 
     lower_stubs::lower_working_dir(&def, &mut svc);
     lower_stubs::lower_user(&def, &mut svc);
     lower_stubs::lower_entrypoint(&def, &mut svc);
+    lower_stubs::lower_hostname(&def, &mut svc);
+    lower_stubs::lower_stdin_open(&def, &mut svc);
     lower_stubs::lower_profiles(&def, &mut svc);
 
     Ok(svc)
@@ -371,3 +373,10 @@ fn value_to_str(v: &serde_yaml::Value) -> String {
 #[cfg(test)]
 #[path = "lower_tests.rs"]
 mod tests;
+
+// WP-A: per-key lowering tests live in their own file (godfile headroom —
+// `lower_tests.rs` sat near the 400-LOC ceiling). House convention — see the
+// `*_tests.rs` sibling-file split elsewhere in this module.
+#[cfg(test)]
+#[path = "lower_wpa_tests.rs"]
+mod wpa_tests;

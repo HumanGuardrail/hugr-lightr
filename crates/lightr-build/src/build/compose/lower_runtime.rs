@@ -37,10 +37,37 @@ pub(super) fn lower_restart(def: &ServiceDef, svc: &mut Service) {
     svc.restart = def.restart.clone();
 }
 
-/// `stop_signal`: the signal used to stop the container. Stub — teardown sends
-/// the default signal today.
-pub(super) fn lower_stop_signal(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.stop_signal;
+/// `stop_signal`: the signal used to stop the container (e.g. `SIGTERM`).
+///
+/// WP-A: copies the compose `stop_signal:` string verbatim onto `svc.stop_signal`;
+/// the supervisor threads it into `RunSpec.stop_signal`, sent by `lightr stop`
+/// (and the restart-stop path) before the SIGKILL fallback. Absent ⇒ `None` ⇒
+/// SIGTERM (today's behavior). The signal STRING is transcribed as-is; its
+/// parsing (numeric or portable name) is the run side's law.
+pub(super) fn lower_stop_signal(def: &ServiceDef, svc: &mut Service) {
+    svc.stop_signal = def.stop_signal.clone();
+}
+
+/// `hostname`: the container's own hostname.
+///
+/// WP-A: copies the compose `hostname:` string verbatim onto `svc.hostname`; the
+/// supervisor threads it into `RunSpec.hostname` (the RC-SEAM field that already
+/// exists on the run side). Absent ⇒ `None` ⇒ no explicit hostname (today's
+/// behavior).
+pub(super) fn lower_hostname(def: &ServiceDef, svc: &mut Service) {
+    svc.hostname = def.hostname.clone();
+}
+
+/// `stdin_open`: the compose form of `-i` (keep STDIN open).
+///
+/// WP-A: LOWERED-TO-NOOP (run-side gap). The `RunSpec` carries no
+/// interactive/keep-stdin slot, and the detached compose spawn path nulls the
+/// child's stdin (`Stdio::null`) — so there is nothing to lower onto without
+/// widening a non-owned surface (`RunSpec` lives in `lightr-run`). Kept an honest
+/// no-op (nulled stdin is today's behavior, behavior-preserving); the `_` binding
+/// documents the intentionally-unconsumed source field.
+pub(super) fn lower_stdin_open(def: &ServiceDef, _svc: &mut Service) {
+    let _ = &def.stdin_open; // run side: RunSpec lacks an interactive/stdin slot
 }
 
 /// `init`: run a PID-1 reaper inside the container.

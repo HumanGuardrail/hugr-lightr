@@ -11,7 +11,7 @@
 //! facade and the stub-filling convention; the `_` bindings document an
 //! intentionally-unconsumed source field (no `#[allow(unused)]`, no debt).
 use super::model::Service;
-use super::spec::{ServiceDef, ServiceFileRef, ServiceFileRefLong};
+use super::spec::{ServiceDef, ServiceFileRef, ServiceFileRefLong, StringOrList};
 use indexmap::IndexMap;
 use serde_yaml::Value;
 
@@ -145,17 +145,30 @@ fn lower_long(l: &ServiceFileRefLong, kind: &str) -> Option<(String, String)> {
     Some((name.to_string(), source.to_string()))
 }
 
-/// `stop_grace_period`: graceful-stop window before SIGKILL. Stub — the
-/// teardown path uses a fixed grace today.
+/// `stop_grace_period`: graceful-stop window before SIGKILL.
+///
+/// WP-A: LOWERED-TO-NOOP (run-side gap). The compose teardown/`lightr stop` path
+/// uses a FIXED grace window and the run-side `RunSpec` carries no stop-grace
+/// slot — so there is nothing to lower onto without widening a non-owned surface
+/// (`RunSpec` lives in `lightr-run`). Kept an honest no-op (the fixed grace is
+/// today's behavior, behavior-preserving); the `_` binding documents the
+/// intentionally-unconsumed source field.
 pub(super) fn lower_stop_grace_period(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.stop_grace_period;
+    let _ = &def.stop_grace_period; // run side: RunSpec lacks a stop-grace slot
 }
 
-/// `entrypoint`: override the image entrypoint. Stub — only `command` is lowered
-/// today (`lower_command` in `lower.rs`); the runtime `Service` has no separate
-/// entrypoint slot yet.
-pub(super) fn lower_entrypoint(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.entrypoint;
+/// `entrypoint`: override the image entrypoint.
+///
+/// WP-A: lowers the compose `entrypoint` onto `svc.entrypoint`; the supervisor
+/// threads it into `RunSpec.entrypoint`, which prepends it to `command` at exec
+/// (Docker semantics). Mirrors `lower_command` (`lower.rs`): an EXEC-form list
+/// is taken as argv as-is; a SHELL string becomes `["/bin/sh", "-c", <str>]`.
+/// Absent ⇒ `None` ⇒ no override (today's behavior).
+pub(super) fn lower_entrypoint(def: &ServiceDef, svc: &mut Service) {
+    svc.entrypoint = def.entrypoint.as_ref().map(|e| match e {
+        StringOrList::String(s) => vec!["/bin/sh".to_string(), "-c".to_string(), s.clone()],
+        StringOrList::List(v) => v.clone(),
+    });
 }
 
 #[cfg(test)]

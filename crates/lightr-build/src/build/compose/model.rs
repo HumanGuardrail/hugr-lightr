@@ -126,6 +126,23 @@ pub struct Service {
     /// at the supervisor's spawn site, matching Docker's per-project network
     /// namespacing — so it is held UN-prefixed here (the lowering has no project).
     pub networks: Vec<(String, Vec<String>)>,
+    /// WP-A: compose `entrypoint`, lowered into `RunSpec.entrypoint` (override the
+    /// image entrypoint; the run side prepends it to `command`). `None` (absent)
+    /// ⇒ no override (today's behavior). Exec-form list as-is; a shell string
+    /// becomes `["/bin/sh", "-c", <str>]` (mirrors `lower_command`).
+    pub entrypoint: Option<Vec<String>>,
+    /// WP-A: compose `extra_hosts`, lowered into `RunSpec.add_host` as raw
+    /// `"host:ip"` strings. Empty (absent) ⇒ no extra `/etc/hosts` entries
+    /// (today's behavior).
+    pub extra_hosts: Vec<String>,
+    /// WP-A: compose `stop_signal`, lowered into `RunSpec.stop_signal` (the signal
+    /// `lightr stop` sends before SIGKILL). `None` (absent) ⇒ SIGTERM (today's
+    /// behavior). The signal STRING is transcribed as-is; its parsing is the run
+    /// side's law.
+    pub stop_signal: Option<String>,
+    /// WP-A: compose `hostname`, lowered into `RunSpec.hostname`. `None` (absent)
+    /// ⇒ the run derives no explicit hostname (today's behavior).
+    pub hostname: Option<String>,
 }
 
 pub struct Compose {
@@ -251,6 +268,20 @@ pub struct ServiceSpec {
     /// empty ⇒ native, byte-identical.
     #[serde(default)]
     pub networks: Vec<(String, Vec<String>)>,
+    /// WP-A: compose `entrypoint` → `RunSpec.entrypoint`. `#[serde(default)]` keeps
+    /// pre-existing stack specs (no field) loading as `None`.
+    #[serde(default)]
+    pub entrypoint: Option<Vec<String>>,
+    /// WP-A: compose `extra_hosts` → `RunSpec.add_host` (`"host:ip"` strings).
+    /// serde-default = empty.
+    #[serde(default)]
+    pub extra_hosts: Vec<String>,
+    /// WP-A: compose `stop_signal` → `RunSpec.stop_signal`. serde-default = None.
+    #[serde(default)]
+    pub stop_signal: Option<String>,
+    /// WP-A: compose `hostname` → `RunSpec.hostname`. serde-default = None.
+    #[serde(default)]
+    pub hostname: Option<String>,
 }
 
 pub struct ComposeHandle {
@@ -285,6 +316,10 @@ pub(crate) fn empty_service(name: String) -> Service {
         cap_drop: Vec::new(),
         container_name: None,
         networks: Vec::new(),
+        entrypoint: None,
+        extra_hosts: Vec::new(),
+        stop_signal: None,
+        hostname: None,
     }
 }
 
