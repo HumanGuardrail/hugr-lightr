@@ -30,6 +30,11 @@ mod container;
 mod exec;
 mod images;
 mod stats;
+mod stream;
+// Streaming I/O machinery (io-table, fan-out, fd primitives, waiters) — unix
+// only (pty/pipes/signals are unix concepts; the plane fails closed elsewhere).
+#[cfg(unix)]
+mod stream_io;
 mod util;
 
 // Re-export the whole seam vocabulary at the crate root (house convention: a
@@ -140,6 +145,17 @@ pub struct LightrBackend {
     /// (crash-only law). The disk under `<home>/cri/containers/` is the source
     /// of truth; a restarted backend re-derives state from it (ADR-0017).
     cache: std::sync::Arc<std::sync::Mutex<container::Cache>>,
+    /// Side-table of LIVE stdio held by `start_container` for the streaming
+    /// plane (WP-CRI-STREAM `open_attach`): pty master or fan-out + pipe handles
+    /// keyed by container id. NOT persisted — the fds are valid only in this
+    /// process (attach is unavailable after a restart; `open_attach` surfaces
+    /// that honestly), so it is rebuilt empty on construction. unix-only: pty +
+    /// OS pipes are unix concepts (the windows gate compiles but never runs the
+    /// streaming plane).
+    #[cfg(unix)]
+    pub(crate) io_table: std::sync::Arc<
+        std::sync::Mutex<std::collections::BTreeMap<String, stream_io::ContainerIo>>,
+    >,
 }
 
 impl LightrBackend {
@@ -156,6 +172,8 @@ impl LightrBackend {
         let backend = Self {
             home,
             cache: std::sync::Arc::new(std::sync::Mutex::new(container::Cache::default())),
+            #[cfg(unix)]
+            io_table: std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         };
         let cache = backend.load_container_cache();
         *backend.cache.lock().unwrap() = cache;
@@ -264,23 +282,24 @@ impl CriBackend for LightrBackend {
         self.image_fs_info_impl()
     }
 
-    // v1.1 streaming — WP-CRI-STREAM. Honest-error OVERRIDES (not the trait
-    // defaults) so the skeleton's failure is attributed to its WP, not the
-    // generic "v1.1 not implemented" default. `pull_image_with_auth` keeps the
-    // trait default (delegates to pull_image, which fails closed above), and
-    // `network_ready` keeps the trait default (false = probe-truthful: this
-    // skeleton wires no CNI).
+    // v1.1 streaming — WP-CRI-STREAM. Wired to the inherent impls in `stream`:
+    // open_exec spawns `cmd` (piped or pty stdio) and returns a real waiter;
+    // open_attach registers a fan-out sink (or dups the pty master) against the
+    // running container's live stdio held by `start_container`. unix-only (the
+    // impls fail closed honestly on non-unix). `pull_image_with_auth` keeps the
+    // trait default (delegates to pull_image), and `network_ready` keeps the
+    // trait default (false = probe-truthful: this skeleton wires no CNI).
     fn open_exec(
         &self,
-        _id: &ContainerId,
-        _cmd: &[String],
-        _tty: bool,
-        _stdin: bool,
+        id: &ContainerId,
+        cmd: &[String],
+        tty: bool,
+        stdin: bool,
     ) -> Result<StreamSession> {
-        Err(not_yet("open_exec", "WP-CRI-STREAM"))
+        self.open_exec_impl(id, cmd, tty, stdin)
     }
-    fn open_attach(&self, _id: &ContainerId) -> Result<StreamSession> {
-        Err(not_yet("open_attach", "WP-CRI-STREAM"))
+    fn open_attach(&self, id: &ContainerId) -> Result<StreamSession> {
+        self.open_attach_impl(id)
     }
 }
 
@@ -310,10 +329,12 @@ mod tests {
         assert!(home.join("cri").join("containers").is_dir());
     }
 
-    /// Sandbox + streaming planes are the NEXT WPs — they fail closed with an
-    /// honest, WP-attributed error and NEVER panic.
+    /// Sandbox plane is the NEXT WP — it fails closed with an honest,
+    /// WP-attributed error and NEVER panics. Streaming is now WIRED
+    /// (WP-CRI-STREAM): open_exec on a missing container fails closed with a
+    /// faithful `NotFound` (not the old generic skeleton error) and never panics.
     #[test]
-    fn sandbox_and_streaming_fail_closed() {
+    fn sandbox_fail_closed_streaming_wired() {
         let b = LightrBackend::new(temp_home());
         let e = b.run_sandbox(SandboxConfig {
             name: "s".into(),
@@ -336,9 +357,15 @@ mod tests {
             }
             other => panic!("expected fail-closed Internal error, got {other:?}"),
         }
+        // Streaming is wired: a missing container fails closed with NotFound
+        // (the seam never panics), and open_attach on the same id likewise.
         assert!(matches!(
-            b.open_exec(&ContainerId("c".into()), &[], false, false),
-            Err(BackendError::Internal(_))
+            b.open_exec(&ContainerId("c".into()), &["true".into()], false, false),
+            Err(BackendError::NotFound(_))
+        ));
+        assert!(matches!(
+            b.open_attach(&ContainerId("c".into())),
+            Err(BackendError::NotFound(_))
         ));
         // probe-truthful: no CNI wired → network not ready.
         assert!(!b.network_ready());
