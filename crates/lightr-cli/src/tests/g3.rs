@@ -204,6 +204,7 @@ fn run_bad_engine_string_rejected_at_handler() {
         false,
         false,
         &[],
+        false, // publish_all (WP-B2)
         &[],
         "bogus",
         None,

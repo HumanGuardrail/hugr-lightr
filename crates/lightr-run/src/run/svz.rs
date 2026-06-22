@@ -236,9 +236,17 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
     // 5. A forwarder per published port → the guest IP. A bind failure is logged
     //    and skipped (a port clash on one publish must not down the whole run),
     //    exactly like the native path. Held until the loop exits, then dropped.
+    // WP-B2: bind each published port on its requested host interface (Docker
+    // `-p HOST_IP:H:C`), preferring the go-forward `ports2` channel; the forward
+    // TARGET is the guest IP (the container's server). Empty host_ip ⇒ `0.0.0.0`.
     let mut forwarders: Vec<crate::portforward::Forwarder> = Vec::new();
-    for &(host_port, container_port) in &spec.ports {
-        match crate::portforward::start_to(host_port, &guest_ip, container_port) {
+    for (host_ip, host_port, container_port) in spec.published_ports() {
+        let bind_ip = if host_ip.is_empty() {
+            "0.0.0.0"
+        } else {
+            host_ip.as_str()
+        };
+        match crate::portforward::start_on(bind_ip, host_port, &guest_ip, container_port) {
             Ok(fwd) => forwarders.push(fwd),
             Err(e) => {
                 if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -248,7 +256,7 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                 {
                     let _ = writeln!(
                         f,
-                        "lightr: publish 127.0.0.1:{host_port} -> {guest_ip}:{container_port} failed: {e}"
+                        "lightr: publish {bind_ip}:{host_port} -> {guest_ip}:{container_port} failed: {e}"
                     );
                 }
             }

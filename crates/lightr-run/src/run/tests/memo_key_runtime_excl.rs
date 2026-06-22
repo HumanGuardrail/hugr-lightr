@@ -19,16 +19,7 @@ fn ports_excluded_from_key() {
     spec_no_ports.ports = vec![];
 
     let mut spec_with_ports = make_spec(cwd, vec!["/bin/echo", "x"]);
-    spec_with_ports.ports = vec![
-        PortMap {
-            host: 8080,
-            container: 80,
-        },
-        PortMap {
-            host: 9090,
-            container: 90,
-        },
-    ];
+    spec_with_ports.ports = vec![PortMap::new(8080, 80), PortMap::new(9090, 90)];
 
     let k1 = build_key(&spec_no_ports).expect("k1");
     let k2 = build_key(&spec_with_ports).expect("k2");

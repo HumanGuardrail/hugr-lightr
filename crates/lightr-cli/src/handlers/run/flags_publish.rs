@@ -48,11 +48,10 @@ fn parse_port_range(s: &str, which: &str, raw: &str) -> Result<Vec<u16>, i32> {
 /// the host-ip is present only when the body has THREE colon-separated fields
 /// (or a bracketed v6 prefix). Mirrors `parse_publish`'s fail-closed style.
 ///
-/// RUNTIME BOUNDARY: the parsed `host_ip` is VALIDATED but not yet carried into
-/// the runtime — `PortMap` (in `lightr-run`, not owned by this WP) has no
-/// `host_ip` field and the port forwarder binds `127.0.0.1` unconditionally
-/// (`lightr-run/src/portforward.rs`). Carrying the IP to the bind site requires
-/// extending `PortMap`, a `lightr-run` change outside this WP's owned files.
+/// WP-B2 closed the runtime boundary: the parsed `host_ip` is now carried into
+/// each `PortMap` (`lightr-run`'s `PortMap` gained a `host_ip` field) and the
+/// port forwarder binds it (`lightr-run/src/portforward.rs::start_on`). The
+/// default `0.0.0.0` is encoded as an empty `PortMap::host_ip`.
 fn split_host_ip(body: &str, raw: &str) -> Result<(std::net::IpAddr, String), i32> {
     use std::net::{IpAddr, Ipv4Addr};
     let default_ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED); // 0.0.0.0
@@ -117,9 +116,19 @@ pub(crate) fn parse_publish_spec(raw: &str) -> Result<Vec<PortMap>, i32> {
         }
     }
 
-    // Peel an optional `HOST_IP:` prefix (validated; runtime-carry is gated —
-    // see split_host_ip), leaving the `HOST:CONTAINER` core.
-    let (_host_ip, core) = split_host_ip(body, raw)?;
+    // Peel an optional `HOST_IP:` prefix (validated), leaving the
+    // `HOST:CONTAINER` core. The host-ip is carried into every expanded
+    // `PortMap` below so the forwarder binds it (WP-B2 closed the runtime gap:
+    // `PortMap` now has a `host_ip` field, honored by `lightr-run`'s forwarder).
+    let (host_ip, core) = split_host_ip(body, raw)?;
+    // The default `0.0.0.0` is encoded as an EMPTY `host_ip` on `PortMap`
+    // (`PortMap::bind_ip` maps empty → `0.0.0.0`), so the no-host-ip path stays
+    // byte-identical to a `PortMap::new(host, container)` build.
+    let host_ip_str = if host_ip == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED) {
+        String::new()
+    } else {
+        host_ip.to_string()
+    };
 
     let colon = core.find(':').ok_or_else(|| {
         eprintln!("lightr: invalid -p/--publish value (expected HOST:CONTAINER): {raw}");
@@ -141,13 +150,21 @@ pub(crate) fn parse_publish_spec(raw: &str) -> Result<Vec<PortMap>, i32> {
     Ok(host_ports
         .into_iter()
         .zip(container_ports)
-        .map(|(host, container)| PortMap { host, container })
+        .map(|(host, container)| PortMap {
+            host,
+            container,
+            host_ip: host_ip_str.clone(),
+        })
         .collect())
 }
 
 /// Backward-compatible single-`PortMap` wrapper over [`parse_publish_spec`] for
 /// callers expecting exactly one mapping per raw value; a multi-port range is
-/// rejected here (range-aware callers use [`parse_publish_spec`] directly).
+/// rejected here. WP-B2 moved the run path onto the range-aware
+/// [`parse_publish_spec`], so this single-port wrapper now has only TEST callers
+/// (its single-vs-range contract is still worth pinning) — hence `#[cfg(test)]`,
+/// which keeps it out of the production binary with no dead-code warning.
+#[cfg(test)]
 pub(crate) fn parse_publish(raw: &str) -> Result<PortMap, i32> {
     let mut maps = parse_publish_spec(raw)?;
     if maps.len() != 1 {
@@ -168,12 +185,11 @@ pub(crate) fn parse_publish(raw: &str) -> Result<PortMap, i32> {
 /// synthesized host == the exposed container port; the actual ephemeral-port
 /// assignment is the forwarder's runtime concern (`lightr-run`, not owned here).
 ///
-/// `allow(dead_code)`: this is the WP-B-provided EXPOSE→spec builder. Its lone
-/// consumer is the `-P/--publish-all` branch in the run path (`mod.rs`/`paths.rs`,
-/// where the image config that holds the EXPOSE list is loaded) — files OUTSIDE
-/// this WP's owned set. Wiring it there is the (non-owned) caller-side follow-up;
-/// the parse→spec contract here is frozen and unit-tested.
-#[allow(dead_code)]
+/// WP-B2: now LIVE. The `-P/--publish-all` branch in the run path (`mod.rs`,
+/// where the OCI image config that holds the EXPOSE list is loaded) calls this
+/// builder, so the `allow(dead_code)` is gone. Each synthesized `PortMap` binds
+/// the default interface (`host_ip` empty ⇒ `0.0.0.0`) — `-P` has no per-port
+/// host-ip grammar.
 pub(crate) fn synth_publish_all(expose: &[String]) -> Vec<PortMap> {
     let mut out = Vec::new();
     for entry in expose {
@@ -186,10 +202,7 @@ pub(crate) fn synth_publish_all(expose: &[String]) -> Vec<PortMap> {
         }
         if let Ok(port) = port_str.parse::<u16>() {
             if (1..=65535).contains(&port) {
-                out.push(PortMap {
-                    host: port,
-                    container: port,
-                });
+                out.push(PortMap::new(port, port));
             }
         }
     }

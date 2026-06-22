@@ -59,6 +59,7 @@ fn run_fg(dir: &str, command: &[String], flags: RawRunFlags) -> i32 {
         false, // explain
         false, // detach
         &[],   // publish
+        false, // publish_all (WP-B2)
         &[],   // mounts
         "native",
         None,  // rootfs
