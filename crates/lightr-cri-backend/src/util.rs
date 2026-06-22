@@ -266,7 +266,9 @@ pub fn signal_or_code(s: &std::process::ExitStatus) -> (i32, String) {
 /// Tee thread: the SINGLE reader of one container stream. Reads raw chunks and
 /// writes one CRI-formatted record per `\n`-terminated line (F tag); a trailing
 /// partial line is flushed as a P record at EOF. Transcribed from the fake's
-/// log path (the attach fan-out is WP-CRI-STREAM, omitted here).
+/// log path. unix uses the fan-out tee in `stream` (which also feeds attachers —
+/// WP-CRI-STREAM); this log-only variant is the non-unix fallback.
+#[cfg(not(unix))]
 pub fn spawn_tee_thread(
     stream: &'static str,
     reader: impl std::io::Read + Send + 'static,
