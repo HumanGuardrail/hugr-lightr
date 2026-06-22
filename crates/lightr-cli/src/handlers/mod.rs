@@ -1,4 +1,5 @@
 //! Verb handler modules.
+pub mod attach;
 pub mod bench;
 pub mod bench_compare;
 pub mod bench_compete_docker;
@@ -6,7 +7,9 @@ pub mod bisect;
 pub mod build;
 pub mod commit;
 pub mod compose;
+pub mod container;
 pub mod cp;
+pub mod create;
 pub mod diff;
 pub mod docker;
 pub mod engine;

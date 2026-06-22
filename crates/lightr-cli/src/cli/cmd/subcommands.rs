@@ -271,6 +271,21 @@ pub enum SystemCmd {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// ContainerCmd sub-enum (WP-D — docker `container` maintenance verbs)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum ContainerCmd {
+    /// Remove all stopped containers (docker container prune). Without -f, a dry
+    /// run that prints what WOULD be removed; with -f, removes each stopped run.
+    Prune {
+        /// Do not prompt for confirmation (docker -f/--force)
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // SuperviseCmd sub-enum (F-308 — OS-supervisor unit generation)
 // ──────────────────────────────────────────────────────────────────────────────
 

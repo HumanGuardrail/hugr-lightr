@@ -241,6 +241,44 @@ fn wait_vanished_supervisor_fails_closed() {
     }
 }
 
+// ── list_stopped_runs (WP-D container prune) ─────────────────────────────────
+
+#[test]
+fn list_stopped_runs_empty_home_is_empty() {
+    let h = TmpHome::new("prune-empty");
+    assert!(list_stopped_runs(h.path()).unwrap().is_empty());
+}
+
+#[test]
+fn list_stopped_runs_returns_only_exited() {
+    // 2 exited + 1 running ⇒ only the 2 exited are listed (the prune-candidate set).
+    let h = TmpHome::new("prune-mix");
+    let a = make_run_dir(h.path(), "exited-a", None);
+    mark_exited(&a, 0);
+    let b = make_run_dir(h.path(), "exited-b", None);
+    mark_exited(&b, 1);
+    let r = make_run_dir(h.path(), "running-c", None);
+    mark_running(&r);
+
+    let mut got = list_stopped_runs(h.path()).unwrap();
+    got.sort();
+    assert_eq!(got, vec!["exited-a".to_string(), "exited-b".to_string()]);
+}
+
+#[test]
+fn list_stopped_runs_skips_names_dir_and_unknown() {
+    // The `names` registry sub-dir is not a run; a fresh dir (no status) is
+    // indeterminate and excluded (fail-closed: only proven-exited runs listed).
+    let h = TmpHome::new("prune-skip");
+    let e = make_run_dir(h.path(), "exited-x", Some("web"));
+    mark_exited(&e, 0);
+    super::super::registry::claim(h.path(), "web", "exited-x").unwrap();
+    make_run_dir(h.path(), "fresh-y", None); // no status ⇒ Unknown, excluded
+
+    let got = list_stopped_runs(h.path()).unwrap();
+    assert_eq!(got, vec!["exited-x".to_string()]);
+}
+
 #[test]
 fn wait_then_exit_observed_via_background_writer() {
     // A run that is "running", then a concurrent writer marks it exited — wait_run

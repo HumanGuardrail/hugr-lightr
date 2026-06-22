@@ -247,6 +247,50 @@ pub fn wait_run(home: &Path, id: &str) -> Result<i32> {
     }
 }
 
+/// WP-D (container prune): list every STOPPED run id under `<home>/run` — the
+/// candidates `docker container prune` removes. A run is "stopped" when its
+/// `status` file starts with `exited` (the supervisor's terminal write). The
+/// `names` registry sub-dir is skipped (it is not a run). A run that is still
+/// RUNNING, or one with no/partial status (a freshly-created or vanished
+/// supervisor), is NOT listed — fail-closed: prune touches only proven-exited
+/// runs, never a live one or an indeterminate one.
+///
+/// `home` is INJECTED (like the other primitives) so the unit tests pass a
+/// private tempdir. Mirrors the `<home>/run` walk in `registry`/`ps` (no public
+/// helper exists to reuse).
+pub fn list_stopped_runs(home: &Path) -> Result<Vec<String>> {
+    let root = home.join("run");
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(&root).map_err(LightrError::Io)? {
+        let entry = entry.map_err(LightrError::Io)?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let id = match path.file_name().map(|s| s.to_string_lossy().into_owned()) {
+            Some(n) => n,
+            None => continue,
+        };
+        // The name→id registry sub-dir is not a run.
+        if id == "names" {
+            continue;
+        }
+        // Fail-closed: only a run whose status file proves it `exited` is a prune
+        // candidate. A running run still has a live endpoint, so even if a stale
+        // status lingered, re-check liveness and exclude it.
+        let exited = read_status_file(&path)
+            .map(|s| s.starts_with("exited"))
+            .unwrap_or(false);
+        if exited && !is_running(&path) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod tests;
