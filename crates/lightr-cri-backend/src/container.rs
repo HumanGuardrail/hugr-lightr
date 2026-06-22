@@ -23,9 +23,7 @@ use std::sync::{Arc, Mutex};
 use crate::util::{
     atomic_write_json, now_nanos, open_cri_log, pid_alive, signal_or_code, ContainerRecord,
 };
-use crate::vocab::{
-    BackendError, ContainerConfig, ContainerId, ContainerState, Result, SandboxId,
-};
+use crate::vocab::{BackendError, ContainerConfig, ContainerId, ContainerState, Result, SandboxId};
 use crate::LightrBackend;
 
 /// In-memory cache (a view rebuilt from disk on open; crash-only law). Both
@@ -371,5 +369,4 @@ impl LightrBackend {
         let _ = fs::remove_file(path);
         Ok(())
     }
-
 }
