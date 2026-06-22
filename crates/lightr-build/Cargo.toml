@@ -29,6 +29,17 @@ libc = { workspace = true }
 # is `{ workspace = true }`, NOT a new project dependency.
 tar = { workspace = true }
 flate2 = { workspace = true }
+# WP-G: ADD auto-extract of .tar.xz / .tar.bz2. NOT pre-existing in the workspace
+# dep table, so pinned directly here (in-scope for WP-G per its charter). Both
+# decode in-process via a `Read` adapter mirroring `flate2::read::GzDecoder`:
+#   xz2  -> liblzma (lzma-sys vendors the C lib; no system liblzma required)
+#   bzip2-> libbz2 (vendored by default; no system libbz2 required)
+xz2 = "0.1.7"
+bzip2 = "0.6.1"
+# WP-G: ADD <url> <dest> fetch. `ureq` is an EXISTING workspace dep (used by
+# lightr-oci's registry client + already in the lockfile), wired in as a
+# workspace dep — NOT a new project dependency.
+ureq = { workspace = true }
 # WP-CMP-SECRETS-FULL: staging dir for compose file:-source Store ingestion (up-path, production).
 tempfile = { workspace = true }
 

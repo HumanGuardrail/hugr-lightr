@@ -11,6 +11,12 @@ use crate::build::exec_fs::{expand_glob, materialize_from_digest, place_sources,
 use crate::build::memo::TempDirGuard;
 use crate::build::vars::interpolate;
 
+// WP-G: ADD `<url> <dest>` remote fetch lives in a sibling file, declared as a
+// `#[path]` submodule here (mirrors how `exec_fs` hosts `exec_fs_tar`). Keeps the
+// network concern + its tests isolated and this file's COPY/ADD logic lean.
+#[path = "exec_add_url.rs"]
+mod add_url;
+
 /// `COPY [--from=<stage>] [--chown=u:g] [--chmod=NNNN] <src>... <dest>`
 /// (WP-DF-06 + WP-DF-03 multi-stage).
 ///
@@ -135,16 +141,22 @@ fn resolve_sources_in(
     Ok(sources)
 }
 
-/// `ADD [--chown=u:g] [--chmod=NNNN] <src>... <dest>` (WP-DF-07).
+/// `ADD [--chown=u:g] [--chmod=NNNN] <src>... <dest>` (WP-DF-07 + WP-G).
 ///
-/// Local file/dir ADD is identical to COPY (reuses DF-06's `CopyMeta`/placement
-/// via `place_sources`). ADD-specific: a LOCAL src that is a recognized archive
-/// (`.tar`, `.tar.gz`/`.tgz`) is auto-EXTRACTED into dest (Docker); `.tar.bz2`/
-/// `.tar.xz` are honestly deferred (no decompressor dep). A remote URL src is
-/// HONEST UNSUPPORTED — a network fetch is non-hermetic and breaks the
-/// memoize-first/CAS determinism model. The memo key folds source content +
-/// chown/chmod (build/memo.rs, the SAME fold as COPY), so extraction is
-/// deterministic from the keyed archive bytes.
+/// Two source flavors, per Docker:
+///   * a LOCAL src that is a recognized archive FILE (`.tar`, `.tar.gz`/`.tgz`,
+///     `.tar.bz2`/`.tbz2`, `.tar.xz`/`.txz`) is auto-EXTRACTED into dest (all four
+///     compressions now decode in-process — see `exec_fs_tar`); other local
+///     file/dir sources behave exactly like COPY (`CopyMeta`/`place_sources`);
+///   * a remote `http(s)://` URL is DOWNLOADED to dest and NEVER auto-extracted
+///     (Docker treats a URL `.tar.gz` as an opaque file) — fetched into a temp
+///     dir and placed with `extract = false` (WP-G, `add_url`).
+///
+/// Determinism (memo key): the key folds the instruction's canonical text (which
+/// carries the URL) + chown/chmod, exactly as COPY folds context content. A URL
+/// token is not a context path, so the content-hash loop folds a stable sentinel
+/// — Docker likewise keys a URL ADD by the URL STRING, not remote bytes. So the
+/// memo key stays intact: an unchanged ADD step is never re-fetched.
 pub(in crate::build) fn add(
     ctx: &mut BuildCtx,
     src: &[String],
@@ -152,23 +164,45 @@ pub(in crate::build) fn add(
     chown: Option<&str>,
     chmod: Option<&str>,
 ) -> Result<()> {
-    // Remote URL src: fail-closed BEFORE any work (non-hermetic — breaks CAS
-    // determinism). Checked on the RAW tokens. Docker fetches; we are honest.
-    for token in src {
-        let t = token.trim_start();
-        if t.starts_with("http://") || t.starts_with("https://") {
-            return Err(LightrError::InvalidManifest(format!(
-                "ADD from a URL is unsupported: non-hermetic (breaks memoize-first/CAS \
-                 determinism); vendor the file and use COPY instead — {token:?}"
-            )));
-        }
-    }
     let meta = CopyMeta::parse(chown, chmod)?;
     let dest = &interpolate(dest, ctx.scope, ctx.escape)?;
-    let sources = resolve_sources(ctx, src, "ADD")?;
-    // ADD auto-extracts recognized archives (`extract = true`); the placement +
-    // dir/file rules are otherwise COPY's, shared via `place_sources`. The same
-    // `.dockerignore` filter as COPY applies to context sources (WP-DF-IGNORE).
     let filter = ctx_filter(ctx);
-    place_sources(ctx.work_dir, &sources, dest, &meta, true, filter)
+
+    // Partition tokens: remote URLs are fetched (no extract); the rest resolve
+    // against the build context and auto-extract recognized archives. A URL token
+    // is interpolated first so an ARG-built URL is honored.
+    let mut url_tokens: Vec<String> = Vec::new();
+    let mut local_tokens: Vec<String> = Vec::new();
+    for token in src {
+        let t = interpolate(token, ctx.scope, ctx.escape)?;
+        if add_url::is_remote(&t) {
+            url_tokens.push(t);
+        } else {
+            // Push the RAW token (not the interpolated form) so context globbing
+            // + `.dockerignore` keep their byte-identical pre-WP behavior.
+            local_tokens.push(token.clone());
+        }
+    }
+
+    // Remote URLs: download each into a temp dir, then place with `extract=false`
+    // (Docker never auto-extracts a URL). The guard drops the temp bytes after
+    // placement, so a fetched archive never lingers outside the work dir.
+    if !url_tokens.is_empty() {
+        let dl_guard = TempDirGuard::new()?;
+        let mut fetched: Vec<std::path::PathBuf> = Vec::with_capacity(url_tokens.len());
+        for url in &url_tokens {
+            fetched.push(add_url::fetch_into(url, &dl_guard.path)?);
+        }
+        // No `.dockerignore` for downloaded bytes (they are not context); `None`.
+        place_sources(ctx.work_dir, &fetched, dest, &meta, false, None)?;
+    }
+
+    // Local sources: ADD auto-extracts recognized archives (`extract = true`);
+    // placement + dir/file rules are COPY's, shared via `place_sources`. The same
+    // `.dockerignore` filter as COPY applies to context sources (WP-DF-IGNORE).
+    if !local_tokens.is_empty() {
+        let sources = resolve_sources(ctx, &local_tokens, "ADD")?;
+        place_sources(ctx.work_dir, &sources, dest, &meta, true, filter)?;
+    }
+    Ok(())
 }
