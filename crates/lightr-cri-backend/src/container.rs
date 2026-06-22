@@ -4,17 +4,17 @@
 //! persist, the detached reaper that owns the terminal exit code, the
 //! SIGTERM→SIGKILL grace in `stop`, the force-stop-then-remove in `remove`, the
 //! CRI-log tee in `<RFC3339Nano> <stream> <F|P>` framing) are TRANSCRIBED from
-//! the conformance reference `lightr-cri-fake`. Execution is a REAL host process
-//! (no isolation yet — sandbox/netns is WP-CRI-SANDBOX).
+//! the conformance reference `lightr-cri-fake`. Execution is a REAL host process;
+//! on linux it joins the sandbox netns at spawn (WP-CRI-SANDBOX wired the gate +
+//! netns-join; the helpers live in sandbox.rs).
 //!
-//! REUSE NOTE (ambiguity resolved, transcribe-don't-design): the brief points
-//! at `lightr_run::spawn_detached_engine`, but that path roots its run-dir at
-//! the PROCESS-GLOBAL `LIGHTR_HOME` env and writes null stdio with no CRI log
-//! tee — breaking per-instance state injection (so parallel tests) and the
-//! kubelet log framing critest asserts. So we mirror the fake instead: a real
+//! REUSE NOTE (transcribe-don't-design): the brief points at
+//! `lightr_run::spawn_detached_engine`, but that path roots its run-dir at the
+//! PROCESS-GLOBAL `LIGHTR_HOME` env and writes null stdio with no CRI log tee —
+//! breaking per-instance state injection (so parallel tests) and the kubelet log
+//! framing critest asserts. So we mirror the fake instead: a real
 //! `std::process::Command` + a reaper thread + the tee, persisting crash-only
-//! under `<home>/cri/containers/`. The supervisor wiring is the right call once
-//! a sandbox/netns root is injectable — that is WP-CRI-SANDBOX.
+//! under `<home>/cri/containers/`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -30,13 +30,12 @@ use crate::vocab::{
 };
 use crate::LightrBackend;
 
-/// In-memory cache (a view rebuilt from disk on open). Containers are keyed by
-/// their id string. Sandbox state lives in WP-CRI-SANDBOX; the MVP container
-/// plane needs only its own records plus the sandbox's `log_directory`, which
-/// it reads from the persisted sandbox record when present (None today).
+/// In-memory cache (a view rebuilt from disk on open; crash-only law). Both
+/// halves keyed by id string; the sandbox half is owned by `sandbox.rs`.
 #[derive(Default)]
 pub struct Cache {
     pub containers: BTreeMap<String, ContainerRecord>,
+    pub sandboxes: BTreeMap<String, crate::sandbox::SandboxRecord>,
 }
 
 impl LightrBackend {
@@ -83,7 +82,7 @@ impl LightrBackend {
         cache
     }
 
-    fn cache(&self) -> std::sync::MutexGuard<'_, Cache> {
+    pub(crate) fn cache(&self) -> std::sync::MutexGuard<'_, Cache> {
         self.cache.lock().unwrap()
     }
 
@@ -121,6 +120,8 @@ impl LightrBackend {
         sandbox: &SandboxId,
         cfg: ContainerConfig,
     ) -> Result<ContainerId> {
+        // Sandbox gate (state law): exist+Ready else NotFound/FailedPrecondition.
+        self.ensure_sandbox_ready(sandbox)?;
         let id = ContainerId(crate::util::new_id("ct-"));
         let rec = ContainerRecord {
             id: id.clone(),
@@ -158,18 +159,16 @@ impl LightrBackend {
             )));
         }
 
-        // sandbox log_directory (None today — WP-CRI-SANDBOX persists sandbox
-        // records; until then the relative log_path is used as-is).
-        let sandbox_log_dir = self.sandbox_log_dir(&rec.sandbox);
+        // sandbox log_directory (read from the persisted sandbox record).
+        let sandbox_log_dir = self.cache().sandbox_log_dir(&rec.sandbox);
 
         // Open (create) the CRI log so the empty file exists from start (§C).
         let log = open_cri_log(&sandbox_log_dir, &rec.config.log_path).map_err(BackendError::Io)?;
         let log_shared: Arc<Mutex<Option<fs::File>>> = Arc::new(Mutex::new(log));
 
         // Build the argv. Empty command/args ⇒ keep-alive `tail -f /dev/null`
-        // (transcribed from the fake: critest's synthetic images carry no
-        // entrypoint, and the container must stay Running for exec). A real
-        // image-config entrypoint is the job of the rootfs path (WP-CRI-SANDBOX).
+        // (transcribed from the fake: critest synthetic images carry no
+        // entrypoint, the container must stay Running for exec).
         let argv: Vec<String> = if rec.config.command.is_empty() && rec.config.args.is_empty() {
             vec![
                 "tail".to_string(),
@@ -205,6 +204,10 @@ impl LightrBackend {
         } else {
             std::process::Stdio::null()
         });
+
+        // §D: on linux, join the MAIN process into the sandbox netns (sandbox.rs).
+        #[cfg(target_os = "linux")]
+        self.join_container_netns(&mut cmd, &rec.sandbox)?;
 
         // Persist start-intent (Running, pid 0) BEFORE spawning (crash-only).
         let started_at = now_nanos();
@@ -379,7 +382,8 @@ impl LightrBackend {
             .containers
             .get(&id.0)
             .ok_or_else(|| BackendError::NotFound(format!("container {}", id.0)))?;
-        let log_dir = self.sandbox_log_dir(&rec.sandbox);
+        // Read the sandbox log_dir from the SAME guard (re-locking deadlocks).
+        let log_dir = cache.sandbox_log_dir(&rec.sandbox);
         Ok(rec_to_status(rec, &log_dir))
     }
 
@@ -391,7 +395,7 @@ impl LightrBackend {
         let mut out = Vec::new();
         for r in cache.containers.values() {
             if crate::util::container_matches(r, filter) {
-                let log_dir = self.sandbox_log_dir(&r.sandbox);
+                let log_dir = cache.sandbox_log_dir(&r.sandbox);
                 out.push(rec_to_status(r, &log_dir));
             }
         }
