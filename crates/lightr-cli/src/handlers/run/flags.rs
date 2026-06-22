@@ -7,7 +7,7 @@
 
 use lightr_core::validate_ref_name;
 use lightr_run::healthcheck::Healthcheck;
-use lightr_run::{Mount, PortMap, StoreFile};
+use lightr_run::{Mount, StoreFile};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -65,50 +65,12 @@ pub(crate) fn parse_store_file(raw: &str, kind: &str) -> Result<StoreFile, i32> 
     })
 }
 
-/// Parse a raw `-p/--publish` value into a `PortMap` (Networking Phase 1).
-///
-/// Accepts `HOST:CONTAINER` or `HOST:CONTAINER/tcp`. Both ports must parse as
-/// u16 in `1..=65535`. `…/udp` is rejected (UDP publish is Phase 2). On any bad
-/// input prints to stderr and returns `Err(2)` (mirrors `parse_mount`).
-pub(crate) fn parse_publish(raw: &str) -> Result<PortMap, i32> {
-    // Strip an optional `/proto` suffix. Only tcp is supported in v1.
-    let (body, proto) = match raw.rsplit_once('/') {
-        Some((b, p)) => (b, Some(p)),
-        None => (raw, None),
-    };
-    match proto {
-        None | Some("tcp") => {}
-        Some("udp") => {
-            eprintln!("lightr: invalid -p/--publish value ({raw}): udp publish is Phase 2");
-            return Err(2);
-        }
-        Some(other) => {
-            eprintln!("lightr: invalid -p/--publish protocol '{other}' in {raw} (expected tcp)");
-            return Err(2);
-        }
-    }
-
-    let colon = body.find(':').ok_or_else(|| {
-        eprintln!("lightr: invalid -p/--publish value (expected HOST:CONTAINER): {raw}");
-        2i32
-    })?;
-    let host_str = &body[..colon];
-    let container_str = &body[colon + 1..];
-
-    let parse_port = |s: &str, which: &str| -> Result<u16, i32> {
-        match s.parse::<u16>() {
-            Ok(p) if (1..=65535).contains(&p) => Ok(p),
-            _ => {
-                eprintln!("lightr: invalid {which} port '{s}' in {raw} (expected 1..=65535)");
-                Err(2)
-            }
-        }
-    };
-
-    let host = parse_port(host_str, "host")?;
-    let container = parse_port(container_str, "container")?;
-    Ok(PortMap { host, container })
-}
+#[path = "flags_publish.rs"]
+pub(crate) mod publish;
+// Only `parse_publish` is consumed by the (non-owned) run-path call sites; the
+// range-aware `parse_publish_spec` and the `-P` `synth_publish_all` builder are
+// reached via `publish::…` (tests today, the non-owned `-P`/range wiring next).
+pub(crate) use publish::parse_publish;
 
 /// Parse a raw `--label`/`-l` value `KEY=VAL` into a `(key, value)` pair
 /// (WP-RC-FLAGS). A label is metadata only — it has no exec effect; it is
@@ -266,3 +228,7 @@ impl HealthFlags {
 #[cfg(test)]
 #[path = "flags_rc_tests.rs"]
 mod rc_tests;
+
+#[cfg(test)]
+#[path = "flags_publish_tests.rs"]
+mod publish_tests;
