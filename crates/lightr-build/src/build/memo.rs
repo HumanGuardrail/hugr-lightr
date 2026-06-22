@@ -1,29 +1,19 @@
 //! Build memoization: step key, COPY hashing, TempDirGuard. (The image config
 //! sidecar moved to `build::imgcfg::ImageConfig` — WP-DF-IMGCFG.)
 //!
-//! # R-KEY partition (parity-contract.md §0) — DOCUMENTED here; behaviour is the WPs'
+//! # R-KEY partition (parity-contract.md §0)
 //!
-//! The freeze-gate only DOCUMENTS the BUILD-key partition; `step_key` below is
-//! UNCHANGED (the WPs implement the new inputs). BUILD-domain key inputs the
-//! campaign enforces:
+//! BUILD-domain key inputs: prev-layer root, the instruction's
+//! **post-interpolation** canonical text (WP-DF-BUILDKEY), and COPY/ADD source
+//! content digests (hashed from the **post-interpolation** source path —
+//! WP-FIX73). OUT of the build key: runtime-only knobs (caps/ports/labels at RUN
+//! time) — those live in the RUN domain (`lightr-run/src/run/memo.rs`).
 //!
-//! - **IN the build key:** prev-layer root, the instruction's **post-interpolation**
-//!   canonical text (WP-DF-BUILDKEY), and COPY source content digests.
-//!   (workdir/user/entrypoint-when-set + image ENV-as-distinct-input land with
-//!   later DF WPs; today image ENV enters indirectly via the interpolated text.)
-//! - **OUT of the build key:** runtime-only knobs (caps, ports, labels at RUN
-//!   time) — those live in the RUN domain (see lightr-run/src/run/memo.rs).
-//!
-//! ## Per-domain v2 rule (LEAD ARBITRATION)
-//!
-//! The domain tag is bumped PER-KEY-DOMAIN, ONLY when that key's input format
-//! changes. WP-DF-BUILDKEY bumps the BUILD key to `lightr/build/v2`: the key now
-//! hashes the **post-interpolation** instruction text (Docker interpolates
-//! `${VAR}` at build time, so two builds with different ENV/ARG but identical raw
-//! text must NOT collide on a stale layer). The RUN key is independent and stays
-//! `lightr/run/v1`. The v2 bump is a documented ONE-TIME Action-Cache
-//! invalidation: every image rebuilds once (expected + acceptable). A Dockerfile
-//! with no `${VAR}` re-keys once to v2 and is then stable across runs.
+//! Per-domain v2 rule: the domain tag bumps PER-KEY-DOMAIN only when that key's
+//! input format changes. WP-DF-BUILDKEY bumped BUILD to `lightr/build/v2` (key
+//! hashes post-interpolation text, so differing ENV/ARG never collide on a stale
+//! layer); the RUN key is independent at `lightr/run/v1`. The v2 bump is a
+//! one-time Action-Cache invalidation (every image rebuilds once).
 use lightr_core::{Digest, LightrError, Result};
 use std::path::{Path, PathBuf};
 
@@ -109,9 +99,8 @@ pub(crate) fn canonical_step_text(
 /// identical Dockerfile text but different `--platform` would otherwise collide
 /// on one cached layer (a FALSE memo hit across platforms). The resolved
 /// platform is folded into EVERY step's key under its own domain separator so
-/// platforms never cross-cache. Because the value is ALWAYS present (host when
-/// the flag is absent), this is a one-time re-key from the pre-WP key — every
-/// image rebuilds once, then is stable (same rationale as the v2 bump above).
+/// platforms never cross-cache. Always present (host when the flag is absent), so
+/// this is a one-time re-key from the pre-WP key (then stable, as the v2 bump).
 // The key folds many INDEPENDENT inputs (prev-root, text, shell, copy-flags,
 // upstream-stage digest, platform) — each is a distinct keying concern, not a
 // bundleable group, so the arity is intrinsic to the content-key contract.
@@ -166,12 +155,11 @@ pub(crate) fn step_key(
     // their target. Missing sources contribute a sentinel (so add/remove of a
     // source also changes the key).
     //
-    // WP-DF-07: ADD keys IDENTICALLY to COPY — it hashes the same source content
-    // and folds the same --chown/--chmod. ADD's auto-extraction is a DETERMINISTIC
-    // function of the keyed archive bytes (the .tar's content digest already enters
-    // via `hash_copy_source`), so no extra extraction input is needed: same archive
-    // + same flags ⇒ same key ⇒ same extracted layer. The two variants share this
-    // block by destructuring the common `(src, chown, chmod)` fields.
+    // WP-DF-07: ADD keys IDENTICALLY to COPY — same source content + same
+    // --chown/--chmod. Its auto-extraction is a DETERMINISTIC function of the
+    // keyed archive bytes (the .tar digest already enters via the source hash), so
+    // no extra input is needed: same archive + flags ⇒ same key ⇒ same extracted
+    // layer. The two variants share this block via the common `(src, chown, chmod)`.
     if let Instr::Copy {
         src, chown, chmod, ..
     }
@@ -180,11 +168,20 @@ pub(crate) fn step_key(
     } = &step.instr
     {
         for s in src {
-            // WP-DF-IGNORE: a top-level source token that is itself excluded by
-            // `.dockerignore` contributes nothing (the executor won't copy it
-            // either). `s` is a context-relative token (e.g. `.` for `COPY .`),
-            // so the per-entry rel path is computed against `context_dir`.
-            let src_path = context_dir.join(s);
+            // WP-FIX73 (#73): INTERPOLATE the source token before join+hash, with
+            // the SAME `interpolate`/`scope`/`escape` the executor uses
+            // (`exec_instr::copy` → `resolve_sources_in` does `interp_vec(src,..)`
+            // before joining). Hashing the RAW token (e.g. `"${DIR}"`) joined to a
+            // nonexistent `context_dir/${DIR}` folded the `\x00missing\x00`
+            // sentinel — a CONSTANT for every value/content — so a same-ARG rebuild
+            // with different files keyed IDENTICALLY ⇒ FALSE cache hit. A literal
+            // token interpolates to itself ⇒ key byte-unchanged. (`--from=stage`
+            // sources aren't hashed here — the stage digest folds below — intact.)
+            let interp_s = interpolate(s, scope, escape)?;
+            // WP-DF-IGNORE: a top-level source the matcher excludes contributes
+            // nothing (the executor won't copy it). The token is context-relative
+            // (e.g. `.` for `COPY .`), so its rel path is vs `context_dir`.
+            let src_path = context_dir.join(&interp_s);
             hash_copy_source_filtered(&mut hasher, &src_path, context_dir, ignore)?;
         }
         // WP-DF-06: --chown/--chmod change the COPY/ADD OUTPUT (file mode/owner)
@@ -393,3 +390,10 @@ mod df03_tests;
 #[cfg(test)]
 #[path = "memo_flake_tests.rs"]
 mod flake_tests;
+
+// WP-FIX73 (#73): `step_key` interpolates a COPY/ADD source before hashing — an
+// interpolated `${DIR}` source whose resolved files differ busts the key (no
+// false cache hit); a literal source key is byte-identical. Sibling (godfile cap).
+#[cfg(test)]
+#[path = "memo_interp_tests.rs"]
+mod interp_tests;
