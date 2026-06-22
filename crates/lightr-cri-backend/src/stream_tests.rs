@@ -42,8 +42,27 @@ fn cfg(command: Vec<&str>) -> ContainerConfig {
 
 /// Create + start a container with `command` (empty ⇒ keep-alive). Returns a
 /// Running container id (or the keep-alive one). Polls until Running.
+/// Run a Ready sandbox named `name` (no CNI on macOS → ip=None) so the
+/// create-gate (WP-CRI-SANDBOX) admits containers created against it.
+fn ready_sandbox(b: &LightrBackend, name: &str) -> crate::vocab::SandboxId {
+    b.run_sandbox(crate::vocab::SandboxConfig {
+        name: name.into(),
+        uid: "u".into(),
+        namespace: "ns".into(),
+        attempt: 0,
+        labels: Default::default(),
+        annotations: Default::default(),
+        log_directory: String::new(),
+        hostname: String::new(),
+        host_network: false,
+        dns: None,
+        port_mappings: Vec::new(),
+    })
+    .expect("run_sandbox")
+}
+
 fn running_container(b: &LightrBackend, command: Vec<&str>) -> ContainerId {
-    let sb = crate::vocab::SandboxId("sb-test".into());
+    let sb = ready_sandbox(b, "sb-test");
     let id = b.create_container(&sb, cfg(command)).unwrap();
     b.start_container(&id).unwrap();
     id
@@ -167,7 +186,7 @@ fn open_exec_requires_running_and_existing() {
         Err(BackendError::NotFound(_))
     ));
     // created-but-not-started container → FailedPrecondition
-    let sb = crate::vocab::SandboxId("sb".into());
+    let sb = ready_sandbox(&b, "sb");
     let id = b.create_container(&sb, cfg(vec!["true"])).unwrap();
     assert!(matches!(
         b.open_exec(&id, &["true".into()], false, false),
@@ -225,7 +244,7 @@ fn open_attach_requires_running_and_existing() {
         b.open_attach(&ContainerId("nope".into())),
         Err(BackendError::NotFound(_))
     ));
-    let sb = crate::vocab::SandboxId("sb".into());
+    let sb = ready_sandbox(&b, "sb");
     let id = b.create_container(&sb, cfg(vec!["true"])).unwrap();
     assert!(matches!(
         b.open_attach(&id),

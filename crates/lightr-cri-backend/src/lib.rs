@@ -28,6 +28,7 @@ pub mod vocab;
 // stays fail-closed here (WP-CRI-STREAM); the sandbox/pod plane is now wired
 // (WP-CRI-SANDBOX).
 mod container;
+mod container_query;
 mod exec;
 mod images;
 mod sandbox;
@@ -204,13 +205,6 @@ impl LightrBackend {
     pub(crate) fn sandboxes_dir(&self) -> PathBuf {
         self.home.join("cri").join("sandboxes")
     }
-}
-
-/// Fail-closed sentinel: every skeleton method returns this — an honest error,
-/// never `todo!()`/`unimplemented!()`/`panic!`. The seam must compile and fail
-/// closed everywhere (including the macOS + windows-cross compile lanes).
-fn not_yet(method: &str, wp: &str) -> BackendError {
-    BackendError::Internal(format!("not yet implemented: {method} — {wp}"))
 }
 
 impl CriBackend for LightrBackend {
