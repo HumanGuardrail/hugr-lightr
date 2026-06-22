@@ -177,7 +177,18 @@ fn start_one_instance(
         workdir: svc.working_dir.clone(),
         user: svc.user.clone(),
         restart: svc.restart.clone(),
-        stop_signal: None, // WP-RC-STOPSIGNAL (NON-OWNED): compose stop_signal lowering is WP-RUNFLAGS' job.
+        // WP-A: compose `stop_signal` lowered onto `RunSpec.stop_signal` (sent by
+        // `lightr stop` before SIGKILL). Absent ⇒ `None` ⇒ SIGTERM (today's).
+        stop_signal: svc.stop_signal.clone(),
+        // WP-A: compose `entrypoint` lowered onto `RunSpec.entrypoint` (prepended
+        // to `command` at exec). Absent ⇒ `None` ⇒ no override (today's).
+        entrypoint: svc.entrypoint.clone(),
+        // WP-A: compose `hostname` lowered onto `RunSpec.hostname`. Absent ⇒
+        // `None` ⇒ no explicit hostname (today's).
+        hostname: svc.hostname.clone(),
+        // WP-A: compose `extra_hosts` lowered onto `RunSpec.add_host` (raw
+        // `"host:ip"` strings; the vz wiring site parses them). Empty ⇒ none.
+        add_host: svc.extra_hosts.clone(),
         // WP-CMP-CONFIG-LOWER: the RC-SEAM RunSpec fields lowered from the compose
         // service (init/tty/privileged/cap_add/cap_drop). All RUNTIME-ONLY (never
         // keyed). Absent on the service ⇒ false/empty here ⇒ today's behavior.
@@ -194,8 +205,8 @@ fn start_one_instance(
             memory_bytes: svc.mem_limit_bytes,
             cpu_millis: svc.cpu_limit_millis,
         },
-        // RC-SEAM-FREEZE (NON-OWNED site): remaining new RC fields (hostname/
-        // labels/read_only/...) are future WPs' jobs → no-op defaults here.
+        // RC-SEAM-FREEZE (NON-OWNED site): remaining new RC fields (labels/
+        // read_only/...) are future WPs' jobs → no-op defaults here.
         ..Default::default()
     };
 

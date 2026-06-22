@@ -36,6 +36,10 @@ fn svc(name: &str, image: &str, networks: Vec<(&str, Vec<&str>)>) -> ServiceSpec
             .into_iter()
             .map(|(n, a)| (n.to_string(), a.into_iter().map(String::from).collect()))
             .collect(),
+        entrypoint: None,
+        extra_hosts: Vec::new(),
+        stop_signal: None,
+        hostname: None,
     }
 }
 

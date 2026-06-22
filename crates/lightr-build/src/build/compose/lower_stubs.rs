@@ -51,8 +51,8 @@ pub(super) use super::lower_resources::{
     lower_cap_add, lower_cap_drop, lower_deploy, lower_privileged,
 };
 pub(super) use super::lower_runtime::{
-    lower_container_name, lower_init, lower_restart, lower_stop_signal, lower_tty, lower_user,
-    lower_working_dir,
+    lower_container_name, lower_hostname, lower_init, lower_restart, lower_stdin_open,
+    lower_stop_signal, lower_tty, lower_user, lower_working_dir,
 };
 
 // Re-exported for the `#[cfg(test)]` module below (its `super::*` resolves these

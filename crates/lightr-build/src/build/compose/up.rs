@@ -231,6 +231,13 @@ pub fn compose_up(
             // the vz engine + set `RunSpec.network` (= `<project>_<network>`).
             // Empty ⇒ native spawn (today's behavior, byte-identical).
             networks: s.networks.clone(),
+            // WP-A: carry the lowered entrypoint/extra_hosts/stop_signal/hostname
+            // through the on-disk spec so the supervisor sets them on the spawned
+            // RunSpec. Absent ⇒ None/empty ⇒ today's behavior, byte-identical.
+            entrypoint: s.entrypoint.clone(),
+            extra_hosts: s.extra_hosts.clone(),
+            stop_signal: s.stop_signal.clone(),
+            hostname: s.hostname.clone(),
         })
         .collect();
 

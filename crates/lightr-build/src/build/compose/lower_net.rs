@@ -11,7 +11,7 @@
 //! `_` bindings document an intentionally-unconsumed source field (no
 //! `#[allow(unused)]`, no debt).
 use super::model::{DepCondition, Service};
-use super::spec::{DependsOn, ServiceDef, ServiceNetworks};
+use super::spec::{DependsOn, ExtraHosts, ServiceDef, ServiceNetworks};
 
 /// `depends_on` (CMP-P0-DEPENDS): startup ordering / health-gated dependencies.
 ///
@@ -84,17 +84,28 @@ pub(super) fn lower_networks(def: &ServiceDef, svc: &mut Service) {
     };
 }
 
-/// `extra_hosts`: additional `/etc/hosts` entries (`["host:ip", ...]`).
+/// `extra_hosts`: additional `/etc/hosts` entries.
 ///
-/// WP-CMP-CONFIG-LOWER: HONEST-DEFER. The RC-SEAM RunSpec carries `hostname`
-/// (the container's OWN name) but NO host→ip entry-map field for injecting extra
-/// `/etc/hosts` lines, and the runtime `Service`/`ServiceSpec` have no slot for
-/// it either — so there is nothing to lower onto without widening a non-owned
-/// surface (RunSpec lives in `lightr-run`). Kept a no-op (no `/etc/hosts`
-/// injection today, behavior-preserving) until a RunSpec extra-hosts field
-/// exists; the `_` binding documents the intentionally-unconsumed source field.
-pub(super) fn lower_extra_hosts(def: &ServiceDef, _svc: &mut Service) {
-    let _ = &def.extra_hosts;
+/// WP-A: lowers the compose `extra_hosts` onto `svc.extra_hosts` as raw
+/// `"host:ip"` strings; the supervisor threads them into `RunSpec.add_host`
+/// (the WP-C9 field the vz wiring site parses into `(host, ip)` pairs). Two
+/// Docker-faithful shapes (per the frozen [`ExtraHosts`] model):
+///  * LIST (`["host:ip", ...]`) ⇒ each entry verbatim;
+///  * MAP (`{host: ip}`) ⇒ each pair joined to `"host:ip"`, in declaration order.
+///
+/// Absent ⇒ empty list ⇒ no extra `/etc/hosts` entries (today's behavior,
+/// behavior-preserving).
+pub(super) fn lower_extra_hosts(def: &ServiceDef, svc: &mut Service) {
+    let Some(extra_hosts) = &def.extra_hosts else {
+        return;
+    };
+    svc.extra_hosts = match extra_hosts {
+        ExtraHosts::List(entries) => entries.clone(),
+        ExtraHosts::Map(map) => map
+            .iter()
+            .map(|(host, ip)| format!("{host}:{ip}"))
+            .collect(),
+    };
 }
 
 /// `profiles` (CMP-P1-PROFILES): the service's profile-gating list.
