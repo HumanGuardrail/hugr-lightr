@@ -8,18 +8,13 @@
 //! (no isolation yet — sandbox/netns is WP-CRI-SANDBOX).
 //!
 //! REUSE NOTE (ambiguity resolved, transcribe-don't-design): the brief points
-//! at `lightr_run::spawn_detached_engine` for `start_container`. That engine
-//! path derives its run-dir root from the PROCESS-GLOBAL `LIGHTR_HOME` env (see
-//! lightr-run `run/paths.rs::lightr_home`) and writes null stdio with no
-//! CRI-format log tee. Using it would (a) break per-instance state injection
-//! (the backend roots state at the injected `home`, not at an env var) and so
-//! break parallel-safe tests, and (b) drop the kubelet log framing critest
-//! asserts. The fake — the conformance reference the brief says to TRANSCRIBE —
-//! spawns the command directly and tees to the CRI log. We mirror the fake: a
-//! real `std::process::Command` + a reaper thread + the tee. The supervisor
-//! wiring (`spawn_detached_engine`) is the right call once a sandbox/netns root
-//! is injectable; that is WP-CRI-SANDBOX. State still persists crash-only under
-//! `<home>/cri/containers/`.
+//! at `lightr_run::spawn_detached_engine`, but that path roots its run-dir at
+//! the PROCESS-GLOBAL `LIGHTR_HOME` env and writes null stdio with no CRI log
+//! tee — breaking per-instance state injection (so parallel tests) and the
+//! kubelet log framing critest asserts. So we mirror the fake instead: a real
+//! `std::process::Command` + a reaper thread + the tee, persisting crash-only
+//! under `<home>/cri/containers/`. The supervisor wiring is the right call once
+//! a sandbox/netns root is injectable — that is WP-CRI-SANDBOX.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -27,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::util::{
     atomic_write_json, now_nanos, open_cri_log, pid_alive, rec_to_status, signal_or_code,
-    spawn_tee_thread, ContainerRecord,
+    ContainerRecord,
 };
 use crate::vocab::{
     BackendError, ContainerConfig, ContainerFilter, ContainerId, ContainerState, ContainerStatus,
@@ -204,7 +199,12 @@ impl LightrBackend {
         }
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
-        cmd.stdin(std::process::Stdio::null());
+        // stdin piped when requested (attach feeds the live process — WP-CRI-STREAM), else null.
+        cmd.stdin(if rec.config.stdin {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        });
 
         // Persist start-intent (Running, pid 0) BEFORE spawning (crash-only).
         let started_at = now_nanos();
@@ -246,13 +246,10 @@ impl LightrBackend {
 
         let child_pid = child.id();
 
-        // Tee stdout/stderr to the CRI log (one thread per stream).
-        if let Some(out) = child.stdout.take() {
-            spawn_tee_thread("stdout", out, Arc::clone(&log_shared));
-        }
-        if let Some(err) = child.stderr.take() {
-            spawn_tee_thread("stderr", err, Arc::clone(&log_shared));
-        }
+        // Tee stdout/stderr to the CRI log and (on unix) register the live stdio
+        // in the io-table for `open_attach` (WP-CRI-STREAM) — the SAME single
+        // reader fans raw bytes to attachers, no second reader racing the log.
+        self.register_io_and_tee(id, &mut child, &log_shared);
 
         // Persist the real pid (crash-only).
         {
@@ -272,6 +269,8 @@ impl LightrBackend {
         let containers_dir = self.containers_dir();
         let cid = id.clone();
         let cache_arc = Arc::clone(&self.cache);
+        #[cfg(unix)]
+        let io_table_arc = Arc::clone(&self.io_table);
         std::thread::spawn(move || {
             let status = child.wait();
             let finished_at = now_nanos();
@@ -279,6 +278,9 @@ impl LightrBackend {
                 Ok(s) => signal_or_code(&s),
                 Err(e) => (-1, format!("wait-error: {e}")),
             };
+            // Drop the held stdio on exit (no fds linger past the process).
+            #[cfg(unix)]
+            io_table_arc.lock().unwrap().remove(&cid.0);
             let mut cache = cache_arc.lock().unwrap();
             if let Some(entry) = cache.containers.get_mut(&cid.0) {
                 if entry.state == ContainerState::Running {
