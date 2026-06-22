@@ -28,3 +28,13 @@ lightr-store = { workspace = true }
 lightr-oci = { workspace = true }
 lightr-engine = { workspace = true }
 lightr-run = { workspace = true }
+# Image plane: deterministic ref-name hash for synthetic CAS records when a
+# ref has no store entry (transcribed from the fake's BLAKE3-over-ref, the
+# conformance reference).
+blake3 = { workspace = true }
+
+# Unix syscalls for the container plane: SIGTERM/SIGKILL grace (libc::kill),
+# pid liveness (kill(pid,0)), and /proc-based stats. cfg(unix) at every call
+# site (template 8a) — the windows gate is build+clippy only and must stay clean.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

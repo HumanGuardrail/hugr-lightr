@@ -23,6 +23,15 @@
 
 pub mod vocab;
 
+// WP-CRI-MVP planes (split by concern, each <400 LOC). The trait impl below
+// delegates to the inherent `_impl` methods defined in these modules. Sandbox
+// + streaming stay fail-closed here (WP-CRI-SANDBOX / WP-CRI-STREAM).
+mod container;
+mod exec;
+mod images;
+mod stats;
+mod util;
+
 // Re-export the whole seam vocabulary at the crate root (house convention: a
 // `pub mod` whose items the shell + later WPs consume must be re-exported, or
 // the items are pub-in-private dead code under `clippy -D warnings`).
@@ -124,20 +133,56 @@ pub trait CriBackend: Send + Sync + 'static {
 /// convention: inject the root, never read process-global cwd — keeps state
 /// per-instance and tests parallel-safe).
 pub struct LightrBackend {
-    /// Root directory under which all CRI backend state lives.
+    /// Root directory under which all CRI backend state lives. CRI records live
+    /// under `<home>/cri/`; the CAS store lives under `<home>/store/`.
     home: PathBuf,
+    /// In-memory container cache — a VIEW rebuilt from disk at construction
+    /// (crash-only law). The disk under `<home>/cri/containers/` is the source
+    /// of truth; a restarted backend re-derives state from it (ADR-0017).
+    cache: std::sync::Arc<std::sync::Mutex<container::Cache>>,
 }
 
 impl LightrBackend {
-    /// Construct a backend rooted at `home`. Infallible: provisioning of the
-    /// on-disk layout is the job of the methods that own it (later WPs).
+    /// Construct a backend rooted at `home`, provisioning the CRI on-disk layout
+    /// and rebuilding the container cache from disk (re-adopting survivors,
+    /// reconciling Running records whose process is gone — crash-only recovery).
+    /// Infallible: a provisioning failure degrades to an empty cache rather than
+    /// panicking (the seam must never panic); the first mutating call surfaces
+    /// the real I/O error honestly.
     pub fn new(home: impl Into<PathBuf>) -> Self {
-        Self { home: home.into() }
+        let home = home.into();
+        let _ = std::fs::create_dir_all(home.join("cri").join("containers"));
+        let _ = std::fs::create_dir_all(home.join("cri").join("images"));
+        let backend = Self {
+            home,
+            cache: std::sync::Arc::new(std::sync::Mutex::new(container::Cache::default())),
+        };
+        let cache = backend.load_container_cache();
+        *backend.cache.lock().unwrap() = cache;
+        backend
     }
 
     /// The state root this backend was constructed with.
     pub fn home(&self) -> &std::path::Path {
         &self.home
+    }
+
+    /// Directory holding per-container record sidecars.
+    pub(crate) fn containers_dir(&self) -> PathBuf {
+        self.home.join("cri").join("containers")
+    }
+
+    /// Directory holding per-image CRI record sidecars.
+    pub(crate) fn images_dir(&self) -> PathBuf {
+        self.home.join("cri").join("images")
+    }
+
+    /// The sandbox's CRI `log_directory`, used to absolutize a container's log
+    /// path. Sandbox records are persisted by WP-CRI-SANDBOX; until then no
+    /// sandbox state is on disk, so this returns empty (the relative log_path is
+    /// used as-is — probe-truthful, never invented).
+    pub(crate) fn sandbox_log_dir(&self, _sandbox: &SandboxId) -> String {
+        String::new()
     }
 }
 
@@ -166,57 +211,57 @@ impl CriBackend for LightrBackend {
         Err(not_yet("list_sandboxes", "WP-CRI-SANDBOX"))
     }
 
-    // container plane — WP-CRI-CONTAINER
-    fn create_container(&self, _sandbox: &SandboxId, _cfg: ContainerConfig) -> Result<ContainerId> {
-        Err(not_yet("create_container", "WP-CRI-CONTAINER"))
+    // container plane — WP-CRI-MVP (wired to the engine via inherent methods)
+    fn create_container(&self, sandbox: &SandboxId, cfg: ContainerConfig) -> Result<ContainerId> {
+        self.create_container_impl(sandbox, cfg)
     }
-    fn start_container(&self, _id: &ContainerId) -> Result<()> {
-        Err(not_yet("start_container", "WP-CRI-CONTAINER"))
+    fn start_container(&self, id: &ContainerId) -> Result<()> {
+        self.start_container_impl(id)
     }
-    fn stop_container(&self, _id: &ContainerId, _grace_seconds: i64) -> Result<()> {
-        Err(not_yet("stop_container", "WP-CRI-CONTAINER"))
+    fn stop_container(&self, id: &ContainerId, grace_seconds: i64) -> Result<()> {
+        self.stop_container_impl(id, grace_seconds)
     }
-    fn remove_container(&self, _id: &ContainerId) -> Result<()> {
-        Err(not_yet("remove_container", "WP-CRI-CONTAINER"))
+    fn remove_container(&self, id: &ContainerId) -> Result<()> {
+        self.remove_container_impl(id)
     }
-    fn container_status(&self, _id: &ContainerId) -> Result<ContainerStatus> {
-        Err(not_yet("container_status", "WP-CRI-CONTAINER"))
+    fn container_status(&self, id: &ContainerId) -> Result<ContainerStatus> {
+        self.container_status_impl(id)
     }
-    fn list_containers(&self, _filter: &ContainerFilter) -> Result<Vec<ContainerStatus>> {
-        Err(not_yet("list_containers", "WP-CRI-CONTAINER"))
+    fn list_containers(&self, filter: &ContainerFilter) -> Result<Vec<ContainerStatus>> {
+        self.list_containers_impl(filter)
     }
-    fn container_stats(&self, _id: &ContainerId) -> Result<ContainerStatsRec> {
-        Err(not_yet("container_stats", "WP-CRI-STATS"))
+    fn container_stats(&self, id: &ContainerId) -> Result<ContainerStatsRec> {
+        self.container_stats_impl(id)
     }
-    fn list_container_stats(&self, _filter: &ContainerFilter) -> Result<Vec<ContainerStatsRec>> {
-        Err(not_yet("list_container_stats", "WP-CRI-STATS"))
+    fn list_container_stats(&self, filter: &ContainerFilter) -> Result<Vec<ContainerStatsRec>> {
+        self.list_container_stats_impl(filter)
     }
 
-    // exec plane — WP-CRI-EXEC
+    // exec plane — WP-CRI-MVP
     fn exec_sync(
         &self,
-        _id: &ContainerId,
-        _cmd: &[String],
-        _timeout_seconds: i64,
+        id: &ContainerId,
+        cmd: &[String],
+        timeout_seconds: i64,
     ) -> Result<ExecResult> {
-        Err(not_yet("exec_sync", "WP-CRI-EXEC"))
+        self.exec_sync_impl(id, cmd, timeout_seconds)
     }
 
-    // image plane — WP-CRI-IMAGE
-    fn pull_image(&self, _image_ref: &str) -> Result<PulledImage> {
-        Err(not_yet("pull_image", "WP-CRI-IMAGE"))
+    // image plane — WP-CRI-MVP (wired to lightr_oci + lightr_store)
+    fn pull_image(&self, image_ref: &str) -> Result<PulledImage> {
+        self.pull_image_impl(image_ref)
     }
-    fn image_status(&self, _image_ref: &str) -> Result<Option<ImageRecord>> {
-        Err(not_yet("image_status", "WP-CRI-IMAGE"))
+    fn image_status(&self, image_ref: &str) -> Result<Option<ImageRecord>> {
+        self.image_status_impl(image_ref)
     }
     fn list_images(&self) -> Result<Vec<ImageRecord>> {
-        Err(not_yet("list_images", "WP-CRI-IMAGE"))
+        self.list_images_impl()
     }
-    fn remove_image(&self, _image_ref: &str) -> Result<()> {
-        Err(not_yet("remove_image", "WP-CRI-IMAGE"))
+    fn remove_image(&self, image_ref: &str) -> Result<()> {
+        self.remove_image_impl(image_ref)
     }
     fn image_fs_info(&self) -> Result<FsInfo> {
-        Err(not_yet("image_fs_info", "WP-CRI-IMAGE"))
+        self.image_fs_info_impl()
     }
 
     // v1.1 streaming — WP-CRI-STREAM. Honest-error OVERRIDES (not the trait
@@ -243,16 +288,33 @@ impl CriBackend for LightrBackend {
 mod tests {
     use super::*;
 
-    #[test]
-    fn new_constructs_and_keeps_home() {
-        let b = LightrBackend::new("/tmp/lightr-cri-test-home");
-        assert_eq!(b.home(), std::path::Path::new("/tmp/lightr-cri-test-home"));
+    /// Parallel-safe unique tempdir (atomic counter + nanos, no set_var).
+    fn temp_home() -> PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("lightr-cri-lib-{nanos}-{n}"));
+        std::fs::create_dir_all(&p).unwrap();
+        p
     }
 
     #[test]
-    fn methods_fail_closed_not_panic() {
-        let b = LightrBackend::new("/tmp/lightr-cri-test-home");
-        // A representative method from each plane returns the honest error.
+    fn new_constructs_and_keeps_home() {
+        let home = temp_home();
+        let b = LightrBackend::new(&home);
+        assert_eq!(b.home(), home.as_path());
+        // The CRI layout is provisioned on construction (crash-only root).
+        assert!(home.join("cri").join("containers").is_dir());
+    }
+
+    /// Sandbox + streaming planes are the NEXT WPs — they fail closed with an
+    /// honest, WP-attributed error and NEVER panic.
+    #[test]
+    fn sandbox_and_streaming_fail_closed() {
+        let b = LightrBackend::new(temp_home());
         let e = b.run_sandbox(SandboxConfig {
             name: "s".into(),
             uid: "u".into(),
@@ -275,11 +337,6 @@ mod tests {
             other => panic!("expected fail-closed Internal error, got {other:?}"),
         }
         assert!(matches!(
-            b.pull_image("busybox"),
-            Err(BackendError::Internal(_))
-        ));
-        // v1.1 streaming override also fails closed (not the generic default).
-        assert!(matches!(
             b.open_exec(&ContainerId("c".into()), &[], false, false),
             Err(BackendError::Internal(_))
         ));
@@ -287,11 +344,11 @@ mod tests {
         assert!(!b.network_ready());
     }
 
-    /// The skeleton is object-safe behind `dyn CriBackend` (the shell consumes
-    /// it as a trait object; this guards object-safety at the seam).
+    /// Object-safe behind `dyn CriBackend` (the shell consumes it as a trait
+    /// object). list_images on an empty store is Ok(empty) now it is wired.
     #[test]
     fn is_object_safe() {
-        let b: Box<dyn CriBackend> = Box::new(LightrBackend::new("/tmp/x"));
-        assert!(b.list_images().is_err());
+        let b: Box<dyn CriBackend> = Box::new(LightrBackend::new(temp_home()));
+        assert!(b.list_images().unwrap().is_empty());
     }
 }
