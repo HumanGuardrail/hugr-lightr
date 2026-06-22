@@ -109,6 +109,9 @@ fn translate_build(args: &[String], json: bool, explain: bool) -> i32 {
     );
 
     // The docker shim does not yet translate `--build-arg` (deferred); pass none.
+    // WP-C: nor `--target` yet (the shim's flag table is owned by the docker-compat
+    // surface, not this WP) — pass `None` (behavior-identical to before). The
+    // native `lightr build --target` IS wired; shim translation is a follow-up.
     crate::handlers::build::run(
         &ctx,
         dockerfile.as_deref(),
@@ -117,6 +120,7 @@ fn translate_build(args: &[String], json: bool, explain: bool) -> i32 {
         &[],
         json,
         explain,
+        None,
     )
 }
 

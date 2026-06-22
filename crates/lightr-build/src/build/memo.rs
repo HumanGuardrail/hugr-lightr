@@ -101,6 +101,21 @@ pub(crate) fn canonical_step_text(
 /// so the key is identical and the cached layer is reused (no false cache bust);
 /// conversely an edit to a NON-ignored file still busts as before. An empty
 /// matcher (no `.dockerignore`) excludes nothing ⇒ byte-identical to before.
+///
+/// `platform` (WP-C) is the RESOLVED build platform for the stage this step
+/// belongs to — the `FROM --platform=<p>` value (normalized) when set, else the
+/// host platform. It is NOT part of any single instruction's text, yet a build
+/// FROM a different platform produces a different base layer, so two builds with
+/// identical Dockerfile text but different `--platform` would otherwise collide
+/// on one cached layer (a FALSE memo hit across platforms). The resolved
+/// platform is folded into EVERY step's key under its own domain separator so
+/// platforms never cross-cache. Because the value is ALWAYS present (host when
+/// the flag is absent), this is a one-time re-key from the pre-WP key — every
+/// image rebuilds once, then is stable (same rationale as the v2 bump above).
+// The key folds many INDEPENDENT inputs (prev-root, text, shell, copy-flags,
+// upstream-stage digest, platform) — each is a distinct keying concern, not a
+// bundleable group, so the arity is intrinsic to the content-key contract.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn step_key(
     prev_layer_root: Option<Digest>,
     step: &BuildStep,
@@ -109,6 +124,7 @@ pub(crate) fn step_key(
     escape: bool,
     current_shell: &[String],
     from_stage_digest: Option<Digest>,
+    platform: &str,
 ) -> Result<Digest> {
     let ContextKey {
         context_dir,
@@ -118,6 +134,12 @@ pub(crate) fn step_key(
     hasher.update(BUILD_KEY_DOMAIN);
     let prev_bytes = prev_layer_root.map(|d| d.0).unwrap_or([0u8; 32]);
     hasher.update(&prev_bytes);
+    // WP-C: fold the RESOLVED build platform into EVERY step's key so two builds
+    // for different `FROM --platform` values never collide on one cached layer.
+    // Always present (host default when the flag is absent), so this re-keys once
+    // from the pre-WP key (every image rebuilds once, then stable).
+    hasher.update(b"\x00platform\x00");
+    hasher.update(platform.as_bytes());
     // canonical instr bytes = the POST-INTERPOLATION line text
     let text = canonical_step_text(step, scope, escape)?;
     hasher.update(text.as_bytes());
