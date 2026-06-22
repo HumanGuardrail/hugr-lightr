@@ -27,7 +27,8 @@ const KILL_POLLS: u64 = 10;
 
 pub fn run(targets: &[String], grace: u64) -> i32 {
     if targets.is_empty() {
-        eprintln!("lightr: restart requires at least one container");
+        // FIX #77: Docker-shape arg error (was `lightr: restart …`).
+        eprintln!("Error: \"restart\" requires at least 1 argument");
         return 2;
     }
 
