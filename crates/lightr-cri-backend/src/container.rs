@@ -21,12 +21,10 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 
 use crate::util::{
-    atomic_write_json, now_nanos, open_cri_log, pid_alive, rec_to_status, signal_or_code,
-    ContainerRecord,
+    atomic_write_json, now_nanos, open_cri_log, pid_alive, signal_or_code, ContainerRecord,
 };
 use crate::vocab::{
-    BackendError, ContainerConfig, ContainerFilter, ContainerId, ContainerState, ContainerStatus,
-    Result, SandboxId,
+    BackendError, ContainerConfig, ContainerId, ContainerState, Result, SandboxId,
 };
 use crate::LightrBackend;
 
@@ -374,31 +372,4 @@ impl LightrBackend {
         Ok(())
     }
 
-    // ── status / list ────────────────────────────────────────────────────────
-
-    pub(crate) fn container_status_impl(&self, id: &ContainerId) -> Result<ContainerStatus> {
-        let cache = self.cache();
-        let rec = cache
-            .containers
-            .get(&id.0)
-            .ok_or_else(|| BackendError::NotFound(format!("container {}", id.0)))?;
-        // Read the sandbox log_dir from the SAME guard (re-locking deadlocks).
-        let log_dir = cache.sandbox_log_dir(&rec.sandbox);
-        Ok(rec_to_status(rec, &log_dir))
-    }
-
-    pub(crate) fn list_containers_impl(
-        &self,
-        filter: &ContainerFilter,
-    ) -> Result<Vec<ContainerStatus>> {
-        let cache = self.cache();
-        let mut out = Vec::new();
-        for r in cache.containers.values() {
-            if crate::util::container_matches(r, filter) {
-                let log_dir = cache.sandbox_log_dir(&r.sandbox);
-                out.push(rec_to_status(r, &log_dir));
-            }
-        }
-        Ok(out)
-    }
 }
