@@ -58,6 +58,7 @@ fn copy_different_chmod_differs_key_no_false_hit() {
         true,
         &dsh,
         None,
+        "",
     )
     .unwrap();
     let k600 = step_key(
@@ -68,6 +69,7 @@ fn copy_different_chmod_differs_key_no_false_hit() {
         true,
         &dsh,
         None,
+        "",
     )
     .unwrap();
     assert_ne!(
@@ -92,6 +94,7 @@ fn copy_different_chown_differs_key_no_false_hit() {
         true,
         &dsh,
         None,
+        "",
     )
     .unwrap();
     let k_user = step_key(
@@ -102,6 +105,7 @@ fn copy_different_chown_differs_key_no_false_hit() {
         true,
         &dsh,
         None,
+        "",
     )
     .unwrap();
     assert_ne!(
@@ -125,6 +129,7 @@ fn copy_same_flags_same_key_memo_hit() {
         true,
         &dsh,
         None,
+        "",
     )
     .unwrap();
     let k2 = step_key(
@@ -135,6 +140,7 @@ fn copy_same_flags_same_key_memo_hit() {
         true,
         &dsh,
         None,
+        "",
     )
     .unwrap();
     assert_eq!(
@@ -159,6 +165,7 @@ fn copy_adding_chmod_differs_from_flagless() {
         true,
         &dsh,
         None,
+        "",
     )
     .unwrap();
     let k_mode = step_key(
@@ -169,6 +176,7 @@ fn copy_adding_chmod_differs_from_flagless() {
         true,
         &dsh,
         None,
+        "",
     )
     .unwrap();
     assert_ne!(

@@ -43,8 +43,8 @@ fn copy_from_different_upstream_digest_differs_key_no_false_hit() {
     let d_a = Digest([0xAA; 32]);
     let d_b = Digest([0xBB; 32]);
 
-    let k_a = step_key(None, &step, ck(ctx.path()), &s, true, &dsh(), Some(d_a)).unwrap();
-    let k_b = step_key(None, &step, ck(ctx.path()), &s, true, &dsh(), Some(d_b)).unwrap();
+    let k_a = step_key(None, &step, ck(ctx.path()), &s, true, &dsh(), Some(d_a), "").unwrap();
+    let k_b = step_key(None, &step, ck(ctx.path()), &s, true, &dsh(), Some(d_b), "").unwrap();
     assert_ne!(
         k_a.0, k_b.0,
         "a different upstream stage digest must yield a different COPY --from key"
@@ -59,8 +59,8 @@ fn copy_from_same_upstream_digest_same_key_memo_hit() {
     let s = VarScope::default();
     let d = Digest([0xCD; 32]);
 
-    let k1 = step_key(None, &step, ck(ctx.path()), &s, true, &dsh(), Some(d)).unwrap();
-    let k2 = step_key(None, &step, ck(ctx.path()), &s, true, &dsh(), Some(d)).unwrap();
+    let k1 = step_key(None, &step, ck(ctx.path()), &s, true, &dsh(), Some(d), "").unwrap();
+    let k2 = step_key(None, &step, ck(ctx.path()), &s, true, &dsh(), Some(d), "").unwrap();
     assert_eq!(
         k1.0, k2.0,
         "same upstream digest ⇒ identical key (memo hit)"
@@ -86,8 +86,8 @@ fn flagless_copy_key_unaffected_by_none_from_digest() {
         raw: "COPY f.txt /f.txt".to_string(),
     };
     let s = VarScope::default();
-    let k1 = step_key(None, &step, ck(ctx.path()), &s, true, &dsh(), None).unwrap();
-    let k2 = step_key(None, &step, ck(ctx.path()), &s, true, &dsh(), None).unwrap();
+    let k1 = step_key(None, &step, ck(ctx.path()), &s, true, &dsh(), None, "").unwrap();
+    let k2 = step_key(None, &step, ck(ctx.path()), &s, true, &dsh(), None, "").unwrap();
     assert_eq!(
         k1.0, k2.0,
         "a flagless COPY (None upstream) keys identically + stably (no fold)"

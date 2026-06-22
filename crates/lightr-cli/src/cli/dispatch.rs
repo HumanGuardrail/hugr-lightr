@@ -263,6 +263,7 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             name,
             engine,
             build_arg,
+            target,
         } => handlers::build::run(
             &context,
             file.as_deref(),
@@ -271,6 +272,7 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
             &build_arg,
             json,
             explain,
+            target.as_deref(),
         ),
         Cmd::Compose { subcmd } => match subcmd {
             ComposeCmd::Up {

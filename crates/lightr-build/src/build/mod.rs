@@ -17,6 +17,10 @@ pub(crate) mod exec_instr;
 pub mod imgcfg;
 pub(crate) mod memo;
 pub(crate) mod parse;
+// WP-C: `FROM --platform` resolution + validation (crate-internal). Folds the
+// resolved platform into the memo key and validates a requested platform
+// against the base image's actual (single-arch) platform.
+pub(crate) mod platform;
 // R-VARENG (parity-contract.md §0): frozen interpolate() signature + VarScope.
 // The engine is WP-DF-02; compose consumes this fn directly (LEAD DECISION).
 pub mod vars;
@@ -30,7 +34,7 @@ pub use compose::{
     Service, ServiceDef, ServiceNetworks, ServiceSpec, StackSpec, StringOrList, DEFAULT_PROJECT,
     OVERRIDE_FILENAMES,
 };
-pub use exec::{build, BuildReport};
+pub use exec::{build, build_target, BuildReport};
 pub use exec_fs::step_reads_clock_or_net;
 pub use imgcfg::{effective_argv, ImageConfig, ImageHealthcheck};
 pub use parse::{

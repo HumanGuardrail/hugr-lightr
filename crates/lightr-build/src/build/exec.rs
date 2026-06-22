@@ -42,39 +42,19 @@ fn onbuild_trigger(raw: &str) -> &str {
     }
 }
 
-// WP-DF-03 multi-stage stage table: struct + impl split into a sibling file
-// (godfile cap, behavior-preserving). Declared as a `#[path]` submodule and
-// re-exported here so `super::exec::StageTable` (used by `exec_instr.rs`, the
-// `exec_instr_copy.rs` doc-links, and `build()` below) stays IDENTICAL.
+// WP-DF-03 multi-stage stage table: split into a sibling file (godfile cap) and
+// re-exported so `super::exec::StageTable` call sites stay IDENTICAL.
 #[path = "exec_stage.rs"]
 mod stage;
 pub(super) use stage::StageTable;
 
-/// Execute a Dockerfile build.
-///
-/// - RUN steps use the **native engine** (`rootfs: None`); no filesystem
-///   isolation. Memoization: each step has a content-derived key; AC hits
-///   replay the cached layer without executing.
-/// - Build-time `${VAR}` interpolation (WP-DF-BUILDKEY): each instruction's text
-///   is interpolated against a `VarScope` BEFORE executing/keying. `env` is
-///   seeded from the base image (after FROM) + updated by ENV; `args` by ARG
-///   (DF-08, `build_args` = `--build-arg`). The memo key hashes the
-///   POST-INTERPOLATION text (v2) — differing ENV/ARG never collide on a stale
-///   layer; an UNUSED ARG changes no text, so it never busts the cache.
-/// - **Multi-stage (WP-DF-03):** `FROM <base> [AS <name>]` starts a new STAGE; a
-///   Dockerfile has 1..N stages. Each stage builds in order with its OWN reset
-///   filesystem/scope/shell/workdir/ENV (per-stage at FROM; global pre-FROM ARGs
-///   carry through `arg_state`) and is keyed INDEPENDENTLY (lineage resets at the
-///   stage boundary). The build OUTPUT is the LAST stage. `COPY --from=<name|
-///   index>` copies from a PRIOR stage's resolved output tree (folded into that
-///   step's key — a changed upstream stage busts the copy, no false hit).
-///   A single-FROM Dockerfile builds BYTE-IDENTICALLY to the pre-WP loop.
-///   **Ambiguity / out-of-scope (transcribe, don't design):** (1) `--target
-///   <stage>` is NOT wired — the `lightr build` CLI exposes no such flag and the
-///   handler is outside this WP's owned files, so the output stays the LAST stage;
-///   the stage table is ready for `--target` the moment the CLI grows the flag.
-///   (2) `COPY --from=<external image>` is OUT OF SCOPE — only STAGE refs resolve;
-///   an external-image `--from` is an honest "unknown stage / out of scope" error.
+// WP-C: `--target` validation split into a sibling file (godfile cap).
+#[path = "target.rs"]
+mod target_mod;
+
+/// Execute a Dockerfile build (final stage). Thin wrapper over [`build_target`]
+/// with `target = None` — preserves the pre-WP-C signature. See [`build_target`]
+/// for the memoization / `${VAR}` / multi-stage / `--platform` contract.
 pub fn build(
     context_dir: &Path,
     dockerfile: &Path,
@@ -82,6 +62,45 @@ pub fn build(
     engine: lightr_engine::EngineKind,
     store: &Store,
     build_args: &[(String, String)],
+) -> Result<BuildReport> {
+    build_target(
+        context_dir,
+        dockerfile,
+        name,
+        engine,
+        store,
+        build_args,
+        None,
+    )
+}
+
+/// Execute a Dockerfile build, optionally stopping at a named `--target` stage.
+///
+/// - RUN steps use the **native engine** (`rootfs: None`); each step has a
+///   content-derived memo key (AC hits replay the cached layer, no exec).
+/// - `${VAR}` is interpolated against a `VarScope` (env seeded from the base at
+///   FROM + ENV; args from ARG/`--build-arg`) BEFORE keying; the key hashes the
+///   POST-interpolation text (v2), so differing ENV/ARG never collide.
+/// - **Multi-stage (WP-DF-03):** `FROM <base> [AS <name>]` starts a STAGE keyed
+///   INDEPENDENTLY (reset fs/scope/shell/workdir/ENV); `COPY --from=<name|index>`
+///   pulls a PRIOR stage's output (folded into the key — a changed upstream busts
+///   the copy). `COPY --from=<external image>` is OUT OF SCOPE (honest error).
+/// - **WP-C `target`** = `docker build --target <stage>`: `Some(name)` (case-
+///   insensitive) selects that stage as the OUTPUT and stops the loop once it
+///   finishes (deps are all prior stages, already built); unknown name ⇒ honest
+///   error. `None` ⇒ the LAST stage, byte-identical to the pre-WP-C build.
+/// - **WP-C `--platform`** folds the resolved platform into every step's key (see
+///   `step_key`) and validates a requested platform against the base (see
+///   `exec_instr::from`).
+#[allow(clippy::too_many_arguments)]
+pub fn build_target(
+    context_dir: &Path,
+    dockerfile: &Path,
+    name: &str,
+    engine: lightr_engine::EngineKind,
+    store: &Store,
+    build_args: &[(String, String)],
+    target: Option<&str>,
 ) -> Result<BuildReport> {
     use super::args::{overrides_from_pairs, ArgState};
     use super::parse::parse_dockerfile_full;
@@ -102,7 +121,13 @@ pub fn build(
     // literal-escape during interpolation, matching the parser's continuation
     // escape char.
     let escape = directives.escape.unwrap_or('\\') == '\\';
-    let total = steps.len() as u64;
+
+    // WP-C: validate `--target <stage>` up front (fail closed); returns the
+    // lowercased target or None (logic in the sibling `target` module).
+    let target_lc = target_mod::validate_target(target, &steps)?;
+    // `total` = steps actually EXECUTED, counted incrementally (with `--target`
+    // the loop stops early; without it this equals every step, as before).
+    let mut total: u64 = 0;
 
     let guard = TempDirGuard::new()?;
     let work_dir = &guard.path;
@@ -110,40 +135,64 @@ pub fn build(
     let mut prev_layer_root: Option<Digest> = None;
     let mut accumulated_env: Vec<(String, String)> = Vec::new();
     let mut current_workdir = String::from("/");
-    // Active SHELL for shell-form RUN (WP-DF-09): default `["/bin/sh","-c"]`,
-    // set by SHELL, reset at every FROM (per-stage). Folded into the RUN memo
-    // key (step_key) so a differing SHELL can never false-hit a cached layer.
+    // Active SHELL for shell-form RUN (WP-DF-09): set by SHELL, reset at FROM,
+    // folded into the RUN memo key so a differing SHELL can't false-hit.
     let mut current_shell = exec_instr::default_shell();
     let mut cached_steps: u64 = 0;
-    // Interpolation scope: `args` seeded by ARG (DF-08, via `arg_state`); `env`
-    // seeded from the base after FROM + updated by ENV (ENV wins over ARG).
+    // Interpolation scope: `args` from ARG (via `arg_state`); `env` from the base
+    // at FROM + ENV (ENV wins).
     let mut scope = VarScope::default();
 
-    // WP-DF-03 multi-stage state. `stages` accumulates each finished stage's
-    // output (index + name) for `COPY --from`; `current_stage_name` is the
-    // in-progress stage's `AS <name>` (None until the first FROM, or an
-    // un-named stage). At each FROM AFTER the first, the in-progress stage is
-    // recorded into `stages` and `prev_layer_root` is RESET to None — a new
-    // stage keys INDEPENDENTLY of prior stages (Docker: stages share nothing
-    // but the explicit `COPY --from`). A single-FROM build records exactly one
-    // stage at the end and is byte-identical to the pre-WP single-stage loop.
+    // WP-DF-03 multi-stage state. `stages` records each finished stage's output
+    // (index + name) for `COPY --from`; `current_stage_name` is the in-progress
+    // `AS <name>`. Each FROM after the first records the prior stage and resets
+    // `prev_layer_root` to None so the new stage keys INDEPENDENTLY.
     let mut stages = StageTable::default();
     let mut current_stage_name: Option<String> = None;
     let mut stage_in_progress = false;
+    // WP-C: the RESOLVED platform of the stage currently building — the
+    // `FROM --platform=<p>` value (normalized) when set, else the host platform.
+    // Re-derived at every FROM and folded into EVERY step's memo key, so two
+    // builds for different platforms never cross-cache. The default (host)
+    // matches the pre-WP behavior.
+    let mut active_platform = super::platform::host_platform();
 
     for step in &steps {
+        total += 1;
         // Stage boundary: a FROM that is NOT the first finalizes the prior stage
         // (record its output for `COPY --from`) and resets the per-build-key
         // lineage so the new stage is keyed independently.
-        if let Instr::From { stage, .. } = &step.instr {
+        if let Instr::From {
+            stage, platform, ..
+        } = &step.instr
+        {
             if stage_in_progress {
                 if let Some(root) = prev_layer_root {
                     stages.record(current_stage_name.as_deref(), root);
                 }
                 prev_layer_root = None;
+                // WP-C: if the stage we just finalized IS the `--target`, the
+                // build is complete — stop before starting this next FROM. (This
+                // FROM step was counted in `total`; un-count it since it does not
+                // run.) The finalized stage's output is recorded above, so the
+                // post-loop selection picks it as the report root.
+                if let (Some(want), Some(done)) = (&target_lc, &current_stage_name) {
+                    if done.eq_ignore_ascii_case(want) {
+                        total -= 1;
+                        break;
+                    }
+                }
             }
             current_stage_name = stage.clone();
             stage_in_progress = true;
+            // WP-C: re-derive the active platform for the NEW stage. The flag is
+            // interpolated (Docker allows `--platform=$TARGETPLATFORM`); absent ⇒
+            // host. Validation against the base happens in `exec_instr::from`.
+            let plat_flag = match platform {
+                Some(p) => Some(interpolate(p, &scope, escape)?),
+                None => None,
+            };
+            active_platform = super::platform::resolve_platform(plat_flag.as_deref());
         }
 
         // WP-DF-03: a `COPY --from=<stage>` folds the SOURCE stage's resolved
@@ -169,6 +218,7 @@ pub fn build(
             escape,
             &current_shell,
             from_stage_digest,
+            &active_platform,
         )?;
 
         // AC lookup
@@ -289,15 +339,25 @@ pub fn build(
         prev_layer_root = Some(new_root);
     }
 
-    // The LAST stage's output is the build result (WP-DF-03; `--target` would
-    // select a different stage — see the note below: no CLI flag exists yet).
-    // Record it too so the table is complete (and a `COPY --from=<last>` from a
-    // hypothetical later step would resolve — though none can follow the end).
-    let final_root = prev_layer_root
-        .ok_or_else(|| LightrError::InvalidManifest("empty Dockerfile".to_string()))?;
-    if stage_in_progress {
-        stages.record(current_stage_name.as_deref(), final_root);
+    // The output is the LAST stage that ran (WP-DF-03) — which, with `--target`
+    // (WP-C), is the target stage (the loop stopped once it finished). Record the
+    // in-progress stage's output so the table is complete (and a `COPY --from=
+    // <last>` would resolve).
+    if let Some(root) = prev_layer_root {
+        if stage_in_progress {
+            stages.record(current_stage_name.as_deref(), root);
+        }
     }
+    // Select the report root. With `--target`, the target stage's recorded output
+    // is the result (it was recorded either at its FROM boundary on break, or by
+    // the line above when it was the last stage). Without a target, it is the
+    // last stage's output (`prev_layer_root`). An empty Dockerfile (no stage ever
+    // produced a root) is a fail-closed error.
+    let final_root = match &target_lc {
+        Some(want) => stages.resolve(want)?,
+        None => prev_layer_root
+            .ok_or_else(|| LightrError::InvalidManifest("empty Dockerfile".to_string()))?,
+    };
 
     Ok(BuildReport {
         name: name.to_string(),
@@ -307,47 +367,32 @@ pub fn build(
     })
 }
 
-#[cfg(test)]
-#[path = "exec_tests.rs"]
-mod tests;
-
-// WP-DF-05 end-to-end tests live in a sibling file to keep each under the
-// 400-line godfile cap.
-#[cfg(test)]
-#[path = "exec_df05_tests.rs"]
-mod df05_tests;
-
-// WP-DF-09 SHELL end-to-end tests (sibling file, godfile cap).
-#[cfg(test)]
-#[path = "exec_df09_tests.rs"]
-mod df09_tests;
-
-// WP-DF-06 COPY parity end-to-end tests (sibling file, godfile cap).
-#[cfg(test)]
-#[path = "exec_df06_tests.rs"]
-mod df06_tests;
-
-// WP-DF-07 ADD end-to-end tests: local copy (reuses DF-06) + tar auto-extract +
-// URL honest-unsupported + memo no-false-hit (sibling file, godfile cap).
-#[cfg(test)]
-#[path = "exec_df07_tests.rs"]
-mod df07_tests;
-
-// WP-DF-03 multi-stage end-to-end tests: 2-stage build + COPY --from=name/index +
-// unknown/forward/external honest errors + memo no-false-hit + single-stage
-// byte-identical (sibling file, godfile cap).
+// End-to-end test modules — each a sibling file (godfile cap). WP-C (`--target`
+// + `FROM --platform`) and the per-WP DF-* e2e suites (05/09/06/07/03/cfg/ignore).
 #[cfg(test)]
 #[path = "exec_df03_tests.rs"]
 mod df03_tests;
-
-// WP-DF-IMGCFG record-side tests: config instructions land in the image config
-// sidecar; config-less images keep the default config (sibling file, godfile cap).
 #[cfg(test)]
-#[path = "exec_imgcfg_tests.rs"]
-mod imgcfg_tests;
-
-// WP-DF-IGNORE e2e: `.dockerignore` excludes from COPY/ADD context + the memo
-// key reflects exclusion (ignored file doesn't bust the cache). Sibling file.
+#[path = "exec_df05_tests.rs"]
+mod df05_tests;
+#[cfg(test)]
+#[path = "exec_df06_tests.rs"]
+mod df06_tests;
+#[cfg(test)]
+#[path = "exec_df07_tests.rs"]
+mod df07_tests;
+#[cfg(test)]
+#[path = "exec_df09_tests.rs"]
+mod df09_tests;
 #[cfg(test)]
 #[path = "exec_df_ignore_tests.rs"]
 mod df_ignore_tests;
+#[cfg(test)]
+#[path = "exec_imgcfg_tests.rs"]
+mod imgcfg_tests;
+#[cfg(test)]
+#[path = "exec_tests.rs"]
+mod tests;
+#[cfg(test)]
+#[path = "exec_wpc_tests.rs"]
+mod wpc_tests;
