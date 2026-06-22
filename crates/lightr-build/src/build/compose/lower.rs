@@ -76,6 +76,9 @@ fn lower_service(name: String, mut def: ServiceDef, base_dir: Option<&Path>) -> 
 
     // --- active aspects (already lowered; behavior-preserving) ---
     lower_image(&def, &mut svc);
+    // WP-E: lower the `build:` directive (context resolved against `base_dir`).
+    // Runs BEFORE nothing depends on it; the up-path consumes `svc.build`.
+    lower_build_aspect(&def, &mut svc, base_dir)?;
     lower_command_aspect(&def, &mut svc);
     lower_env_aspect(&mut def, &mut svc, base_dir)?;
     lower_ports_aspect(&def, &mut svc)?;
@@ -113,11 +116,20 @@ fn lower_service(name: String, mut def: ServiceDef, base_dir: Option<&Path>) -> 
 }
 
 /// `image`: the container image reference. Empty when the service declares only
-/// a `build:` (not lowered yet).
+/// a `build:` (resolved into `image_ref` by the up-path after the build runs).
 fn lower_image(def: &ServiceDef, svc: &mut Service) {
     if let Some(image) = &def.image {
         svc.image_ref = image.clone();
     }
+}
+
+/// `build` aspect (WP-E): lower the service's `build:` (short/long) into
+/// `svc.build`, resolving the context against the compose file's directory. The
+/// up-path runs the build and sets `image_ref` from the result. No `build:` ⇒
+/// `svc.build = None` (behavior-preserving).
+fn lower_build_aspect(def: &ServiceDef, svc: &mut Service, base_dir: Option<&Path>) -> Result<()> {
+    svc.build = super::build_lower::lower_build(def.build.as_ref(), base_dir)?;
+    Ok(())
 }
 
 /// `command` aspect: lower the service's `command` (string ⇒ `/bin/sh -c`

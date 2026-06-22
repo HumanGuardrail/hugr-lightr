@@ -212,3 +212,112 @@ fn no_sources_is_noop_behavior_preserving() {
     ingest_file_sources(&store, &[], "secret").unwrap();
     assert!(store.list_refs().unwrap().is_empty());
 }
+
+// ---- WP-E: full up-path build integration (parse → lower → up) ----
+
+use crate::build::compose::parse::parse_compose;
+
+/// Run `compose_up` over `yaml` with a fresh Store in its own tempdir, then read
+/// back the on-disk `spec.json` the supervisor would consume. `LIGHTR_HOME` is
+/// pointed at the test dir so the stack dir is isolated. Returns the parsed spec.
+fn up_and_read_spec(
+    yaml: &str,
+    project: &str,
+    home: &std::path::Path,
+    store: &Store,
+) -> crate::build::compose::model::StackSpec {
+    // compose_up reads LIGHTR_HOME for the stack dir; the SECRETS test already
+    // proves Store isolation. We set it under a mutex-free unique home per test.
+    std::env::set_var("LIGHTR_HOME", home);
+    let compose = parse_compose(yaml).expect("parse compose");
+    let handle = compose_up(&compose, store, 60, project, &[]).expect("compose up");
+    let spec_path = handle.stack_dir.join("spec.json");
+    let bytes = std::fs::read(&spec_path).expect("spec.json written");
+    serde_json::from_slice(&bytes).expect("parse spec.json")
+}
+
+#[test]
+fn up_builds_short_form_service_and_records_built_ref() {
+    let dir = uniq_dir("wpe-short");
+    let store = fresh_store(&dir);
+    std::fs::write(dir.join("hello.txt"), b"short-form").unwrap();
+    std::fs::write(
+        dir.join("Dockerfile"),
+        "FROM scratch\nCOPY hello.txt /hello.txt\n",
+    )
+    .unwrap();
+    // Absolute context (no base_dir on the parse_compose path).
+    let ctx = dir.to_string_lossy().into_owned();
+    let yaml = format!("services:\n  web:\n    build: {ctx}\n    command: /bin/true\n");
+
+    let spec = up_and_read_spec(&yaml, "myproj", &dir, &store);
+    let web = spec.services.iter().find(|s| s.name == "web").unwrap();
+    assert_eq!(web.image_ref, "myproj_web", "derived build ref recorded");
+    // The recorded ref hydrates the built filesystem.
+    let dest = dir.join("hyd");
+    lightr_index::hydrate(&dest, &store, &web.image_ref).unwrap();
+    assert_eq!(
+        std::fs::read(dest.join("hello.txt")).unwrap(),
+        b"short-form"
+    );
+}
+
+#[test]
+fn up_builds_long_form_service() {
+    let dir = uniq_dir("wpe-long");
+    let store = fresh_store(&dir);
+    std::fs::write(dir.join("hello.txt"), b"long-form").unwrap();
+    std::fs::write(
+        dir.join("Build.df"),
+        "FROM scratch\nCOPY hello.txt /hello.txt\n",
+    )
+    .unwrap();
+    let ctx = dir.to_string_lossy().into_owned();
+    let yaml = format!(
+        "services:\n  api:\n    build:\n      context: {ctx}\n      dockerfile: Build.df\n    command: /bin/true\n"
+    );
+
+    let spec = up_and_read_spec(&yaml, "proj2", &dir, &store);
+    let api = spec.services.iter().find(|s| s.name == "api").unwrap();
+    assert_eq!(api.image_ref, "proj2_api");
+    let dest = dir.join("hyd");
+    lightr_index::hydrate(&dest, &store, &api.image_ref).unwrap();
+    assert!(dest.join("hello.txt").exists());
+}
+
+#[test]
+fn up_build_plus_image_tags_under_image_value() {
+    let dir = uniq_dir("wpe-tag");
+    let store = fresh_store(&dir);
+    std::fs::write(dir.join("hello.txt"), b"tagged").unwrap();
+    std::fs::write(
+        dir.join("Dockerfile"),
+        "FROM scratch\nCOPY hello.txt /hello.txt\n",
+    )
+    .unwrap();
+    let ctx = dir.to_string_lossy().into_owned();
+    let yaml = format!(
+        "services:\n  svc:\n    image: my-tagged-image\n    build: {ctx}\n    command: /bin/true\n"
+    );
+
+    let spec = up_and_read_spec(&yaml, "proj3", &dir, &store);
+    let svc = spec.services.iter().find(|s| s.name == "svc").unwrap();
+    assert_eq!(
+        svc.image_ref, "my-tagged-image",
+        "build+image tags under the `image:` value (compose build-then-tag)"
+    );
+    let dest = dir.join("hyd");
+    lightr_index::hydrate(&dest, &store, "my-tagged-image").unwrap();
+    assert!(dest.join("hello.txt").exists());
+}
+
+#[test]
+fn up_image_only_service_unchanged() {
+    // A service with only `image:` (no build) carries its image_ref verbatim.
+    let dir = uniq_dir("wpe-imgonly");
+    let store = fresh_store(&dir);
+    let yaml = "services:\n  db:\n    image: postgres\n    command: /bin/true\n";
+    let spec = up_and_read_spec(yaml, "proj4", &dir, &store);
+    let db = spec.services.iter().find(|s| s.name == "db").unwrap();
+    assert_eq!(db.image_ref, "postgres", "image-only path is unchanged");
+}

@@ -191,13 +191,32 @@ pub fn compose_up(
     let active_set: HashSet<&str> = active_profiles.iter().map(String::as_str).collect();
     let active_names = active_service_names(c, &active_set);
 
+    // WP-E: for every ACTIVE service that declares a `build:`, run the build
+    // pipeline NOW (before the supervisor is spawned) and capture the produced
+    // store ref. The resolved ref replaces `image_ref` in the on-disk spec so the
+    // supervisor hydrates the BUILT image exactly as it would a pulled `image:`.
+    // A service with no `build:` is untouched (behavior-preserving).
+    let mut built_refs: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for s in c.services.iter().filter(|s| active_names.contains(&s.name)) {
+        if s.build.is_some() {
+            let resolved = super::build_run::build_service_image(s, store, project)?;
+            built_refs.insert(s.name.clone(), resolved);
+        }
+    }
+
     let service_specs: Vec<ServiceSpec> = c
         .services
         .iter()
         .filter(|s| active_names.contains(&s.name))
         .map(|s| ServiceSpec {
             name: s.name.clone(),
-            image_ref: s.image_ref.clone(),
+            // WP-E: a built service's `image_ref` is the ref the build produced;
+            // all others keep their lowered `image:` value (possibly empty).
+            image_ref: built_refs
+                .get(&s.name)
+                .cloned()
+                .unwrap_or_else(|| s.image_ref.clone()),
             command: s.command.clone().unwrap_or_default(),
             ports: s.ports.clone(),
             env: s.env.clone(),
