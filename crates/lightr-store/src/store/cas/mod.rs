@@ -233,6 +233,23 @@ pub fn materialize_file(
         return Err(LightrError::NotFound(*d));
     }
 
+    // FIX-#76 (CAS integrity): re-hash the stored object and verify it against the
+    // requested digest BEFORE the CoW, so a bit-rotted object can never silently
+    // reach a build. Ingest (`put_bytes`/`ingest_file`) already content-addresses
+    // at WRITE time — the object path IS its digest — so a freshly written object
+    // is correct by construction; this guards against on-disk corruption AFTER
+    // ingest (the same bit-rot `get_bytes` already catches on its read path, which
+    // this read path previously skipped). Fail-closed: a mismatch is an honest
+    // Integrity error and the corrupt object is left as evidence (never deleted),
+    // matching `get_bytes`. Correctness over perf for a content-addressed store.
+    let actual = Digest::of_file(&src)?;
+    if actual != *d {
+        return Err(LightrError::Integrity {
+            expected: *d,
+            actual,
+        });
+    }
+
     if let Some(p) = dest.parent() {
         fs::create_dir_all(p)?;
     }
