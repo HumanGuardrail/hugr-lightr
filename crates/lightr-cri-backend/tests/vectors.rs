@@ -35,9 +35,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use lightr_cri_backend::{
-    BackendError, ContainerConfig, ContainerFilter, ContainerId, ContainerStatsRec,
-    ContainerStatus, CriBackend, ExecResult, FsInfo, ImageRecord, LightrBackend, PulledImage,
-    Result, SandboxConfig, SandboxFilter, SandboxId, SandboxState, SandboxStatus,
+    ContainerConfig, ContainerFilter, ContainerId, ContainerStatsRec, ContainerStatus, CriBackend,
+    ExecResult, FsInfo, ImageRecord, LightrBackend, PulledImage, Result, SandboxConfig,
+    SandboxFilter, SandboxId, SandboxStatus,
 };
 
 use data::Category;
@@ -68,95 +68,38 @@ fn temp_home() -> PathBuf {
 /// the vectors that ASSERT sandbox behavior are DEFERRED, not run through this.
 struct ScaffoldBackend {
     inner: LightrBackend,
-    sandboxes: Mutex<BTreeMap<String, SandboxRec>>,
-}
-
-struct SandboxRec {
-    config: SandboxConfig,
-    state: SandboxState,
-    created_at_nanos: i64,
 }
 
 impl ScaffoldBackend {
     fn new(home: PathBuf) -> Self {
         Self {
             inner: LightrBackend::new(home),
-            sandboxes: Mutex::new(BTreeMap::new()),
         }
     }
     fn reopen(home: PathBuf) -> Self {
-        // Crash-recovery: the real backend re-derives container/image state from
-        // disk; the scaffold's in-memory sandbox map is not persisted, so the
-        // DeferSandbox vectors (which alone assert post-reopen sandbox state)
-        // never run through the scaffold. A reopened scaffold starts with an
-        // empty sandbox map — sufficient for the RUN set, which re-runs from
-        // fresh() and never reopens.
+        // Crash-recovery: a reopened backend re-derives container/image AND
+        // sandbox state from disk (the sandbox plane is now real + persistent).
         Self::new(home)
     }
 }
 
 impl CriBackend for ScaffoldBackend {
-    // sandbox plane — TEST SCAFFOLD (in-memory)
+    // sandbox plane — now REAL (WP-CRI-SANDBOX wired the full plane + the
+    // create_container Ready-gate); the scaffold delegates straight through.
     fn run_sandbox(&self, cfg: SandboxConfig) -> Result<SandboxId> {
-        let id = format!("sb-scaffold-{}", self.sandboxes.lock().unwrap().len());
-        self.sandboxes.lock().unwrap().insert(
-            id.clone(),
-            SandboxRec {
-                config: cfg,
-                state: SandboxState::Ready,
-                created_at_nanos: now_nanos(),
-            },
-        );
-        Ok(SandboxId(id))
+        self.inner.run_sandbox(cfg)
     }
     fn stop_sandbox(&self, id: &SandboxId) -> Result<()> {
-        if let Some(r) = self.sandboxes.lock().unwrap().get_mut(&id.0) {
-            r.state = SandboxState::NotReady;
-        }
-        Ok(())
+        self.inner.stop_sandbox(id)
     }
     fn remove_sandbox(&self, id: &SandboxId) -> Result<()> {
-        // Cascade: stop+remove every container in this sandbox (contract law),
-        // delegated to the REAL backend so the lifecycle vectors that remove a
-        // running sandbox exercise the real force-stop+remove path.
-        let cids: Vec<ContainerId> = self
-            .inner
-            .list_containers(&ContainerFilter {
-                sandbox: Some(id.clone()),
-                ..Default::default()
-            })?
-            .into_iter()
-            .map(|s| s.id)
-            .collect();
-        for cid in cids {
-            self.inner.remove_container(&cid)?;
-        }
-        self.sandboxes.lock().unwrap().remove(&id.0);
-        Ok(())
+        self.inner.remove_sandbox(id)
     }
     fn sandbox_status(&self, id: &SandboxId) -> Result<SandboxStatus> {
-        let guard = self.sandboxes.lock().unwrap();
-        let r = guard
-            .get(&id.0)
-            .ok_or_else(|| BackendError::NotFound(format!("sandbox {}", id.0)))?;
-        Ok(SandboxStatus {
-            id: id.clone(),
-            config: r.config.clone(),
-            state: r.state,
-            created_at_nanos: r.created_at_nanos,
-            ip: None,
-            netns_path: None,
-        })
+        self.inner.sandbox_status(id)
     }
-    fn list_sandboxes(&self, _filter: &SandboxFilter) -> Result<Vec<SandboxStatus>> {
-        let ids: Vec<SandboxId> = self
-            .sandboxes
-            .lock()
-            .unwrap()
-            .keys()
-            .map(|k| SandboxId(k.clone()))
-            .collect();
-        ids.iter().map(|id| self.sandbox_status(id)).collect()
+    fn list_sandboxes(&self, filter: &SandboxFilter) -> Result<Vec<SandboxStatus>> {
+        self.inner.list_sandboxes(filter)
     }
 
     // container / exec / image / stats — DELEGATE to the REAL backend
@@ -202,13 +145,6 @@ impl CriBackend for ScaffoldBackend {
     fn image_fs_info(&self) -> Result<FsInfo> {
         self.inner.image_fs_info()
     }
-}
-
-fn now_nanos() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as i64
 }
 
 // ── BackendFactory over the scaffolded real backend ──────────────────────────
