@@ -8,30 +8,28 @@
 //! split across `data_a.rs`/`data_b.rs` only to honor the 400-LOC godfile guard.
 //!
 //! Category drives the GREENLIST (`tests/vectors.rs`): `RunLifecycle` vectors
-//! RUN against the real implemented container/exec/image/stats methods (the
-//! sandbox prefix is satisfied by the test scaffold); every `Defer*` is gated
-//! out and LOGGED (never silently skipped):
-//!   - `DeferSandbox` — asserts sandbox-plane semantics (state/cascade/ip),
-//!     fail-closed in LightrBackend (WP-CRI-SANDBOX).
-//!   - `DeferStream`  — uses `open_exec` (streaming), fail-closed (WP-CRI-STREAM).
-//!   - `DeferLog`     — asserts the CRI log file (needs the sandbox
-//!     `log_directory` wiring, WP-CRI-SANDBOX).
-//!   - `DeferNet`     — image-CONTENT pull of a synthetic ref: the fake
-//!     fabricates the record in-memory, the real backend performs a live OCI
-//!     registry pull. A seam reality (no network in the gate), not a fixable
-//!     divergence.
+//! RUN against the REAL `LightrBackend` — the FULL plane (sandbox state machine,
+//! container/exec/image/stats, streaming `open_exec`, CRI log file) is now wired
+//! (WP-CRI-SANDBOX + WP-CRI-STREAM merged), so the sandbox/streaming/log vectors
+//! are UN-DEFERRED and run directly (no scaffold). The ONLY remaining gated-out
+//! class is `DeferNet`, LOGGED (never silently skipped):
+//!   - `DeferNet` — needs a LIVE OCI registry (image-CONTENT pull of a synthetic
+//!     ref): the fake fabricates the record in-memory, the real backend performs
+//!     a live OCI registry pull. A seam reality (no network in the macOS gate),
+//!     not a fixable divergence.
+//!
+//! PLATFORM NOTE (contract §5): the sandbox STATE-MACHINE vectors run on macOS
+//! (the state machine + crash-only persistence are platform-uniform). The
+//! netns/CNI RUNTIME is cfg(linux) and probe-truthful: on macOS a sandbox has
+//! `ip = None` regardless of `host_network`, so `host-network-sandbox-no-ip`
+//! (which asserts the IP is ABSENT) RUNS here; no vector asserts an
+//! IP-PRESENT/CNI-assigned address, so nothing defers on the Linux-runtime axis.
 
 /// Why a vector is gated out of the RUN set (logged, never silently skipped).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
-    /// Runs against the real implemented methods (sandbox prefix scaffolded).
+    /// Runs against the REAL `LightrBackend` (full plane wired).
     RunLifecycle,
-    /// Sandbox-plane semantics — fail-closed (WP-CRI-SANDBOX).
-    DeferSandbox,
-    /// Streaming `open_exec` — fail-closed (WP-CRI-STREAM).
-    DeferStream,
-    /// CRI log-file assertion — needs sandbox `log_directory` (WP-CRI-SANDBOX).
-    DeferLog,
     /// Image-content pull of a synthetic ref — needs a live OCI registry.
     DeferNet,
 }

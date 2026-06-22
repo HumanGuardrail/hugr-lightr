@@ -82,7 +82,7 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "crash-recovery-reopen-after-stop-preserves-exited",
-        category: Category::DeferSandbox,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "crash-recovery-reopen-after-stop-preserves-exited",
   "steps": [
@@ -101,7 +101,9 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "crash-recovery-reopen-preserves-images-and-not-ready-sandbox",
-        category: Category::DeferSandbox,
+        // Pulls `ref/persist-test:1` — a live OCI registry pull; defers on the
+        // network axis (the rest of its assertions ARE macOS-runnable).
+        category: Category::DeferNet,
         json: r#"{
   "name": "crash-recovery-reopen-preserves-images-and-not-ready-sandbox",
   "steps": [
@@ -119,7 +121,7 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "crash-recovery-sandbox-survives",
-        category: Category::DeferSandbox,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "crash-recovery-sandbox-survives",
   "steps": [
@@ -137,7 +139,7 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "create-container-in-not-ready-sandbox",
-        category: Category::DeferSandbox,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "create-container-in-not-ready-sandbox",
   "steps": [
@@ -152,7 +154,7 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "create-container-in-unknown-sandbox",
-        category: Category::DeferSandbox,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "create-container-in-unknown-sandbox",
   "steps": [
@@ -163,7 +165,7 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "exec-session-echo-exit-code",
-        category: Category::DeferStream,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "exec-session-echo-exit-code",
   "steps": [
@@ -202,7 +204,7 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "exec-session-exit-7",
-        category: Category::DeferStream,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "exec-session-exit-7",
   "steps": [
@@ -257,7 +259,7 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "host-network-sandbox-no-ip",
-        category: Category::DeferSandbox,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "host-network-sandbox-no-ip",
   "steps": [

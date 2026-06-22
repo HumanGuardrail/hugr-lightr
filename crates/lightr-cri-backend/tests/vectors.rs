@@ -1,22 +1,25 @@
-//! WP-CRI-VECTORS — the seam's red→green acceptance bar.
+//! WP-CRI-VECTORS-2 — the seam's red→green acceptance bar, FULL-SUITE proof.
 //!
 //! Proves `LightrBackend` passes the SAME shared conformance vectors the
-//! lightr-cri fake passes, for the IMPLEMENTED methods (container / exec /
-//! image / stats). The runner + the vector corpus are TRANSCRIBED from
-//! `lightr-cri @ seam-contract-v1.1` (wire-level seam proof, NOT a git/path dep
-//! — drift is caught HERE; see `vectors/data.rs` + `vectors/runner.rs`).
+//! lightr-cri fake passes, for the FULL implemented plane: sandbox state
+//! machine + container / exec / image / stats + streaming `open_exec` + the CRI
+//! log file. WP-CRI-SANDBOX + WP-CRI-STREAM wired these methods, so the
+//! sandbox, streaming, and log vectors that WP-CRI-VECTORS DEFERRED are now
+//! UN-DEFERRED and RUN DIRECTLY against the real `LightrBackend`: the scaffold
+//! (in-memory sandbox bookkeeping) is GONE; the factory hands the executor a
+//! real backend. The runner + the vector corpus are TRANSCRIBED from `lightr-cri`
+//! @ seam-contract-v1.1 (wire-level seam proof, NOT a git/path dep; drift is
+//! caught HERE; see `vectors/data.rs` + `vectors/runner.rs`).
 //!
 //! GREENLIST DISCIPLINE (fail-closed, never silent): every vector is either RUN
 //! or gated out + LOGGED with its reason (see `Category` in `vectors/data.rs`).
-//! Sandbox + streaming + log-file + image-content-pull vectors are DEFERRED
-//! because the underlying methods are fail-closed or network-bound in the MVP
-//! backend (WP-CRI-SANDBOX / WP-CRI-STREAM). The RUN set drives the REAL
-//! implemented container/exec/image/stats methods; the sandbox PREFIX of a
-//! lifecycle vector is satisfied by an explicit, clearly-labeled TEST SCAFFOLD
-//! (`ScaffoldBackend`) that adds only in-memory sandbox bookkeeping and
-//! delegates every other call straight to the real `LightrBackend`. The
-//! scaffold is test-only and touches NO `src/`: it lets the shared lifecycle
-//! vectors exercise the real methods without the (deferred) sandbox plane.
+//! The ONLY remaining deferred class is `DeferNet`: vectors that pull image
+//! CONTENT from a live OCI registry (the fake fabricates the record in-memory;
+//! the real backend performs a live network pull — no network in the macOS
+//! gate). The sandbox STATE-MACHINE, streaming, and CRI-log vectors all RUN here
+//! (the netns/CNI RUNTIME is cfg(linux) + probe-truthful: on macOS `ip = None`,
+//! so the `host-network-sandbox-no-ip` ABSENCE assertion holds; no vector
+//! asserts a CNI-assigned IP, so nothing defers on the Linux-runtime axis).
 //!
 //! Parallel-safe: each vector runs over its own unique tempdir `home` (atomic
 //! counter + nanos); no `set_var`, no shared global.
@@ -34,11 +37,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use lightr_cri_backend::{
-    ContainerConfig, ContainerFilter, ContainerId, ContainerStatsRec, ContainerStatus, CriBackend,
-    ExecResult, FsInfo, ImageRecord, LightrBackend, PulledImage, Result, SandboxConfig,
-    SandboxFilter, SandboxId, SandboxStatus,
-};
+use lightr_cri_backend::{CriBackend, LightrBackend};
 
 use data::Category;
 use runner::{BackendFactory, Vector};
@@ -57,100 +56,12 @@ fn temp_home() -> PathBuf {
     p
 }
 
-// ── ScaffoldBackend — REAL LightrBackend + in-memory sandbox bookkeeping ─────
+// ── BackendFactory over the REAL LightrBackend (no scaffold) ─────────────────
 
-/// A test-only `CriBackend` that satisfies the (deferred, fail-closed) sandbox
-/// plane with minimal in-memory state and delegates EVERY container / exec /
-/// image / stats call to the real `LightrBackend`. This is NOT a backend
-/// change (it lives only in `tests/`); it is the scaffold that lets the shared
-/// lifecycle vectors drive the real implemented methods while the sandbox plane
-/// is still WP-CRI-SANDBOX. Sandbox semantics here are intentionally minimal —
-/// the vectors that ASSERT sandbox behavior are DEFERRED, not run through this.
-struct ScaffoldBackend {
-    inner: LightrBackend,
-}
-
-impl ScaffoldBackend {
-    fn new(home: PathBuf) -> Self {
-        Self {
-            inner: LightrBackend::new(home),
-        }
-    }
-    fn reopen(home: PathBuf) -> Self {
-        // Crash-recovery: a reopened backend re-derives container/image AND
-        // sandbox state from disk (the sandbox plane is now real + persistent).
-        Self::new(home)
-    }
-}
-
-impl CriBackend for ScaffoldBackend {
-    // sandbox plane — now REAL (WP-CRI-SANDBOX wired the full plane + the
-    // create_container Ready-gate); the scaffold delegates straight through.
-    fn run_sandbox(&self, cfg: SandboxConfig) -> Result<SandboxId> {
-        self.inner.run_sandbox(cfg)
-    }
-    fn stop_sandbox(&self, id: &SandboxId) -> Result<()> {
-        self.inner.stop_sandbox(id)
-    }
-    fn remove_sandbox(&self, id: &SandboxId) -> Result<()> {
-        self.inner.remove_sandbox(id)
-    }
-    fn sandbox_status(&self, id: &SandboxId) -> Result<SandboxStatus> {
-        self.inner.sandbox_status(id)
-    }
-    fn list_sandboxes(&self, filter: &SandboxFilter) -> Result<Vec<SandboxStatus>> {
-        self.inner.list_sandboxes(filter)
-    }
-
-    // container / exec / image / stats — DELEGATE to the REAL backend
-    fn create_container(&self, sandbox: &SandboxId, cfg: ContainerConfig) -> Result<ContainerId> {
-        self.inner.create_container(sandbox, cfg)
-    }
-    fn start_container(&self, id: &ContainerId) -> Result<()> {
-        self.inner.start_container(id)
-    }
-    fn stop_container(&self, id: &ContainerId, grace_seconds: i64) -> Result<()> {
-        self.inner.stop_container(id, grace_seconds)
-    }
-    fn remove_container(&self, id: &ContainerId) -> Result<()> {
-        self.inner.remove_container(id)
-    }
-    fn container_status(&self, id: &ContainerId) -> Result<ContainerStatus> {
-        self.inner.container_status(id)
-    }
-    fn list_containers(&self, filter: &ContainerFilter) -> Result<Vec<ContainerStatus>> {
-        self.inner.list_containers(filter)
-    }
-    fn container_stats(&self, id: &ContainerId) -> Result<ContainerStatsRec> {
-        self.inner.container_stats(id)
-    }
-    fn list_container_stats(&self, filter: &ContainerFilter) -> Result<Vec<ContainerStatsRec>> {
-        self.inner.list_container_stats(filter)
-    }
-    fn exec_sync(&self, id: &ContainerId, cmd: &[String], t: i64) -> Result<ExecResult> {
-        self.inner.exec_sync(id, cmd, t)
-    }
-    fn pull_image(&self, image_ref: &str) -> Result<PulledImage> {
-        self.inner.pull_image(image_ref)
-    }
-    fn image_status(&self, image_ref: &str) -> Result<Option<ImageRecord>> {
-        self.inner.image_status(image_ref)
-    }
-    fn list_images(&self) -> Result<Vec<ImageRecord>> {
-        self.inner.list_images()
-    }
-    fn remove_image(&self, image_ref: &str) -> Result<()> {
-        self.inner.remove_image(image_ref)
-    }
-    fn image_fs_info(&self) -> Result<FsInfo> {
-        self.inner.image_fs_info()
-    }
-}
-
-// ── BackendFactory over the scaffolded real backend ──────────────────────────
-
-/// `fresh()` = new tempdir home; `reopen()` = `LightrBackend::new(same_home)`
-/// (crash-only: container/image state re-derives from disk).
+/// `fresh()` = new tempdir home → a real `LightrBackend`; `reopen()` =
+/// `LightrBackend::new(same_home)` (crash-only law: sandbox + container + image
+/// state re-derives from disk). The sandbox plane is now real + persistent, so
+/// the vectors drive `LightrBackend` directly — no in-memory scaffold.
 struct LightrFactory {
     home: Mutex<PathBuf>,
 }
@@ -167,15 +78,15 @@ impl BackendFactory for LightrFactory {
     fn fresh(&self) -> Box<dyn CriBackend> {
         let home = temp_home();
         *self.home.lock().unwrap() = home.clone();
-        Box::new(ScaffoldBackend::new(home))
+        Box::new(LightrBackend::new(home))
     }
     fn reopen(&self) -> Box<dyn CriBackend> {
         let home = self.home.lock().unwrap().clone();
-        Box::new(ScaffoldBackend::reopen(home))
+        Box::new(LightrBackend::new(home))
     }
 }
 
-// ── The acceptance test: RUN the implemented-method vectors, LOG the deferred ─
+// ── The acceptance test: RUN the full plane, LOG the network-deferred ─────────
 
 #[test]
 fn conformance_vectors_prove_the_mvp_backend() {
@@ -188,10 +99,7 @@ fn conformance_vectors_prove_the_mvp_backend() {
     for def in data::vectors() {
         if def.category != Category::RunLifecycle {
             let reason = match def.category {
-                Category::DeferSandbox => "sandbox-plane semantics (fail-closed, WP-CRI-SANDBOX)",
-                Category::DeferStream => "streaming open_exec (fail-closed, WP-CRI-STREAM)",
-                Category::DeferLog => "CRI log file (needs sandbox log_directory, WP-CRI-SANDBOX)",
-                Category::DeferNet => "image-content pull (needs a live OCI registry)",
+                Category::DeferNet => "live OCI image-content pull (no network in the macOS gate)",
                 Category::RunLifecycle => unreachable!(),
             };
             deferred.entry(reason).or_default().push(def.name);
@@ -206,8 +114,8 @@ fn conformance_vectors_prove_the_mvp_backend() {
     }
 
     // GREENLIST log — never a silent skip.
-    eprintln!("── WP-CRI-VECTORS GREENLIST ───────────────────────────────");
-    eprintln!("RUN (implemented container/exec/image/stats): {run_pass} passed");
+    eprintln!("── WP-CRI-VECTORS-2 GREENLIST ─────────────────────────────");
+    eprintln!("RUN (full plane: sandbox+container+exec+image+stats+stream+log): {run_pass} passed");
     let deferred_total: usize = deferred.values().map(Vec::len).sum();
     eprintln!("DEFERRED (gated out, logged): {deferred_total}");
     for (reason, names) in &deferred {
@@ -224,6 +132,9 @@ fn conformance_vectors_prove_the_mvp_backend() {
 
     // Lock the proven count so an accidental re-classification (e.g. silently
     // dropping a vector to "deferred") is caught by the gate.
-    assert_eq!(run_pass, 12, "expected 12 RunLifecycle vectors to RUN+PASS");
-    assert_eq!(deferred_total, 17, "expected 17 deferred vectors, logged");
+    assert_eq!(run_pass, 25, "expected 25 RunLifecycle vectors to RUN+PASS");
+    assert_eq!(
+        deferred_total, 4,
+        "expected 4 DeferNet vectors (live OCI pull), logged"
+    );
 }
