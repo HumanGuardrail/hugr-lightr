@@ -1,4 +1,13 @@
 //! Compose submodule -- re-exports the public compose API.
+/// WP-E: lower a service's `build:` into the runtime `ServiceBuild` (context
+/// resolved against the compose file's directory). Consumed by `lower.rs`.
+pub(crate) mod build_lower;
+/// WP-E: the up-path build step — for a service with a `build:`, run the frozen
+/// `build_target` (WP-C) and resolve the produced store ref. Consumed by `up.rs`.
+pub(crate) mod build_run;
+/// WP-E: the `build:` serde model (`BuildSpec`/`BuildLong`/`BuildArgs`) + its
+/// lowered runtime form (`ServiceBuild`). Re-exported via `spec.rs`.
+pub(crate) mod build_spec;
 pub mod down;
 /// CMP-P0-ENVFILE-SVC: per-service `env_file` loader (KEY=VAL fold, lower
 /// precedence than the inline `environment` block). Consumed by `lower.rs`.
