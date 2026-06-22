@@ -1,0 +1,132 @@
+# Linux validation lane — DORMANT until a `[self-hosted, linux]` runner exists.
+#
+# WHY THIS IS SEPARATE FROM ci.yml: the green gate runs on a self-hosted macOS
+# Intel runner (see .github/workflows/ci.yml). Two things are Linux-gated and
+# cannot be validated there:
+#   (1) the CRI sandbox netns-pin + CNI ADD/DEL RUNTIME. The state machine and
+#       the pure CNI helpers are proven on macOS, but the actual netns join
+#       (`setns(CLONE_NEWNET)` pre_exec) and the CNI executor are `cfg(linux)`
+#       and only compile+run on Linux — see
+#       crates/lightr-cri-backend/src/{sandbox.rs,sandbox_net.rs}. The Linux
+#       helper tests live behind `#[cfg(all(test, target_os = "linux"))]` in
+#       crates/lightr-cri-backend/src/sandbox_net_tests.rs.
+#   (2) the 4 CAS-tier / runtime-tier KPIs handed off by lightr-cri (read
+#       /Users/.../HuGR/lightr-cri/docs/handoff/bench-cas-kpis-request.md):
+#       pull-dedup (0-byte re-pull), disk dedup ratio for N similar images,
+#       real-container cold-start/footprint A/B vs containerd, AppArmor applied.
+#
+# TRIGGER: `workflow_dispatch` ONLY. This workflow NEVER fires on push/PR, so it
+# can never break the green macOS gate. The jobs target `runs-on:
+# [self-hosted, linux]` — a label that DOES NOT EXIST yet, so even if dispatched
+# today the jobs simply queue and never schedule. The lane goes live the moment
+# a Linux self-hosted runner is registered with the `linux` label (runbook:
+# docs/runbooks/linux-validation.md).
+#
+# This file touches NOTHING in ci.yml and adds no push/PR surface.
+
+name: linux-validation
+
+on:
+  # workflow_dispatch ONLY — dormant by construction. No push:, no pull_request:.
+  # Until a `[self-hosted, linux]` runner is attached, a manual dispatch queues
+  # the jobs without ever scheduling them (no runner matches the label set).
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this Linux validation run was triggered (free text)"
+        required: false
+        default: "manual Linux validation"
+
+# No cancel-in-progress here: KPI A/B benches against containerd are expensive
+# and we never want a second dispatch to kill a partway-through measurement.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  # ── (a) CRI netns/CNI runtime — the cfg(linux) path ──────────────────────
+  # Builds lightr-cri-backend and runs the Linux-only netns/CNI tests plus the
+  # vectors that are deferred on macOS and un-deferred on Linux. Proves: the
+  # netns-pin + CNI ADD/DEL lifecycle actually executes on a real Linux kernel,
+  # not just that the macOS-side state machine compiles.
+  cri-linux:
+    name: cri netns/CNI runtime (Linux native)
+    # NOTE: the `linux` label does not exist yet → this job is never scheduled
+    # until a Linux self-hosted runner is registered. Dormant by design.
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Toolchain on PATH (pinned bin — rustup-proxy-immune)
+        # Same approach as ci.yml: use the pinned toolchain's REAL binaries
+        # directly, not the ~/.cargo/bin rustup proxies. The Linux runner box is
+        # expected to have the pinned toolchain pre-installed at
+        # $HOME/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu (the
+        # linux-gnu triple, mirroring the macOS gate's apple-darwin triple). No
+        # `rustup` call is made in CI. See the runbook for the one-time install.
+        run: |
+          echo "$HOME/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build lightr-cri-backend
+        run: cargo build -p lightr-cri-backend
+      - name: cri netns/CNI tests (cfg(linux) path + un-deferred vectors)
+        # On Linux these compile in the `#[cfg(all(test, target_os = "linux"))]`
+        # helper tests (sandbox_net_tests.rs) and the netns-join path in
+        # sandbox.rs. `cargo test -p lightr-cri-backend` on Linux exercises the
+        # vectors that are macOS-deferred (no setns there) and runs the full
+        # backend suite against the real kernel.
+        run: cargo test -p lightr-cri-backend -- --nocapture
+
+  # ── (b) CAS KPIs — the 4 deferred KPIs from the lightr-cri handoff ───────
+  # Each KPI maps to a measurement method + pass bar documented in the runbook
+  # and specced in the handoff doc. The lightr-cri bench harness
+  # (../lightr-cri/ci/bench.sh, schema lightr-cri.bench/v1) already reserves the
+  # `out_of_scope.deferred_kpis` slots; this job promotes them to in_scope by
+  # pointing the probes at the REAL CAS backend built here.
+  cas-kpis:
+    name: CAS KPIs (pull-dedup, disk-dedup, real cold-start A/B, AppArmor)
+    runs-on: [self-hosted, linux]
+    # Build the netns/CNI job first so a broken backend short-circuits before we
+    # spend time on expensive A/B-vs-containerd benches.
+    needs: cri-linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Toolchain on PATH (pinned bin — rustup-proxy-immune)
+        run: |
+          echo "$HOME/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build release binary (real CAS backend under test)
+        run: cargo build --release -p lightr-cli
+
+      # KPI 1 — pull dedup: 0-byte re-pull, only-novel-blobs on shared layers.
+      # Probe: pull A cold → record bytes; pull A again → assert ~0; pull B
+      # sharing layers with A → assert only B's novel bytes move.
+      # Pass bar: re-pull == 0 bytes; B transfers only novel blobs.
+      # (handoff §1) Measured against the real PullImage over CAS, A/B vs
+      # containerd on identical OCI images.
+      - name: KPI 1 — pull dedup (0-byte re-pull)
+        run: ./ci/linux-kpis/kpi1-pull-dedup.sh
+
+      # KPI 2 — disk for N similar images: on-disk bytes scale with shared
+      # content, not N × per-image layers. Probe: import N overlapping images;
+      # measure CAS on-disk; compare to containerd snapshotter; report ratio.
+      # Pass bar: dedup ratio > 1 and at parity-or-better vs containerd.
+      # (handoff §2)
+      - name: KPI 2 — disk dedup ratio (N similar images)
+        run: ./ci/linux-kpis/kpi2-disk-dedup.sh
+
+      # KPI 3 — real-container cold-start / footprint A/B vs containerd. Drives a
+      # real `crictl run` of a pullable image (nginx/agnhost) + curl; reuses the
+      # lightr-cri harness cold-start/RSS probes pointed at a real workload.
+      # Pass bar: time-to-serving + RSS at parity-or-better vs containerd, same
+      # image + host. (handoff §3)
+      - name: KPI 3 — real-container cold-start/footprint A/B
+        run: ./ci/linux-kpis/kpi3-cold-start-ab.sh
+
+      # KPI 4 — AppArmor conformance: critest AppArmor specs pass (profile
+      # actually applied to the container), removing them from
+      # ../lightr-cri/ci/critest-skips.txt. Pass bar: critest AppArmor specs
+      # GREEN. (handoff §4)
+      - name: KPI 4 — AppArmor profile applied (critest)
+        run: ./ci/linux-kpis/kpi4-apparmor.sh
