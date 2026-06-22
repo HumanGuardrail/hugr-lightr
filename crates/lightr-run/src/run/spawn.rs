@@ -278,6 +278,25 @@ pub(super) fn resolve_workdir(
     }
 }
 
+/// WP-HYG (#71): make a native child its OWN process-group leader (pgid == pid)
+/// so the stop path can signal the WHOLE tree (`kill(-pgid, …)`), not just the
+/// immediate child — else a `sh -c "…nc…"` leaks its `nc` grandchildren as
+/// PPID-1 orphans after `stop`/`compose down`. Docker parity (`docker stop`
+/// kills every process in the container). Unix-only — process groups are a unix
+/// concept; the windows path keeps its current behaviour (job-object tree-kill
+/// is a future ring). `cmd` is consumed under both cfgs (no unused-var on win).
+pub(super) fn set_own_process_group(cmd: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+    }
+}
+
 /// WP-RC-USER: honor `-u`/`--user` on a native child `Command` before exec.
 ///
 /// `user = None` ⇒ NO-OP (the child runs as the current user, byte-identical to

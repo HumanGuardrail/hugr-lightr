@@ -89,6 +89,9 @@ fn spawn_child(
         .stderr(std::process::Stdio::from(stderr_log));
     // WP-RC-USER: honor `-u`/`--user` (cfg(unix); None ⇒ current user).
     super::spawn::apply_user(&mut cmd, spec.user.as_deref())?;
+    // WP-HYG (#71): the child leads its own process group so `stop` reaps the
+    // whole tree, not just the immediate child (see `spawn::set_own_process_group`).
+    super::spawn::set_own_process_group(&mut cmd);
     // RC-SEAM-FREEZE: per-field runtime-config appliers from the persisted spec
     // (all no-ops today — behaviour-preserving; a future RC WP fills one slot).
     super::apply_cfg::apply_run_config_ondisk(spec, &mut cmd);
@@ -245,8 +248,11 @@ fn run_supervisor_loop(
                                         // marker) so no policy re-spawns the child.
                                         stopped = true;
                                         respawn::write_stop_marker(dir);
+                                        // WP-HYG (#71): signal the child's whole
+                                        // PROCESS GROUP (negative pid) so the stop
+                                        // reaches every descendant, not just `sh`.
                                         unsafe {
-                                            libc::kill(child_pid, sig as libc::c_int);
+                                            libc::kill(-child_pid, sig as libc::c_int);
                                         }
                                         serde_json::json!({"ok": true})
                                     } else {

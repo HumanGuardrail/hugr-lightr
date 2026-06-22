@@ -70,9 +70,15 @@ pub fn stop(dir: &std::path::Path, grace_secs: u64) -> Result<i32> {
         send_ctl_op(dir, &format!(r#"{{"op":"signal","sig":{stop_sig}}}"#));
     } else if let Some(pid) = read_pid_file(dir) {
         // Direct kill with the configured stop signal.
+        // WP-HYG (#71): signal the whole PROCESS GROUP (negative pid) so the
+        // stop reaches every descendant of the container process (the `sh -c
+        // "…"` grandchildren), not just the immediate child — Docker parity for
+        // `docker stop`. The supervised child is a group leader (pgid == its
+        // pid, set via `process_group(0)` at spawn), so `-pid` targets the
+        // group. If the group has already gone, the kill is a harmless ESRCH.
         #[cfg(unix)]
         unsafe {
-            libc::kill(pid, stop_sig as libc::c_int);
+            libc::kill(-pid, stop_sig as libc::c_int);
         }
         // WIN-PATH: no signal model — best-effort forced terminate with the unix
         // 128+signal exit code for the configured stop signal (143 for the
@@ -116,9 +122,12 @@ pub fn stop(dir: &std::path::Path, grace_secs: u64) -> Result<i32> {
 
     // Still alive — SIGKILL
     if let Some(pid) = read_pid_file(dir) {
+        // WP-HYG (#71): escalate SIGKILL to the whole PROCESS GROUP (negative
+        // pid) so any descendant that survived the grace signal is force-killed
+        // too — closing the orphan-leak window for good.
         #[cfg(unix)]
         unsafe {
-            libc::kill(pid, libc::SIGKILL);
+            libc::kill(-pid, libc::SIGKILL);
         }
         // WIN-PATH: SIGKILL → forced TerminateProcess with the unix
         // 128+SIGKILL(9)=137 exit code. Validatable only on a real Windows box.
