@@ -23,6 +23,8 @@ use lightr_store::Store;
 use crate::exit::die_lightr;
 
 mod compose;
+mod flag_err;
+mod run_args;
 
 // ── ref name sanitizer for `docker pull` ──────────────────────────────────────
 
@@ -55,38 +57,50 @@ pub(super) fn note_translation(lightr_verb: &str, lightr_args: &[&str]) {
 
 // ── docker build translation ──────────────────────────────────────────────────
 
-/// Parse `docker build [-t TAG] [-f FILE] [--file FILE] <CTX>` and dispatch to
-/// `handlers::build::run`.
+/// Parse `docker build [-t TAG] [-f FILE] [--build-arg N=V]… [--target STAGE]
+/// <CTX>` and dispatch to `handlers::build::run`.
+///
+/// FIX #74: `--build-arg` and `--target` are now FORWARDED (the native
+/// `lightr build` parses both — prior WPs). The catch-all that misread an
+/// unrecognized `--flag` as the context dir is replaced by an HONEST error, so
+/// a typo'd flag can never be silently swallowed as the positional.
 fn translate_build(args: &[String], json: bool, explain: bool) -> i32 {
     let mut tag: Option<String> = None;
     let mut dockerfile: Option<String> = None;
     let mut context: Option<String> = None;
+    let mut build_args: Vec<String> = Vec::new();
+    let mut target: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "-t" | "--tag" => {
-                i += 1;
-                if i < args.len() {
-                    tag = Some(args[i].clone());
-                }
-            }
-            "-f" | "--file" => {
-                i += 1;
-                if i < args.len() {
-                    dockerfile = Some(args[i].clone());
-                }
-            }
-            arg if arg.starts_with("--tag=") => {
-                tag = Some(arg["--tag=".len()..].to_string());
-            }
-            arg if arg.starts_with("--file=") => {
-                dockerfile = Some(arg["--file=".len()..].to_string());
-            }
-            _ => {
-                // Positional: context dir
-                context = Some(args[i].clone());
-            }
+        let raw = args[i].as_str();
+        // Split `--flag=value` once so both `--target s` and `--target=s` work.
+        let (flag, inline): (&str, Option<&str>) = match raw.split_once('=') {
+            Some((f, v)) if raw.starts_with("--") => (f, Some(v)),
+            _ => (raw, None),
+        };
+        match flag {
+            "-t" | "--tag" => match build_take(args, &mut i, inline) {
+                Some(v) => tag = Some(v),
+                None => return build_missing_value(flag),
+            },
+            "-f" | "--file" => match build_take(args, &mut i, inline) {
+                Some(v) => dockerfile = Some(v),
+                None => return build_missing_value(flag),
+            },
+            "--build-arg" => match build_take(args, &mut i, inline) {
+                Some(v) => build_args.push(v),
+                None => return build_missing_value(flag),
+            },
+            "--target" => match build_take(args, &mut i, inline) {
+                Some(v) => target = Some(v),
+                None => return build_missing_value(flag),
+            },
+            // CATCH-ALL TRAP FIX: an unrecognized FLAG is an honest error, never
+            // misread as the context dir (which silently dropped it before).
+            f if f.starts_with('-') => return flag_err::unsupported_flag("build", f),
+            // A bare positional is the context dir (docker's `build [OPTS] CTX`).
+            _ => context = Some(raw.to_string()),
         }
         i += 1;
     }
@@ -108,139 +122,57 @@ fn translate_build(args: &[String], json: bool, explain: bool) -> i32 {
         &["-f", df_display, "-t", &name, "--engine", "native", &ctx],
     );
 
-    // The docker shim does not yet translate `--build-arg` (deferred); pass none.
-    // WP-C: nor `--target` yet (the shim's flag table is owned by the docker-compat
-    // surface, not this WP) — pass `None` (behavior-identical to before). The
-    // native `lightr build --target` IS wired; shim translation is a follow-up.
+    // FIX #74: forward `--build-arg` + `--target` to the native build, which has
+    // parsed both since the WP-C follow-up. No longer silent-dropped.
     crate::handlers::build::run(
         &ctx,
         dockerfile.as_deref(),
         &name,
         "native",
-        &[],
+        &build_args,
         json,
         explain,
-        None,
+        target.as_deref(),
     )
+}
+
+/// Read the value for a build flag (split or `=`-joined). `None` ⇒ no value
+/// available (the caller emits an honest missing-value error).
+fn build_take(args: &[String], i: &mut usize, inline: Option<&str>) -> Option<String> {
+    if let Some(v) = inline {
+        return Some(v.to_string());
+    }
+    *i += 1;
+    args.get(*i).cloned()
+}
+
+/// Honest "flag requires a value" error for `docker build` (exit 2).
+fn build_missing_value(flag: &str) -> i32 {
+    eprintln!("lightr docker: build: flag {flag} requires a value");
+    2
 }
 
 // ── docker run translation ────────────────────────────────────────────────────
 
-/// `docker run <ref> <cmd…>` → if <ref> is a known store ref, add --rootfs
-/// and run the command; otherwise treat everything as a plain cwd run.
+/// `docker run [OPTS] IMAGE [CMD…]` → forward every documented flag to the
+/// native `lightr run` (which already parses them — FIX #74). The IMAGE token is
+/// resolved against the store: a known ref hydrates as `--rootfs` (ns engine), an
+/// unknown one falls back to a plain cwd run. Flag parsing + the honest-error
+/// rules (grammar-mismatch / unrecognized) live in `run_args`; this fn owns only
+/// the image/store resolution + the forward.
 fn translate_run(args: &[String], json: bool, explain: bool) -> i32 {
     if args.is_empty() {
         eprintln!("lightr docker: run: missing image/command");
         return 2;
     }
 
-    let possible_ref = &args[0];
-    let cmd_args: &[String] = &args[1..];
-
-    // Try to open the store and check if the ref exists
-    let is_known_ref = if let Ok(store) = Store::open(Store::default_root()) {
-        store
-            .list_refs()
-            .ok()
-            .is_some_and(|refs| refs.contains(possible_ref))
-    } else {
-        false
+    // Parse the docker flag subset; an unknown/unsupported flag is an honest
+    // exit 2 already printed by the parser (never a silent drop).
+    let parsed = match run_args::parse(args) {
+        Ok(p) => p,
+        Err(code) => return code,
     };
-
-    if is_known_ref && !cmd_args.is_empty() {
-        // Hydrate ref to temp dir and run command with it as rootfs
-        note_translation(
-            "run",
-            &[
-                "--rootfs",
-                possible_ref,
-                "--engine",
-                "ns",
-                "--",
-                &cmd_args.join(" "),
-            ],
-        );
-        let command: Vec<String> = cmd_args.to_vec();
-        crate::handlers::run::run(
-            ".",
-            &[],
-            &[],
-            &command,
-            json,
-            explain,
-            false,
-            &[],   // publish (Phase 1): docker-translation path publishes nothing
-            false, // publish_all (WP-B2): docker-translation path auto-publishes nothing
-            &[],
-            "ns",
-            Some(possible_ref),
-            false,
-            None,
-            None,
-            &[],
-            &[],
-            &[],  // env_set untranslated by the docker shim
-            None, // env_file
-            None, // workdir
-            None, // user (WP-RC-USER)
-            None, // restart (WP-RC-RESTART)
-            None, // stop_signal (WP-RC-STOPSIGNAL) — untranslated by the docker shim
-            &crate::handlers::run::HealthFlags::default(),
-            // WP-CLI-TRIO / RC-FLAGS: the docker shim does not translate the 11
-            // run-config flags ⇒ all-default ⇒ no-op carry (behavior-preserving).
-            crate::handlers::run::RawRcFlags::default(),
-            // WP-RUNFLAGS: the docker shim does not translate `-v`/`--tmpfs`/
-            // `--name`/`--rm`/`--entrypoint` ⇒ all-default ⇒ no-op carry.
-            crate::handlers::run::RawRunFlags::default(),
-        )
-    } else if is_known_ref {
-        // is_known_ref && cmd_args.is_empty()
-        eprintln!(
-            "lightr docker: run: ref '{}' found but no command given",
-            possible_ref
-        );
-        2
-    } else {
-        // ref not found: treat all args as command in cwd
-        eprintln!(
-            "lightr docker: run: ref '{}' not in store — running as command in cwd",
-            possible_ref
-        );
-        note_translation("run", &["--", &args.join(" ")]);
-        let command: Vec<String> = args.to_vec();
-        crate::handlers::run::run(
-            ".",
-            &[],
-            &[],
-            &command,
-            json,
-            explain,
-            false,
-            &[],   // publish (Phase 1): docker-translation path publishes nothing
-            false, // publish_all (WP-B2): docker-translation path auto-publishes nothing
-            &[],
-            "native",
-            None,
-            false,
-            None,
-            None,
-            &[],
-            &[],
-            &[],  // env_set untranslated by the docker shim
-            None, // env_file
-            None, // workdir
-            None, // user (WP-RC-USER)
-            None, // restart (WP-RC-RESTART)
-            None, // stop_signal (WP-RC-STOPSIGNAL) — untranslated by the docker shim
-            &crate::handlers::run::HealthFlags::default(),
-            // WP-CLI-TRIO / RC-FLAGS: the docker shim does not translate the 11
-            // run-config flags ⇒ all-default ⇒ no-op carry (behavior-preserving).
-            crate::handlers::run::RawRcFlags::default(),
-            // WP-RUNFLAGS: the docker shim does not translate `-v`/`--tmpfs`/
-            // `--name`/`--rm`/`--entrypoint` ⇒ all-default ⇒ no-op carry.
-            crate::handlers::run::RawRunFlags::default(),
-        )
-    }
+    run_args::forward(parsed, json, explain)
 }
 
 // ── docker pull translation ───────────────────────────────────────────────────

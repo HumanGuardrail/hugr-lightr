@@ -10,7 +10,8 @@ use crate::lightr_home;
 ///   - exit 0 if every target removed, 1 if any failed, 2 on empty targets
 pub fn run(targets: &[String], force: bool) -> i32 {
     if targets.is_empty() {
-        eprintln!("Error: \"rm\" requires at least 1 argument.");
+        // FIX #77: drop the trailing period so the shape matches kill/pause/start.
+        eprintln!("Error: \"rm\" requires at least 1 argument");
         return 2;
     }
 
