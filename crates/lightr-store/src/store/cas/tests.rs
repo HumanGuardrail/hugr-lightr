@@ -121,6 +121,66 @@ fn materialize_preserves_bytes_and_mode() {
     }
 }
 
+/// FIX-#76 (CAS integrity): a bit-rotted stored object must be DETECTED by
+/// `materialize_file` (the CoW read path that feeds a build) — never silently
+/// CoW'd into the destination. Flip a byte in the stored object, then materialize:
+/// it must fail with `Integrity` and write nothing to `dest`. Mirrors the
+/// `get_bytes` integrity guarantee, which this read path previously skipped.
+#[test]
+fn materialize_detects_corrupted_object() {
+    let (dir, store) = tmp_store();
+    let data = b"materialize integrity guard";
+    let d = store.put_bytes(data).unwrap();
+
+    // Flip a byte in the stored object (relax 0o444 → mutate → restore on unix;
+    // clear the read-only attr on windows — same dance as `integrity_corruption`).
+    let obj_path = object_path(&store.root, &d);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&obj_path, Permissions::from_mode(0o644)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let mut perms = fs::metadata(&obj_path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(&obj_path, perms).unwrap();
+    }
+    let mut bytes = fs::read(&obj_path).unwrap();
+    bytes[0] ^= 0xFF;
+    fs::write(&obj_path, &bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&obj_path, Permissions::from_mode(0o444)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let mut perms = fs::metadata(&obj_path).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&obj_path, perms).unwrap();
+    }
+
+    let dest = dir.path().join("out").join("rotted.txt");
+    let err = store.materialize_file(&d, &dest, 0o644).unwrap_err();
+    match err {
+        LightrError::Integrity { expected, actual } => {
+            assert_eq!(expected, d);
+            assert_ne!(actual, d);
+        }
+        other => panic!("expected Integrity, got {:?}", other),
+    }
+
+    // Fail-closed: nothing reaches the build destination, and the corrupt object
+    // is kept as evidence (never deleted), matching `get_bytes`.
+    assert!(!dest.exists(), "corrupt object must not be materialized");
+    assert!(
+        obj_path.exists(),
+        "evidence file was deleted — violates spec"
+    );
+}
+
 #[test]
 fn materialize_notfound() {
     let (dir, store) = tmp_store();
