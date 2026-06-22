@@ -52,7 +52,10 @@ pub use run::registry::{claim, name_validate, release, resolve};
 // Each verb resolves an id via `registry::resolve` then calls one primitive, so
 // the verbs stay disjoint (no shared-file collisions, no duplicated run-dir
 // logic). NOT dead-code: lightr-cli's verb handlers are the consumers.
-pub use run::lifecycle::{remove_run, respawn_run, run_status, signal_run, wait_run, RunStatus};
+// WP-D: `list_stopped_runs` enumerates exited runs for `container prune`.
+pub use run::lifecycle::{
+    list_stopped_runs, remove_run, respawn_run, run_status, signal_run, wait_run, RunStatus,
+};
 
 // memo
 pub use run::memo::{predict, run_memoized, run_memoized_with};
@@ -64,7 +67,12 @@ pub use run::vzmemo::{run_vz_memoized, vz_memo_key};
 pub use run::deepmemo::{deep_memo_available, run_memoized_deep};
 
 // spawn
-pub use run::spawn::{spawn_detached, spawn_detached_engine, spawn_detached_with_health};
+// WP-D: `create_run_prepared` is the prepare-without-launch primitive the CLI
+// `create` verb calls (docker `create` = the "Created" state: dir + spec.json,
+// no supervisor). `spawn_detached_engine` now = prepare + launch.
+pub use run::spawn::{
+    create_run_prepared, spawn_detached, spawn_detached_engine, spawn_detached_with_health,
+};
 
 // supervise
 pub use run::supervise::supervise;

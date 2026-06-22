@@ -78,6 +78,23 @@ pub(crate) enum Cmd {
     },
     /// Run a command, memoized (exit code passes through)
     Run(RunArgs),
+    /// Prepare a container without starting it (docker create) — writes the run
+    /// dir + spec.json in the "Created" state; `lightr start <id>` launches it.
+    /// Native container path only; prints the new container id.
+    Create(RunArgs),
+    /// Attach to a running container's output (docker attach). HONEST scope: the
+    /// daemonless runtime has no live stdin to reattach (the supervisor owns the
+    /// child FDs), so attach FOLLOWS stdout/stderr until exit/Ctrl-C (like
+    /// `docker attach --no-stdin`); stdin attach is NOT supported.
+    Attach {
+        /// Container (run id / name / id-prefix) to attach to
+        id: String,
+    },
+    /// Manage containers (docker container): prune
+    Container {
+        #[command(subcommand)]
+        subcmd: ContainerCmd,
+    },
     /// Engine management
     Engine {
         #[command(subcommand)]

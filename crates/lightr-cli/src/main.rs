@@ -114,6 +114,14 @@ fn main() {
         Cmd::Hydrate { .. } => "hydrate",
         Cmd::Status { .. } => "status",
         Cmd::Run(_) => "run",
+        // WP-D: forced minimal touch — this verb-name mapper is EXHAUSTIVE over
+        // `Cmd`, so the 3 new lifecycle verbs must register their event name here
+        // (behavior-identical: only the event label, no dispatch logic).
+        Cmd::Create(_) => "create",
+        Cmd::Attach { .. } => "attach",
+        Cmd::Container { subcmd } => match subcmd {
+            cli::cmd::ContainerCmd::Prune { .. } => "container-prune",
+        },
         Cmd::Engine { subcmd } => match subcmd {
             EngineCmd::Ls => "engine-ls",
             EngineCmd::InstallPack { .. } => "engine-install-pack",
