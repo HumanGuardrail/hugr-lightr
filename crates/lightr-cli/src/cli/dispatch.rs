@@ -146,6 +146,12 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                 )
             }
         }
+        // WP-D: prepare-without-start (docker create) — native container path.
+        Cmd::Create(a) => handlers::create::run(a, json),
+        // WP-D: attach to a running container's OUTPUT (docker attach, no-stdin).
+        Cmd::Attach { id } => handlers::attach::run(&id),
+        // WP-D: docker `container` maintenance verbs (prune).
+        Cmd::Container { subcmd } => handlers::container::run(subcmd),
         Cmd::Engine { subcmd } => match subcmd {
             EngineCmd::Ls => handlers::engine::ls(json),
             EngineCmd::InstallPack { dir } => handlers::engine::install_pack(&dir),

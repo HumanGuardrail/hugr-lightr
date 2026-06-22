@@ -46,6 +46,35 @@ pub fn spawn_detached_with_health(
 /// runs aren't memoized anyway. The vz branch ignores it.
 pub fn spawn_detached_engine(
     spec: &RunSpec,
+    store: &Store,
+    hc: Option<&crate::healthcheck::Healthcheck>,
+    engine: EngineKind,
+    rootfs_ref: Option<&str>,
+    env: &[(String, String)],
+) -> Result<RunHandle> {
+    // WP-D (create): the atomic spawn is now (prepare → launch). `create_run_prepared`
+    // does the dir + spec.json (+ healthcheck) write WITHOUT a supervisor — exactly the
+    // "Created" state docker `create` materializes. The spawn path then launches the
+    // supervisor over the prepared dir. Behaviour is byte-identical to the pre-split
+    // inline code (same id, same spec.json bytes, same launch).
+    let handle = create_run_prepared(spec, store, hc, engine, rootfs_ref, env)?;
+    launch_supervisor(&handle.dir)?;
+    Ok(handle)
+}
+
+/// WP-D (create): PREPARE a detached run WITHOUT launching its supervisor — the
+/// "Created" state of docker `create`. Mints a fresh run id, creates its run dir,
+/// persists the healthcheck (if any), and writes `spec.json`; it does NOT spawn
+/// the supervisor, so the run has a dir + spec.json but no `status` file and no
+/// live control endpoint. A later `lightr start <id>` re-reads the same spec.json
+/// and launches the supervisor in place (`lifecycle::respawn_run`).
+///
+/// Extracted verbatim from `spawn_detached_engine`'s prepare steps so the create
+/// verb and the spawn path share ONE spec-on-disk construction (no drift between
+/// a created-then-started run and a directly-spawned one). The spawn path now
+/// calls this then `launch_supervisor`; behaviour is byte-identical.
+pub fn create_run_prepared(
+    spec: &RunSpec,
     _store: &Store,
     hc: Option<&crate::healthcheck::Healthcheck>,
     engine: EngineKind,
@@ -178,8 +207,9 @@ pub fn spawn_detached_engine(
     };
     write_spec_json(&dir, &spec_on_disk)?;
 
-    launch_supervisor(&dir)?;
-
+    // NO supervisor launch here — that is the spawn path's job (the caller
+    // `spawn_detached_engine` launches it). A bare `create` stops at this prepared
+    // "Created" state; `lightr start <id>` launches the supervisor later.
     Ok(RunHandle { id, dir })
 }
 
