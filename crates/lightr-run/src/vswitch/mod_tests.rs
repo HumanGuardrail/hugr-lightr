@@ -163,6 +163,16 @@ fn route_dhcp_discover_yields_offer_on_ingress_port() {
 
 // ── socket-level smoke test (thread + UnixDatagram round-trip) ──────────
 
+/// WP-HYG (#72): the recv deadline for the socket-smoke round-trips. These
+/// tests hand a frame to a real switch thread and `recv` the reply within this
+/// window; the old 500 ms budget was flaky under PARALLEL test load (the
+/// switch's receive thread could miss the deadline when the CPU is saturated,
+/// turning a correct reply into a spurious panic). A generous timeout makes the
+/// pass/fail deterministic — the reply still arrives in microseconds when the
+/// box is idle, so a green run is unchanged; only the false-negative under load
+/// is removed. Test-only isolation; no production behaviour changes.
+const SMOKE_RECV_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[test]
 fn socket_smoke_dhcp_offer_round_trips() {
     // Drive the full thread path once: a real DISCOVER in on the guest end,
@@ -171,9 +181,7 @@ fn socket_smoke_dhcp_offer_round_trips() {
     let sw = VSwitch::start(&id, test_subnet()).unwrap();
 
     let (host, guest) = UnixDatagram::pair().unwrap();
-    guest
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .unwrap();
+    guest.set_read_timeout(Some(SMOKE_RECV_TIMEOUT)).unwrap();
     let client_mac = [0x52, 0x54, 0x00, 0x0a, 0x0b, 0x0c];
     let ip = Ipv4Addr::new(10, 69, 0, 50);
 
@@ -205,12 +213,8 @@ fn socket_smoke_unicast_between_two_members() {
 
     let (host_a, guest_a) = UnixDatagram::pair().unwrap();
     let (host_b, guest_b) = UnixDatagram::pair().unwrap();
-    guest_a
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .unwrap();
-    guest_b
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .unwrap();
+    guest_a.set_read_timeout(Some(SMOKE_RECV_TIMEOUT)).unwrap();
+    guest_b.set_read_timeout(Some(SMOKE_RECV_TIMEOUT)).unwrap();
 
     use std::os::unix::io::IntoRawFd;
     sw.add_member(

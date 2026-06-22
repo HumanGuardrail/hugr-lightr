@@ -232,6 +232,57 @@ fn explicit_stop_disables_restart() {
     let _ = t.join();
 }
 
+// ── WP-HYG (#71): stop reaps the WHOLE process tree, not just the child ──────
+
+/// `kill(pid, 0)` liveness probe — local so it can poll a GRANDCHILD pid the
+/// supervisor never tracked.
+fn alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// THE LEAK PROOF (#71). A `sh -c` child backgrounds a long-lived `sleep`
+/// GRANDCHILD, records its pid, then `wait`s (so the `sh` stays up as the
+/// supervised child). A naive single-process kill of the `sh` would orphan the
+/// `sleep` to PPID 1 (the historical leak — 106 stranded `nc`). With the
+/// process-group fix, `stop` signals the whole group ⇒ the grandchild is gone.
+#[test]
+fn stop_reaps_the_whole_process_group() {
+    let (home, _g) = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let pidfile = tmp.path().join("grandchild.pid");
+
+    // Background a sleep grandchild, publish its pid, then wait so the parent sh
+    // stays alive — proving the kill must reach deeper than the immediate child.
+    let cmd = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        format!("sleep 1000 & echo $! > '{}'; wait", pidfile.display()),
+    ];
+    let (run_dir, t) = start(home.path(), tmp.path(), cmd, None);
+
+    let up = poll_until(10_000, || {
+        crate::run::ctl::ctl_sock_path(&run_dir).exists() && pidfile.exists()
+    });
+    assert!(up, "child must come up and publish the grandchild pid");
+
+    let grandchild = fs::read_to_string(&pidfile)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .expect("grandchild pid");
+    assert!(alive(grandchild), "grandchild must be alive before stop");
+
+    // The group SIGTERM (then SIGKILL) must reach the grandchild, not just `sh`.
+    let _ = stop(&run_dir, 5);
+
+    let gone = poll_until(10_000, || !alive(grandchild));
+    assert!(
+        gone,
+        "LEAK: grandchild (pid {grandchild}) survived stop — the tree was not \
+         reaped (bug #71)"
+    );
+    let _ = t.join();
+}
+
 // ── WP-RESLIMITS: the supervisor applies the persisted caps at spawn ─────────
 
 /// Build a run dir with a spec.json carrying resource caps, then run `supervise()`
