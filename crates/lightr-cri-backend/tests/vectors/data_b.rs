@@ -6,7 +6,7 @@ use super::{Category, VectorDef};
 pub const GROUP: &[VectorDef] = &[
     VectorDef {
         name: "idempotency-stop-sandbox-twice",
-        category: Category::DeferSandbox,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "idempotency-stop-sandbox-twice",
   "steps": [
@@ -85,7 +85,7 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "log-file-created-and-format",
-        category: Category::DeferLog,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "log-file-created-and-format",
   "steps": [
@@ -137,7 +137,7 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "remove-unknown-sandbox-idempotent",
-        category: Category::DeferSandbox,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "remove-unknown-sandbox-idempotent",
   "steps": [
@@ -148,7 +148,7 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "sandbox-lifecycle-legal",
-        category: Category::DeferSandbox,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "sandbox-lifecycle-legal",
   "steps": [
@@ -163,7 +163,7 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "sandbox-removal-cascade",
-        category: Category::DeferSandbox,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "sandbox-removal-cascade",
   "steps": [
@@ -179,7 +179,7 @@ pub const GROUP: &[VectorDef] = &[
     },
     VectorDef {
         name: "sandbox-status-unknown-not-found",
-        category: Category::DeferSandbox,
+        category: Category::RunLifecycle,
         json: r#"{
   "name": "sandbox-status-unknown-not-found",
   "steps": [
