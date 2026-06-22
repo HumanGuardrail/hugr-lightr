@@ -250,10 +250,12 @@ fn a24b_compose_discovery_env() {
     let compose_dir = TempDir::new().unwrap();
     let compose_yml = compose_dir.path().join("compose.yml");
     let web_cmd = format!("while true; do printf '{payload}' | nc -l {web_cport}; done");
-    // sleep gives web a moment to bind before client connects; `|| true` keeps a
-    // failed nc from changing the service exit semantics under test.
+    // Record the discovery vars FIRST (the always-on CORE assertion) so it never
+    // sits behind the round-trip's `sleep 1` — that sleep only gives web a moment
+    // to bind before the STRENGTHENING body connect. `|| true` keeps a failed nc
+    // from changing the service exit semantics under test.
     let client_cmd = format!(
-        "sleep 1; printf '%s:%s' \"$WEB_HOST\" \"$WEB_PORT\" > {env_str}; \
+        "printf '%s:%s' \"$WEB_HOST\" \"$WEB_PORT\" > {env_str}; sleep 1; \
          printf 'GET' | nc \"$WEB_HOST\" \"$WEB_PORT\" > {body_str} || true; sleep 30"
     );
     let compose_content = format!(
@@ -286,8 +288,14 @@ fn a24b_compose_discovery_env() {
     );
 
     // ── CORE: client must have observed WEB_HOST/WEB_PORT discovery vars ──────
-    // Poll for the env file (client sleeps ~1s before writing it).
-    let env_ready = poll_until(Duration::from_secs(8), || env_file.exists());
+    // The client records the env file FIRST thing (before its body-round-trip
+    // sleep), so it appears ~immediately after the eager client is scheduled.
+    // The window is deliberately generous: this runs on a shared, frequently
+    // overloaded CI box (load can spike >40) where process scheduling + tmpfs
+    // I/O stall for many seconds. The property under test is discovery-var
+    // injection, not latency — so we wait long enough that only a real failure
+    // (vars never injected) trips the panic, never a scheduling hiccup.
+    let env_ready = poll_until(Duration::from_secs(30), || env_file.exists());
 
     // Always tear the stack down before asserting, so a failed assertion never
     // leaks the eager services / their listeners.
@@ -300,7 +308,7 @@ fn a24b_compose_discovery_env() {
     if !env_ready {
         do_down();
         panic!(
-            "client never recorded discovery env within 8 s (expected {}); \
+            "client never recorded discovery env within 30 s (expected {}); \
              up stderr:\n{}",
             env_file.display(),
             String::from_utf8_lossy(&up_out.stderr)
