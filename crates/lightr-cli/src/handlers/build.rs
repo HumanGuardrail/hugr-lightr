@@ -11,7 +11,7 @@
 //! --json mirrors BuildReport: `{"name","root","steps","cached_steps"}`
 //! --explain: per-step note to stderr including non-reproducible RUN flag.
 
-use lightr_build::{build, parse_dockerfile, step_reads_clock_or_net, BuildReport, Instr};
+use lightr_build::{build_target, parse_dockerfile, step_reads_clock_or_net, BuildReport, Instr};
 use lightr_core::validate_ref_name;
 use lightr_engine::EngineKind;
 use lightr_store::Store;
@@ -62,6 +62,7 @@ pub fn run(
     build_arg: &[String],
     json: bool,
     explain: bool,
+    target: Option<&str>,
 ) -> i32 {
     // Validate ref name — exit 2 on invalid
     if let Err(e) = validate_ref_name(name) {
@@ -146,13 +147,14 @@ pub fn run(
         eprintln!("lightr: build: native engine — no filesystem isolation");
     }
 
-    let report = match build(
+    let report = match build_target(
         context_path,
         dockerfile_path,
         name,
         engine_kind,
         &store,
         &build_args,
+        target,
     ) {
         Ok(r) => r,
         Err(e) => return die_lightr(&e),
@@ -177,6 +179,7 @@ mod tests {
             &[],
             false,
             false,
+            None,
         );
         assert_eq!(code, 2, "uppercase ref must exit 2");
     }
@@ -193,6 +196,7 @@ mod tests {
             &[],
             false,
             false,
+            None,
         );
         assert_eq!(code, 2, "bad engine must exit 2");
     }
@@ -200,7 +204,7 @@ mod tests {
     /// Empty ref name ⇒ exit 2
     #[test]
     fn build_empty_ref_exits_2() {
-        let code = super::run("/some/ctx", None, "", "native", &[], false, false);
+        let code = super::run("/some/ctx", None, "", "native", &[], false, false, None);
         assert_eq!(code, 2, "empty ref must exit 2");
     }
 }

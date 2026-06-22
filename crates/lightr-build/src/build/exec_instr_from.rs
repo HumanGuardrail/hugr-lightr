@@ -10,10 +10,31 @@ use crate::build::vars::interpolate;
 
 /// `FROM`: hydrate the base image into a cleared work dir and (re)seed the
 /// interpolation scope from the base config ENV + the stage ARG boundary.
+///
+/// WP-C: when the FROM carries `--platform=<p>`, the requested platform is
+/// `${VAR}`-interpolated (Docker allows `FROM --platform=$TARGETPLATFORM`) and
+/// VALIDATED against the base image's actual (single-arch) platform BEFORE
+/// hydration — a mismatch fails closed (lightr cannot select a different
+/// platform from a single-arch import). Absent flag ⇒ host platform ⇒ no
+/// validation ⇒ byte-identical to the pre-WP body.
 pub(in crate::build) fn from(ctx: &mut BuildCtx, instr: &Instr, image_ref: &str) -> Result<()> {
     // FROM ref is interpolated against the GLOBAL ARG scope (Docker:
     // ARG-before-FROM is usable here); multi-stage refs are DF-03.
     let image_ref = interpolate(image_ref, ctx.scope, ctx.escape)?;
+    // WP-C: interpolate the requested `--platform` (if any) and validate it
+    // against the base image's recorded platform — honest error on mismatch,
+    // never a silent ignore. `None` (no flag) is a trivial pass (host default).
+    let requested_platform = match instr {
+        Instr::From {
+            platform: Some(p), ..
+        } => Some(interpolate(p, ctx.scope, ctx.escape)?),
+        _ => None,
+    };
+    crate::build::platform::validate_against_base(
+        ctx.store,
+        &image_ref,
+        requested_platform.as_deref(),
+    )?;
     for entry in std::fs::read_dir(ctx.work_dir).map_err(LightrError::Io)? {
         let entry = entry.map_err(LightrError::Io)?;
         let p = entry.path();

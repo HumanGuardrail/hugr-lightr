@@ -297,6 +297,11 @@ pub(crate) enum Cmd {
         /// ignored (Docker behavior).
         #[arg(long = "build-arg", value_name = "NAME=VALUE")]
         build_arg: Vec<String>,
+        /// Build only up to the named multi-stage build stage (docker --target).
+        /// Selects that stage as the output; an unknown stage name is an error.
+        /// Omitted ⇒ the final stage.
+        #[arg(long, value_name = "STAGE")]
+        target: Option<String>,
     },
     /// Manage a compose stack (lazy services)
     Compose {

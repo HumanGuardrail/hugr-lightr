@@ -54,8 +54,8 @@
 mod build;
 
 pub use build::{
-    build, compose_down, compose_supervise, compose_up, deep_merge, dir_basename, effective_argv,
-    interpolate, interpolate_compose, parse_compose, parse_compose_merged,
+    build, build_target, compose_down, compose_supervise, compose_up, deep_merge, dir_basename,
+    effective_argv, interpolate, interpolate_compose, parse_compose, parse_compose_merged,
     parse_compose_project_name, parse_compose_with_scope, parse_dockerfile, parse_dockerfile_full,
     resolve_project_name, sanitize_project_name, scope_from_project_dir, step_reads_clock_or_net,
     BuildReport, BuildStep, CmdForm, Compose, ComposeHandle, ComposeServiceHealthcheck,
