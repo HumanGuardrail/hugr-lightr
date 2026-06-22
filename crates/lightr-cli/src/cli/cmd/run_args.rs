@@ -23,9 +23,14 @@ pub(crate) struct RunArgs {
     #[arg(short = 'd', long)]
     pub(crate) detach: bool,
     /// Publish a container port to the host (Docker-style, repeatable):
-    /// HOST:CONTAINER. Requires -d; native detached path only (Phase 1).
+    /// `[HOST_IP:]HOST:CONTAINER[/tcp|/udp]`. Ranges (`8000-9000:8000-9000`)
+    /// expand element-wise. Requires -d; native detached path only (Phase 1).
     #[arg(short = 'p', long = "publish", value_name = "HOST:CONTAINER")]
     pub(crate) publish: Vec<String>,
+    /// Publish ALL ports the image EXPOSEs, each to an ephemeral host port
+    /// (Docker `-P`). Synthesizes one publish mapping per EXPOSE entry.
+    #[arg(short = 'P', long = "publish-all")]
+    pub(crate) publish_all: bool,
     #[arg(long, value_name = "REF:TARGET")]
     pub(crate) mount: Vec<String>,
     /// Engine to use: native (default), ns, vz
