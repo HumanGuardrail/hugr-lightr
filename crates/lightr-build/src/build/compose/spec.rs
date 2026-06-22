@@ -12,6 +12,12 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 use serde_yaml::Value;
 
+// WP-E: the `build:` serde model lives in its own sibling file (godfile cap —
+// this file sits at the 400-LOC ceiling). The `ServiceDef.build` field uses
+// `BuildSpec`; the inner `BuildLong`/`BuildArgs` are consumed by `build_lower.rs`
+// directly via `super::build_spec::*`, so only `BuildSpec` is re-exported here.
+pub use super::build_spec::BuildSpec;
+
 /// Top-level compose file.
 #[derive(Debug, Default, Deserialize)]
 pub struct ComposeSpec {
@@ -47,8 +53,12 @@ pub struct ComposeSpec {
 pub struct ServiceDef {
     #[serde(default)]
     pub image: Option<String>,
+    /// WP-E: the service `build:` key — short string (context dir) OR long
+    /// mapping (`context`/`dockerfile`/`args`/`target`). Typed [`BuildSpec`]
+    /// (lives in `build_spec.rs`); lowered to [`super::build_spec::ServiceBuild`]
+    /// by `build_lower.rs` and built during `up` (`build_run.rs`).
     #[serde(default)]
-    pub build: Option<Value>,
+    pub build: Option<BuildSpec>,
     #[serde(default)]
     pub command: Option<StringOrList>,
     #[serde(default)]

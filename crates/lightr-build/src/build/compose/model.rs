@@ -1,5 +1,6 @@
 //! Compose data model: Service, Compose, ComposeHandle, StackSpec, ServiceSpec,
 //! empty_service, parse_duration_secs.
+use super::build_spec::ServiceBuild;
 use super::lower_files::FileSource;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -48,6 +49,12 @@ pub type DepEdge = (String, DepCondition);
 pub struct Service {
     pub name: String,
     pub image_ref: String,
+    /// WP-E: the lowered `build:` directive, when the service declares one. The
+    /// up-path (`build_run.rs`) runs the frozen build pipeline (`build_target`)
+    /// for this BEFORE spawning and resolves the produced store ref into
+    /// `image_ref`. `None` (the common case) ⇒ the service runs from `image:`
+    /// exactly as before (behavior-preserving).
+    pub build: Option<ServiceBuild>,
     pub command: Option<Vec<String>>,
     pub ports: Vec<(u16, u16)>,
     pub env: Vec<(String, String)>,
@@ -294,6 +301,7 @@ pub(crate) fn empty_service(name: String) -> Service {
     Service {
         name,
         image_ref: String::new(),
+        build: None,
         command: None,
         ports: Vec::new(),
         env: Vec::new(),
