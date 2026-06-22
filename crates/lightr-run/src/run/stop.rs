@@ -47,6 +47,28 @@ fn configured_stop_signal(dir: &std::path::Path) -> i32 {
         .unwrap_or(15)
 }
 
+/// FIX-#76 (PID-reuse SIGKILL hazard): is OUR supervisor still alive for the run
+/// in `dir`? After reading the pid there is an unbounded gap before we signal; the
+/// supervisor could have exited and the pid be reused by an unrelated process —
+/// which our `kill(-pid, …)` (a whole-GROUP signal since WP-HYG) would then kill,
+/// possibly the WRONG group. The supervisor's teardown removes the ctl socket
+/// FIRST, then writes the terminal `exited <code>` status (see supervise_native).
+/// So the supervisor is provably still ours iff EITHER the ctl socket still EXISTS
+/// (the supervisor process is still serving it) OR the status is not yet terminal
+/// (it has not reached its `exited` write). Once the socket is gone AND the status
+/// is `exited`, the supervisor has fully torn down and the recorded pid is no
+/// longer trustworthy — we must NOT signal it.
+fn supervisor_alive(dir: &std::path::Path) -> bool {
+    if ctl_sock_path(dir).exists() {
+        return true;
+    }
+    // Socket gone — only still "alive" if the terminal status has not landed yet
+    // (a brief window between socket removal and the `exited` write).
+    !read_status_file(dir)
+        .unwrap_or_default()
+        .starts_with("exited")
+}
+
 pub fn stop(dir: &std::path::Path, grace_secs: u64) -> Result<i32> {
     use std::time::{Duration, Instant};
 
@@ -69,24 +91,32 @@ pub fn stop(dir: &std::path::Path, grace_secs: u64) -> Result<i32> {
         // to the child). Default SIGTERM when unset.
         send_ctl_op(dir, &format!(r#"{{"op":"signal","sig":{stop_sig}}}"#));
     } else if let Some(pid) = read_pid_file(dir) {
-        // Direct kill with the configured stop signal.
-        // WP-HYG (#71): signal the whole PROCESS GROUP (negative pid) so the
-        // stop reaches every descendant of the container process (the `sh -c
-        // "…"` grandchildren), not just the immediate child — Docker parity for
-        // `docker stop`. The supervised child is a group leader (pgid == its
-        // pid, set via `process_group(0)` at spawn), so `-pid` targets the
-        // group. If the group has already gone, the kill is a harmless ESRCH.
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(-pid, stop_sig as libc::c_int);
-        }
-        // WIN-PATH: no signal model — best-effort forced terminate with the unix
-        // 128+signal exit code for the configured stop signal (143 for the
-        // SIGTERM default). Graceful-term semantics differ from unix; validatable
-        // only on a real Windows box.
-        #[cfg(windows)]
-        {
-            super::paths::win_terminate(pid, (128 + stop_sig) as u32);
+        // FIX-#76 (PID-reuse hazard): the ctl socket is GONE, so the supervisor is
+        // no longer serving it. Only direct-kill if the supervisor has NOT yet
+        // reached its terminal `exited` status — otherwise it has fully torn down
+        // and `pid` may already have been recycled by an unrelated process, which
+        // our group-kill below would wrongly signal. If it already exited, skip the
+        // signal entirely (the grace/SIGKILL ladder below is likewise guarded).
+        if supervisor_alive(dir) {
+            // Direct kill with the configured stop signal.
+            // WP-HYG (#71): signal the whole PROCESS GROUP (negative pid) so the
+            // stop reaches every descendant of the container process (the `sh -c
+            // "…"` grandchildren), not just the immediate child — Docker parity for
+            // `docker stop`. The supervised child is a group leader (pgid == its
+            // pid, set via `process_group(0)` at spawn), so `-pid` targets the
+            // group. If the group has already gone, the kill is a harmless ESRCH.
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-pid, stop_sig as libc::c_int);
+            }
+            // WIN-PATH: no signal model — best-effort forced terminate with the
+            // unix 128+signal exit code for the configured stop signal (143 for
+            // the SIGTERM default). Graceful-term semantics differ from unix;
+            // validatable only on a real Windows box.
+            #[cfg(windows)]
+            {
+                super::paths::win_terminate(pid, (128 + stop_sig) as u32);
+            }
         }
     }
 
@@ -120,20 +150,26 @@ pub fn stop(dir: &std::path::Path, grace_secs: u64) -> Result<i32> {
         }
     }
 
-    // Still alive — SIGKILL
-    if let Some(pid) = read_pid_file(dir) {
-        // WP-HYG (#71): escalate SIGKILL to the whole PROCESS GROUP (negative
-        // pid) so any descendant that survived the grace signal is force-killed
-        // too — closing the orphan-leak window for good.
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-        // WIN-PATH: SIGKILL → forced TerminateProcess with the unix
-        // 128+SIGKILL(9)=137 exit code. Validatable only on a real Windows box.
-        #[cfg(windows)]
-        {
-            super::paths::win_terminate(pid, 137);
+    // Still alive — SIGKILL.
+    // FIX-#76 (PID-reuse hazard): re-check the supervisor is still ours before the
+    // forced group-kill. If the supervisor has fully torn down (socket gone AND
+    // status terminal) the recorded pid may have been recycled — sending SIGKILL to
+    // `-pid` could kill an unrelated process group. Skip the kill in that case.
+    if supervisor_alive(dir) {
+        if let Some(pid) = read_pid_file(dir) {
+            // WP-HYG (#71): escalate SIGKILL to the whole PROCESS GROUP (negative
+            // pid) so any descendant that survived the grace signal is force-killed
+            // too — closing the orphan-leak window for good.
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+            // WIN-PATH: SIGKILL → forced TerminateProcess with the unix
+            // 128+SIGKILL(9)=137 exit code. Validatable only on a real Windows box.
+            #[cfg(windows)]
+            {
+                super::paths::win_terminate(pid, 137);
+            }
         }
     }
 

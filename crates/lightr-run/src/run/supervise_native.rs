@@ -56,122 +56,13 @@ pub(super) fn supervise_native(
     run_supervisor_loop(dir, spec, &cwd, &run_cwd, policy, health_cfg)
 }
 
-/// Spawn one child with the run's persisted command/env/identity in `run_cwd`,
-/// writing its pid + a `running` status. Returns the spawned `Child` + its pid.
-fn spawn_child(
-    dir: &std::path::Path,
-    spec: &SpecOnDisk,
-    run_cwd: &std::path::Path,
-) -> Result<(std::process::Child, i32)> {
-    // Append, not truncate, on a re-spawn so a restarting service's logs are not
-    // lost. The first spawn creates the files; subsequent ones append.
-    let stdout_log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("stdout.log"))
-        .map_err(LightrError::Io)?;
-    let stderr_log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("stderr.log"))
-        .map_err(LightrError::Io)?;
-
-    // WP-RUNFLAGS: `--entrypoint` prepends to the persisted command (Docker CMD).
-    // `None` ⇒ argv == command (byte-identical to before).
-    let argv = super::bindmat::effective_argv(spec.entrypoint.as_deref(), &spec.command);
-    let mut cmd = std::process::Command::new(&argv[0]);
-    cmd.args(&argv[1..])
-        .current_dir(run_cwd)
-        // WP-DISC: explicit per-child env (compose service discovery + service
-        // env). Empty for a plain `lightr run -d` (byte-identical to before).
-        .envs(spec.env.iter().cloned())
-        .stdout(std::process::Stdio::from(stdout_log))
-        .stderr(std::process::Stdio::from(stderr_log));
-    // WP-RC-USER: honor `-u`/`--user` (cfg(unix); None ⇒ current user).
-    super::spawn::apply_user(&mut cmd, spec.user.as_deref())?;
-    // WP-HYG (#71): the child leads its own process group so `stop` reaps the
-    // whole tree, not just the immediate child (see `spawn::set_own_process_group`).
-    super::spawn::set_own_process_group(&mut cmd);
-    // RC-SEAM-FREEZE: per-field runtime-config appliers from the persisted spec
-    // (all no-ops today — behaviour-preserving; a future RC WP fills one slot).
-    super::apply_cfg::apply_run_config_ondisk(spec, &mut cmd);
-    // WP-RESLIMITS: apply the persisted resource caps to the detached child. On
-    // Linux this installs the RLIMIT_AS/DATA pre_exec hook for `mem_limit_bytes`
-    // (a hard cap — an over-cap child is killed). `cpu_limit_millis` has no
-    // portable native cpu-share cap ⇒ honest Err (never silently enforced); a
-    // memory cap off Linux is likewise an honest Err. Unlimited (both `None`) ⇒
-    // no-op, so a run with no caps spawns byte-identically to before. Fail-closed:
-    // an unenforceable cap stops the spawn rather than silently dropping it.
-    let limits = lightr_core::ResourceLimits {
-        memory_bytes: spec.mem_limit_bytes,
-        cpu_millis: spec.cpu_limit_millis,
-    };
-    crate::limits::apply_native(&mut cmd, &limits)?;
-
-    let child = cmd.spawn().map_err(LightrError::Io)?;
-    let pid = child.id() as i32;
-    std::fs::write(dir.join("pid"), format!("{pid}")).map_err(LightrError::Io)?;
-    std::fs::write(dir.join("status"), "running").map_err(LightrError::Io)?;
-    Ok((child, pid))
-}
-
-/// WP-RUNFLAGS: `--rm` — when the run's supervisor reaches its final exit, remove
-/// the run dir + release its registry name (Docker `--rm` auto-clean). `rm=false`
-/// ⇒ no-op (the dir persists, today's behaviour). The run `home` is the dir's
-/// grandparent (`<home>/run/<id>`). Best-effort: a removal failure is swallowed —
-/// the supervisor is exiting anyway and must not error on a cleanup race.
-fn maybe_auto_remove(dir: &std::path::Path, spec: &SpecOnDisk) {
-    if !spec.rm {
-        return;
-    }
-    // Release the name FIRST (so it frees even if the dir removal races).
-    if let Some(name) = spec.name.as_deref() {
-        if let Some(home) = dir.parent().and_then(|p| p.parent()) {
-            let _ = super::registry::release(home, name);
-        }
-    }
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-/// Start the port forwarders for the run (held for the run's lifetime, across
-/// re-spawns — the published port stays bound while the service restarts). A
-/// bind failure is logged + skipped, never fatal. `_forwarders` is RETURNED (not
-/// dropped) so the caller binds it for the supervisor's lifetime.
-fn start_forwarders(
-    dir: &std::path::Path,
-    spec: &SpecOnDisk,
-) -> Vec<crate::portforward::Forwarder> {
-    let mut forwarders: Vec<crate::portforward::Forwarder> = Vec::new();
-    // WP-B2: bind each published port on its requested host interface. Prefer the
-    // go-forward `ports2` channel (carries host_ip + proto); fall back to the
-    // legacy `(host, container)` tuples (host_ip empty ⇒ `0.0.0.0`) for spec.json
-    // written before `ports2` existed. The forward TARGET stays `127.0.0.1` (the
-    // native run's server listens on loopback) — only the BIND interface changed.
-    for (host_ip, host_port, container_port) in spec.published_ports() {
-        let bind_ip = if host_ip.is_empty() {
-            "0.0.0.0"
-        } else {
-            host_ip.as_str()
-        };
-        match crate::portforward::start_on(bind_ip, host_port, "127.0.0.1", container_port) {
-            Ok(fwd) => forwarders.push(fwd),
-            Err(e) => {
-                use std::io::Write as _;
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(dir.join("stderr.log"))
-                {
-                    let _ = writeln!(
-                        f,
-                        "lightr: publish {bind_ip}:{host_port} -> 127.0.0.1:{container_port} failed: {e}"
-                    );
-                }
-            }
-        }
-    }
-    forwarders
-}
+// FIX-#76 (godfile split): the per-concern setup helpers (`spawn_child`,
+// `maybe_auto_remove`, `start_forwarders`) live in `supervise_native_setup.rs`,
+// pulled in via `#[path]`. Keeping them out of this file leaves the heart-loop
+// under the 400-line cap after the teardown-order fix.
+#[path = "supervise_native_setup.rs"]
+mod setup;
+use setup::{maybe_auto_remove, spawn_child, start_forwarders};
 
 #[cfg(unix)]
 fn run_supervisor_loop(
@@ -293,8 +184,15 @@ fn run_supervisor_loop(
         std::thread::sleep(respawn::backoff_for(restarts_done));
     };
 
-    std::fs::write(dir.join("status"), format!("exited {final_exit}")).map_err(LightrError::Io)?;
+    // FIX-#76 (teardown TOCTOU): remove the ctl socket FIRST, THEN write the
+    // terminal status. Readers (`is_running`/`run_status`/`ps`/`wait_run`) gate
+    // liveness on socket-PRESENT; writing "exited" before removing the socket left
+    // a window where a reader saw socket-present (→ "running") while the status
+    // already said "exited" — the two disagreed. Removing the socket first means
+    // once any reader observes the socket gone (→ not-running), the terminal status
+    // is already (about to be) written, so the two are never contradictory.
     let _ = std::fs::remove_file(&sock_path);
+    std::fs::write(dir.join("status"), format!("exited {final_exit}")).map_err(LightrError::Io)?;
     // WP-RUNFLAGS: `--rm` auto-clean on final exit (no-op unless `rm`).
     maybe_auto_remove(dir, spec);
     Ok(final_exit)
@@ -381,8 +279,11 @@ fn run_supervisor_loop(
         std::thread::sleep(respawn::backoff_for(restarts_done));
     };
 
-    std::fs::write(dir.join("status"), format!("exited {final_exit}")).map_err(LightrError::Io)?;
+    // FIX-#76 (teardown TOCTOU): remove the ctl sentinel FIRST, THEN write the
+    // terminal status — same ordering rationale as the unix path above (readers
+    // gate liveness on the sentinel/socket being PRESENT).
     let _ = std::fs::remove_file(&sentinel);
+    std::fs::write(dir.join("status"), format!("exited {final_exit}")).map_err(LightrError::Io)?;
     // WP-RUNFLAGS: `--rm` auto-clean on final exit (no-op unless `rm`).
     maybe_auto_remove(dir, spec);
     Ok(final_exit)
