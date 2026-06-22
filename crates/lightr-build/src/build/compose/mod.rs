@@ -35,6 +35,10 @@ pub(crate) mod ports;
 /// Docker-grammar sanitization. Consumed by the CLI compose handler + `up.rs`.
 pub mod project;
 pub mod spec;
+/// WP-A: the polymorphic value-form enums (`StringOrList`/`ExtraHosts`/
+/// `Environment`/`EnvScalar`) split out of `spec.rs` for godfile headroom;
+/// re-exported by `spec.rs` so existing imports resolve unchanged.
+pub(crate) mod spec_forms;
 pub mod supervise;
 /// CMP-P0-DEPENDS: `depends_on` topo-order (Kahn) + condition-wait helpers split
 /// out of `supervise.rs` for godfile headroom. Consumed by `supervise.rs`.

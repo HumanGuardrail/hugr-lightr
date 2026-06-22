@@ -98,15 +98,32 @@ pub struct ServiceDef {
     /// modeled as raw `Value`; the feature WP owns the file/service grammar.
     #[serde(default)]
     pub extends: Option<Value>,
-    /// SKELETON-FREEZE: extra `/etc/hosts` entries (`["host:ip", ...]` or a map).
+    /// WP-A: extra `/etc/hosts` entries. Docker accepts the LIST form
+    /// (`["host:ip", ...]`) OR the MAP form (`{host: ip}`); the untagged
+    /// [`ExtraHosts`] models both (`StringOrList` could not represent the map).
+    /// Lowered to `RunSpec.add_host` (`Vec<"host:ip">`) by `lower_net.rs`.
     #[serde(default)]
-    pub extra_hosts: Option<StringOrList>,
-    /// SKELETON-FREEZE: graceful-stop window (compose duration string).
+    pub extra_hosts: Option<ExtraHosts>,
+    /// WP-A: graceful-stop window (compose duration string, e.g. `"30s"`).
+    /// LOWERED-TO-NOOP: the run-side teardown uses a fixed grace window and the
+    /// `RunSpec` carries no stop-grace slot, so this is honored as a no-op +
+    /// honest note (see `lower_files::lower_stop_grace_period`).
     #[serde(default)]
     pub stop_grace_period: Option<String>,
-    /// SKELETON-FREEZE: signal used to stop the container (e.g. `SIGTERM`).
+    /// WP-A: signal used to stop the container (e.g. `SIGTERM`). Lowered to
+    /// `RunSpec.stop_signal` by `lower_runtime::lower_stop_signal`.
     #[serde(default)]
     pub stop_signal: Option<String>,
+    /// WP-A: the container hostname. Lowered to `RunSpec.hostname` by
+    /// `lower_runtime::lower_hostname`.
+    #[serde(default)]
+    pub hostname: Option<String>,
+    /// WP-A: the compose form of `-i` (keep STDIN open). LOWERED-TO-NOOP: the
+    /// `RunSpec` carries no interactive/keep-stdin slot (the detached compose
+    /// spawn nulls stdin), so this is honored as a no-op + honest note (see
+    /// `lower_runtime::lower_stdin_open`).
+    #[serde(default)]
+    pub stdin_open: Option<bool>,
     /// SKELETON-FREEZE: run an init process (PID 1 reaper) inside the container.
     #[serde(default)]
     pub init: Option<bool>,
@@ -316,45 +333,11 @@ pub struct PortLong {
     pub mode: Option<String>,
 }
 
-/// A field Docker accepts as either a bare string or a list of strings
-/// (`command`, `entrypoint`, `env_file`, ...).
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum StringOrList {
-    String(String),
-    List(Vec<String>),
-}
-
-/// `environment` accepts both the list form (`- FOO=bar`) and the map form
-/// (`FOO: bar`). Map values may be scalars or null (Docker passes the host
-/// value through for null) — modeled as `Option<String>`.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum Environment {
-    List(Vec<String>),
-    Map(IndexMap<String, Option<EnvScalar>>),
-}
-
-/// A scalar environment value: Docker coerces numbers/bools to strings.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum EnvScalar {
-    String(String),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-}
-
-impl EnvScalar {
-    pub(crate) fn into_string(self) -> String {
-        match self {
-            EnvScalar::String(s) => s,
-            EnvScalar::Int(n) => n.to_string(),
-            EnvScalar::Float(f) => f.to_string(),
-            EnvScalar::Bool(b) => b.to_string(),
-        }
-    }
-}
+// WP-A: the polymorphic value-form enums Docker allows (`StringOrList`,
+// `ExtraHosts`, `Environment`, `EnvScalar`) live in `spec_forms.rs` (godfile
+// headroom; this file was at the 400-LOC ceiling). Re-exported so every
+// `super::spec::{StringOrList, ...}` import resolves unchanged.
+pub use super::spec_forms::{EnvScalar, Environment, ExtraHosts, StringOrList};
 
 /// Service healthcheck (CMP-P1-HEALTH-FULL — the full compose-spec form).
 ///
