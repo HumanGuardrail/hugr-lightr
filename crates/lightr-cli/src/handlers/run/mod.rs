@@ -1,21 +1,13 @@
 //! `lightr run` handler — build-spec v2 §7 + build-spec-r1 §4 + build-spec-r2 §4.
 //!
-//! Exit = child's exit code.
-//!
-//! Stderr memo marker BEFORE streaming outputs:
-//!   `lightr: memo HIT key=<hex16>` or `lightr: memo MISS key=<hex16>`
-//!
-//! Streaming: write stdout bytes to stdout, stderr bytes to stderr (raw, lossless).
-//!
-//! --json: raw child streams still flow; a JSON object `{"key","hit","exit_code"}`
-//!         goes to a final line on STDERR prefixed `lightr-json: ` (machine readable
-//!         without corrupting child stdout). exit = outcome.exit_code.
-//!
-//! --explain: extra stderr lines prefixed `lightr: explain `
-//!   for run: the key composition counts (inputs n, argv n, env n, os-arch).
+//! Exit = child's exit code. Stderr memo marker BEFORE streaming outputs:
+//!   `lightr: memo HIT key=<hex16>` / `MISS`. Streaming: raw stdout/stderr bytes,
+//!   lossless. `--json`: streams flow + a final STDERR `lightr-json: {…}` line
+//!   (`key`/`hit`/`exit_code`). `--explain`: extra `lightr: explain ` key-counts.
 //!
 //! --detach: spawn a detached run; print id=<handle.id>; exit 0.
 //! --mount REF:TARGET: mount a ref into the run's cwd at TARGET (relative).
+//! WP-B2: `-p` ranges/host-ip + `-P/--publish-all` are wired end-to-end here.
 //!
 //! --engine native|ns|vz (default native): pick the execution engine.
 //! --rootfs <ref>: hydrate the named ref CoW into a temp dir and hand it
@@ -36,13 +28,23 @@ use crate::exit::die_lightr;
 
 mod env;
 mod flags;
+mod helpers;
 mod paths;
 mod runflags;
+
+// Handler helpers split to `helpers.rs` (godfile cap). `claim_name_and_print` is
+// also used by `paths.rs` via `super::`; `expose_port_maps` feeds the `-P` branch.
+pub(super) use helpers::claim_name_and_print;
+use helpers::expose_port_maps;
 
 // Flag parsing + value types live in `flags.rs` (skeleton-split for headroom).
 // Re-exported at the `run` module root so sibling files + tests reach them via
 // `super::Item` / `super::super::Item` exactly as before (zero-diff siblings).
-pub(super) use flags::{parse_mount, parse_publish, parse_store_file, RcConfig, RunJson};
+pub(super) use flags::{parse_mount, parse_store_file, RcConfig, RunJson};
+// WP-B2: `parse_publish` (single-port wrapper) now has TEST-only callers — the
+// run path consumes the range-aware `parse_publish_spec` via `flags::publish::`.
+#[cfg(test)]
+pub(super) use flags::publish::parse_publish;
 pub use flags::{HealthFlags, RawRcFlags};
 // WP-RUNFLAGS: `-v/--volume`, `--tmpfs`, `--name`, `--rm`, `--entrypoint` (+
 // honest Phase-2 networking flags) bundle, resolved into RunSpec carry-fields.
@@ -65,6 +67,9 @@ pub fn run(
     explain: bool,
     detach: bool,
     publish_raw: &[String],
+    // WP-B2: `-P/--publish-all` — auto-publish the rootfs image's EXPOSE list
+    // (TCP) alongside any `-p`. `false` ⇒ no auto-publish (byte-identical).
+    publish_all: bool,
     mounts_raw: &[String],
     engine_str: &str,
     rootfs_ref: Option<&str>,
@@ -216,6 +221,12 @@ pub fn run(
             return 2;
         }
     }
+    // WP-B2: `-P/--publish-all` shape guard (detached vz container only; fail-closed).
+    if publish_all {
+        if let Some(c) = helpers::publish_all_policy_error(detach, engine_kind, rootfs_ref) {
+            return c;
+        }
+    }
 
     let store = match Store::open(Store::default_root()) {
         Ok(s) => s,
@@ -253,11 +264,26 @@ pub fn run(
     // through. This runs the VM detached (the old engine path ignored `-d` and
     // blocked synchronously) — `spawn_detached_engine` returns immediately.
     if let (EngineKind::Vz, Some(ref_name), true) = (engine_kind, rootfs_ref, detach) {
+        // WP-B2: consume the range-aware, host-ip-carrying parser so
+        // `-p 8000-8002:8000-8002` yields 3 PortMaps and `-p 127.0.0.1:H:C` binds
+        // loopback. Then (`-P`) auto-publish the image's EXPOSE list.
         let mut ports: Vec<PortMap> = Vec::new();
         for raw in publish_raw {
-            match parse_publish(raw) {
-                Ok(p) => ports.push(p),
+            match flags::publish::parse_publish_spec(raw) {
+                Ok(mut maps) => ports.append(&mut maps),
                 Err(code) => return code,
+            }
+        }
+        // WP-B2: `-P/--publish-all` — auto-publish every port the rootfs image
+        // EXPOSEs (TCP), each bound on the default interface. The vz container
+        // path hydrates the rootfs, so load its image config sidecar to read the
+        // EXPOSE list. De-duplicated against explicit `-p` host ports so a port
+        // named by both `-p` and EXPOSE is bound once.
+        if publish_all {
+            for pm in expose_port_maps(ref_name, &store) {
+                if !ports.iter().any(|p| p.host == pm.host) {
+                    ports.push(pm);
+                }
             }
         }
         let spec = RunSpec {
@@ -370,22 +396,4 @@ pub fn run(
         // WP-RUNFLAGS: the resolved `-v`/`--tmpfs`/`--name`/`--rm`/`--entrypoint`.
         runflags,
     })
-}
-
-/// WP-RUNFLAGS: claim `--name` for a just-spawned detached run, then print its id
-/// (the success line). On a duplicate name the run is rolled back (removed) and an
-/// honest exit 1 returned — Docker refuses a duplicate name. `None` ⇒ no claim,
-/// just print the id (byte-identical to before). Used by every detached path.
-pub(super) fn claim_name_and_print(handle: &lightr_run::RunHandle, name: Option<&str>) -> i32 {
-    if let Some(name) = name {
-        let home = crate::lightr_home();
-        if let Err(e) = lightr_run::claim(&home, name, &handle.id) {
-            // Roll back the run we just spawned so a failed name claim leaves no
-            // orphan (Docker creates nothing on a duplicate name). Best-effort.
-            let _ = lightr_run::remove_run(&home, &handle.id, true);
-            return die_lightr(&e);
-        }
-    }
-    println!("id={}", handle.id);
-    0
 }

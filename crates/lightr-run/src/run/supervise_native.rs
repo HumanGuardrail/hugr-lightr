@@ -139,8 +139,18 @@ fn start_forwarders(
     spec: &SpecOnDisk,
 ) -> Vec<crate::portforward::Forwarder> {
     let mut forwarders: Vec<crate::portforward::Forwarder> = Vec::new();
-    for &(host_port, container_port) in &spec.ports {
-        match crate::portforward::start(host_port, container_port) {
+    // WP-B2: bind each published port on its requested host interface. Prefer the
+    // go-forward `ports2` channel (carries host_ip + proto); fall back to the
+    // legacy `(host, container)` tuples (host_ip empty ⇒ `0.0.0.0`) for spec.json
+    // written before `ports2` existed. The forward TARGET stays `127.0.0.1` (the
+    // native run's server listens on loopback) — only the BIND interface changed.
+    for (host_ip, host_port, container_port) in spec.published_ports() {
+        let bind_ip = if host_ip.is_empty() {
+            "0.0.0.0"
+        } else {
+            host_ip.as_str()
+        };
+        match crate::portforward::start_on(bind_ip, host_port, "127.0.0.1", container_port) {
             Ok(fwd) => forwarders.push(fwd),
             Err(e) => {
                 use std::io::Write as _;
@@ -151,7 +161,7 @@ fn start_forwarders(
                 {
                     let _ = writeln!(
                         f,
-                        "lightr: publish 127.0.0.1:{host_port} -> 127.0.0.1:{container_port} failed: {e}"
+                        "lightr: publish {bind_ip}:{host_port} -> 127.0.0.1:{container_port} failed: {e}"
                     );
                 }
             }

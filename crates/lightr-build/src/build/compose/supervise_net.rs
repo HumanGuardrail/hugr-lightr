@@ -98,10 +98,15 @@ pub(crate) fn route_networking(svc: &ServiceSpec, project: &str) -> Result<NetRo
     }
     note_unhonored_networks(svc, project);
 
+    // WP-B2: `PortMap` gained a `host_ip` field (Docker `-p HOST_IP:H:C`). A
+    // compose service publishes on the default interface, so `PortMap::new`
+    // (empty `host_ip` ⇒ `0.0.0.0`) is byte-identical to the prior two-field
+    // literal — this is a mechanical construction-site update forced by the
+    // shared-type field addition, not a behaviour change.
     let ports: Vec<PortMap> = svc
         .ports
         .iter()
-        .map(|&(host, container)| PortMap { host, container })
+        .map(|&(host, container)| PortMap::new(host, container))
         .collect();
 
     Ok(NetRouting {

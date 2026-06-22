@@ -83,6 +83,9 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                     explain,
                     a.detach,
                     &a.publish,
+                    // WP-B2: forward `-P/--publish-all` so the run path can
+                    // auto-publish the rootfs image's EXPOSE list end-to-end.
+                    a.publish_all,
                     &a.mount,
                     &a.engine,
                     a.rootfs.as_deref(),
