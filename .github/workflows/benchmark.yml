@@ -1,0 +1,83 @@
+name: lightr-benchmark
+
+# SOTA adversarial benchmark: lightr vs Docker / containerd / Podman on an
+# identical GitHub-hosted Linux runner (reproducible, public hardware).
+# Phase 1 = harness de-risk spike: prove all four runtimes run here + take a
+# first cold-start micro-measurement. The full suite (HelloBench, 6-dim,
+# Phoronix) layers on once this is green. Manual only — never auto-runs.
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "iterations per measurement"
+        default: "30"
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain (pinned 1.96.0)
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
+          cargo --version
+
+      - name: Build lightr (release)
+        run: cargo build -p lightr-cli --release -j2
+
+      - name: Install competitors (docker pre-installed)
+        run: |
+          set -x
+          docker --version
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman containerd bc
+          # containerd: ubuntu ships one; ensure ctr can reach a daemon
+          sudo systemctl enable --now containerd || (sudo containerd >/tmp/ctd.log 2>&1 & sleep 4)
+          podman --version
+          sudo ctr version 2>&1 | head -3 || echo "ctr-not-ready"
+
+      - name: Pre-pull alpine for all (so cold-start measures run, not pull)
+        run: |
+          set -x
+          docker pull -q alpine:latest
+          sudo podman pull -q docker.io/library/alpine:latest || sudo podman pull alpine:latest
+          sudo ctr images pull docker.io/library/alpine:latest 2>&1 | tail -1 || echo "ctr-pull-failed"
+
+      - name: Cold-start micro-benchmark (run `true`)
+        run: |
+          BIN="$PWD/target/release/lightr"
+          N="${{ inputs.iterations }}"
+          R=/tmp/bench.txt; : > "$R"
+          bench() { # name ; command
+            local name="$1"; shift; local sum=0 t0 t1 i ok=0
+            for i in $(seq 1 "$N"); do
+              t0=$(date +%s.%N)
+              if eval "$@" >/dev/null 2>&1; then ok=$((ok+1)); fi
+              t1=$(date +%s.%N)
+              sum=$(echo "$sum + ($t1 - $t0)" | bc -l)
+            done
+            local avg; avg=$(echo "scale=4; ($sum/$N)*1000" | bc -l)
+            printf "%-18s avg=%8.1f ms  (ok %d/%d)\n" "$name" "$avg" "$ok" "$N" | tee -a "$R"
+          }
+          # warm caches once each
+          docker run --rm alpine true >/dev/null 2>&1 || true
+          sudo podman run --rm alpine true >/dev/null 2>&1 || true
+          "$BIN" run -- true >/dev/null 2>&1 || true
+
+          bench "docker"        'docker run --rm alpine true'
+          bench "podman"        'sudo podman run --rm alpine true'
+          bench "containerd"    "sudo ctr run --rm docker.io/library/alpine:latest cs\$RANDOM true"
+          bench "lightr(native)" "$BIN run -- true"
+          # lightr's differentiator: memoized re-run (cache hit)
+          "$BIN" run -- true >/dev/null 2>&1 || true
+          bench "lightr(memoized)" "$BIN run -- true"
+
+          echo "## lightr benchmark — cold-start (run \`true\`), $N iters, ubuntu-latest" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat "$R" >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: /tmp/bench.txt
