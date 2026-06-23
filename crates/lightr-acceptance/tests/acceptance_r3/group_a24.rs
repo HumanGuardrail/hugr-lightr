@@ -295,7 +295,16 @@ fn a24b_compose_discovery_env() {
     // I/O stall for many seconds. The property under test is discovery-var
     // injection, not latency — so we wait long enough that only a real failure
     // (vars never injected) trips the panic, never a scheduling hiccup.
-    let env_ready = poll_until(Duration::from_secs(30), || env_file.exists());
+    //
+    // Poll for CONTENT, not mere existence: the client's `printf … > file` makes
+    // the shell create (truncate) the file BEFORE printf writes the bytes, so a
+    // bare `exists()` poll can win the race and read an empty file under load
+    // (the historical a24b flake). Waiting until the file is non-empty closes it.
+    let env_ready = poll_until(Duration::from_secs(30), || {
+        std::fs::read_to_string(&env_file)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    });
 
     // Always tear the stack down before asserting, so a failed assertion never
     // leaks the eager services / their listeners.
