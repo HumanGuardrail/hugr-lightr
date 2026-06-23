@@ -196,7 +196,16 @@ pub struct ServiceSpec {
     pub ports: Vec<(u16, u16)>,
     pub env: Vec<(String, String)>,
     pub eager: bool,
-    /// Run dir if started (populated by supervisor)
+    /// #75 FIX-1: run dirs of EVERY started instance (populated by the supervisor).
+    /// `deploy.replicas: N` records all N here so `compose down` stops every one
+    /// (the pre-fix scalar recorded only instance 0, orphaning N-1). N=1 ⇒ one
+    /// entry. `#[serde(default)]` + the legacy scalar below keep old specs loading.
+    #[serde(default)]
+    pub run_dirs: Vec<String>,
+    /// LEGACY (#75): the pre-fix single run dir. Retained read-only so a stack
+    /// `up`'d before this fix still tears down (`compose down` folds it into
+    /// `run_dirs`). New specs leave it `None`.
+    #[serde(default)]
     pub run_dir: Option<String>,
     /// F-309: store-backed secrets `(name, ref)`.
     #[serde(default)]

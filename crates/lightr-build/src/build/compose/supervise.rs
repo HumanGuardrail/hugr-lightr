@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use super::model::{ServiceSpec, StackSpec};
 use super::supervise_deps::{topo_order, wait_for_deps};
-use super::supervise_replicas::{instance_count, replica_run_names};
+use super::supervise_replicas::{instance_count, replica_run_names, sanitize_cwd_segment};
 use super::up::lightr_home_pub as lightr_home;
 
 // Re-export the moved CMP-P0-DEPENDS helpers + the `DepCondition` they use so the
@@ -29,12 +29,22 @@ pub(crate) fn prepare_service_cwd(
     svc: &ServiceSpec,
     store: &Store,
     run_name: &str,
+    project: &str,
 ) -> Result<PathBuf> {
     // WP-CMP-CONFIG-LOWER: an explicit `container_name:` overrides the run-dir
     // name; absent ⇒ the service name (today's behavior). WP-REPLICAS: with N>1
     // each instance gets `<service>_<i>`. Only the materialized dir is renamed —
     // depends_on/discovery still key on `svc.name`.
-    let cwd = std::env::temp_dir().join(format!("lightr-svc-{run_name}"));
+    //
+    // #75 FIX-2: namespace the cwd by PROJECT. Without it, two projects each with a
+    // service named "web" share `lightr-svc-web`, and the unconditional
+    // `remove_dir_all` below lets project B wipe project A's RUNNING cwd. The
+    // project is sanitized to the same grammar service run-dir names use so the
+    // path is always filesystem-safe.
+    let cwd = std::env::temp_dir().join(format!(
+        "lightr-svc-{}-{run_name}",
+        sanitize_cwd_segment(project)
+    ));
     if cwd.exists() {
         std::fs::remove_dir_all(&cwd).map_err(LightrError::Io)?;
     }
@@ -96,9 +106,12 @@ fn note_unhonored_deploy(svc: &ServiceSpec) {
 ///
 /// WP-REPLICAS: N=1 (or absent) spawns a single instance with the existing run
 /// name (byte-identical to today). N>1 spawns N instances named `<service>_<i>`
-/// (after the fail-closed checks in [`replica_run_names`]). The first instance's
-/// run dir is the one recorded on the live `spec.json` (depends_on/discovery key
-/// on the service, which resolves to that first instance).
+/// (after the fail-closed checks in [`replica_run_names`]).
+///
+/// #75 FIX-1: EVERY instance records its run dir on the live `spec.json` (the
+/// pre-fix code recorded only instance 0, so `compose down` orphaned the other
+/// N-1 replicas forever). depends_on/discovery still key on the service name and
+/// resolve to the first instance (the LB note stands) — but teardown now sees all.
 pub(crate) fn start_service_detached(
     stack_dir: &Path,
     svc: &ServiceSpec,
@@ -108,10 +121,8 @@ pub(crate) fn start_service_detached(
     note_unhonored_deploy(svc);
     // Fail-closed BEFORE spawning anything (static-port/container_name + N>1).
     let run_names = replica_run_names(svc)?;
-    for (idx, run_name) in run_names.iter().enumerate() {
-        // Only the FIRST instance records its run dir on the live spec (the
-        // discovery/depends_on key resolves to one instance — see the LB note).
-        start_one_instance(stack_dir, svc, peers, run_name, idx == 0, project)?;
+    for run_name in &run_names {
+        start_one_instance(stack_dir, svc, peers, run_name, project)?;
     }
     Ok(())
 }
@@ -122,7 +133,6 @@ fn start_one_instance(
     svc: &ServiceSpec,
     peers: &[(String, u16)],
     run_name: &str,
-    record_run_dir: bool,
     project: &str,
 ) -> Result<()> {
     use super::supervise_net::{route_networking, NetRouting};
@@ -142,7 +152,7 @@ fn start_one_instance(
         network,
         network_alias,
     } = route_networking(svc, project)?;
-    let cwd = prepare_service_cwd(svc, &store, run_name)?;
+    let cwd = prepare_service_cwd(svc, &store, run_name, project)?;
 
     let to_store_files = |pairs: &[(String, String)]| -> Vec<StoreFile> {
         pairs
@@ -245,21 +255,23 @@ fn start_one_instance(
 
     let handle = spawn_detached_engine(&spec, &store, hc.as_ref(), engine, rootfs_ref, &child_env)?;
 
-    // WP-REPLICAS: only the FIRST instance records its run dir on the live spec —
-    // the service's depends_on/discovery key resolves to one instance (see the
-    // load-balancing note). Subsequent replicas spawn but do not overwrite it.
-    if record_run_dir {
-        let spec_path = stack_dir.join("spec.json");
-        if let Ok(bytes) = std::fs::read(&spec_path) {
-            if let Ok(mut stack_spec) = serde_json::from_slice::<StackSpec>(&bytes) {
-                for s in &mut stack_spec.services {
-                    if s.name == svc.name {
-                        s.run_dir = Some(handle.dir.to_string_lossy().into_owned());
-                    }
+    // #75 FIX-1: APPEND this instance's run dir to the service's `run_dirs` on the
+    // live spec — EVERY replica is recorded (not just instance 0), so `compose
+    // down` stops all N. depends_on/discovery still resolve to the first recorded
+    // instance (the LB note). Re-read → mutate → write keeps concurrent appends
+    // from sibling replica spawns from clobbering each other (last-writer folds in
+    // what it read; each instance spawns sequentially within a service here).
+    let run_dir = handle.dir.to_string_lossy().into_owned();
+    let spec_path = stack_dir.join("spec.json");
+    if let Ok(bytes) = std::fs::read(&spec_path) {
+        if let Ok(mut stack_spec) = serde_json::from_slice::<StackSpec>(&bytes) {
+            for s in &mut stack_spec.services {
+                if s.name == svc.name {
+                    s.run_dirs.push(run_dir.clone());
                 }
-                if let Ok(new_bytes) = serde_json::to_vec_pretty(&stack_spec) {
-                    let _ = std::fs::write(&spec_path, &new_bytes);
-                }
+            }
+            if let Ok(new_bytes) = serde_json::to_vec_pretty(&stack_spec) {
+                let _ = std::fs::write(&spec_path, &new_bytes);
             }
         }
     }
@@ -374,3 +386,9 @@ pub fn compose_supervise(stack_dir: &Path) -> Result<()> {
 #[cfg(test)]
 #[path = "supervise_tests.rs"]
 mod tests;
+
+// #75 FIX-2: the project-namespaced-cwd tests live in their own sibling (godfile
+// headroom; `supervise_tests.rs` is at the budget).
+#[cfg(test)]
+#[path = "supervise_cwd_tests.rs"]
+mod cwd_tests;

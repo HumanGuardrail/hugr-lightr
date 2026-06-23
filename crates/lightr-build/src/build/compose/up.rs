@@ -221,6 +221,7 @@ pub fn compose_up(
             ports: s.ports.clone(),
             env: s.env.clone(),
             eager: s.eager,
+            run_dirs: Vec::new(),
             run_dir: None,
             secrets: s.secrets.clone(),
             configs: s.configs.clone(),

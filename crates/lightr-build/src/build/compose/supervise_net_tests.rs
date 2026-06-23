@@ -15,6 +15,7 @@ fn svc(name: &str, image: &str, networks: Vec<(&str, Vec<&str>)>) -> ServiceSpec
         ports: Vec::new(),
         env: Vec::new(),
         eager: true,
+        run_dirs: Vec::new(),
         run_dir: None,
         secrets: Vec::new(),
         configs: Vec::new(),
