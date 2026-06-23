@@ -89,9 +89,27 @@ pub fn send_fd(stream: &UnixStream, fd: RawFd, data: &[u8]) -> io::Result<()> {
     }
 
     // SAFETY: `msg` is a fully-initialised msghdr referencing live buffers.
-    let n = unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, 0) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
+    // Retry transient errors: under heavy parallel load the SCM_RIGHTS sendmsg
+    // can be interrupted (EINTR) or, on macOS, transiently report EINVAL/EAGAIN
+    // before the kernel completes the ancillary-fd handoff. Bounded (~100ms) so a
+    // genuine structural error still surfaces rather than spinning forever.
+    let mut tries = 0u32;
+    loop {
+        let r = unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, 0) };
+        if r >= 0 {
+            break;
+        }
+        let err = io::Error::last_os_error();
+        let transient = matches!(
+            err.raw_os_error(),
+            Some(libc::EINTR) | Some(libc::EAGAIN) | Some(libc::EINVAL)
+        );
+        tries += 1;
+        if transient && tries < 50 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            continue;
+        }
+        return Err(err);
     }
     Ok(())
 }
@@ -121,10 +139,26 @@ pub fn recv_fd(stream: &UnixStream) -> io::Result<(RawFd, Vec<u8>)> {
     msg.msg_controllen = cmsg_buf.len() as _;
 
     // SAFETY: `msg` references live buffers for the duration of the call.
-    let n = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, 0) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    // Retry transient errors (EINTR/EAGAIN/EINVAL) under load, bounded ~100ms —
+    // symmetric with `send_fd` (see its note).
+    let mut tries = 0u32;
+    let n = loop {
+        let r = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, 0) };
+        if r >= 0 {
+            break r;
+        }
+        let err = io::Error::last_os_error();
+        let transient = matches!(
+            err.raw_os_error(),
+            Some(libc::EINTR) | Some(libc::EAGAIN) | Some(libc::EINVAL)
+        );
+        tries += 1;
+        if transient && tries < 50 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            continue;
+        }
+        return Err(err);
+    };
     if n == 0 {
         // Peer closed without sending — no fd will ever arrive.
         return Err(io::Error::new(
