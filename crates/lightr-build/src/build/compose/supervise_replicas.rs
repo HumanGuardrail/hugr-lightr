@@ -8,6 +8,32 @@ use lightr_core::{LightrError, Result};
 
 use super::model::ServiceSpec;
 
+/// #75 FIX-2: sanitize a project name into a filesystem-safe cwd path segment.
+///
+/// The project is already resolved through `project::sanitize_project_name`
+/// (grammar `[a-z0-9][a-z0-9_-]*`) at `compose up`, but this is total and
+/// defensive: any char outside `[a-z0-9_-]` becomes `_`. An empty project, or one
+/// where NO alphanumeric survives (e.g. `""`, `"///"`), degrades to `"default"`
+/// (matching the project resolver's fallback) so the cwd is never the
+/// un-namespaced `lightr-svc--<run_name>` nor a meaningless all-`_` segment.
+pub(crate) fn sanitize_cwd_segment(project: &str) -> String {
+    let out: String = project
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if out.chars().any(|c| c.is_ascii_alphanumeric()) {
+        out
+    } else {
+        "default".to_string()
+    }
+}
+
 /// WP-REPLICAS: how many instances of a service to spawn. `deploy.replicas`
 /// defaults to 1 (Docker-faithful); a recorded `0` is clamped to 1 (a stack with
 /// zero replicas would start nothing — we never silently drop the service, we run
@@ -94,6 +120,7 @@ mod tests {
             ports: Vec::new(),
             env: Vec::new(),
             eager: true,
+            run_dirs: Vec::new(),
             run_dir: None,
             secrets: Vec::new(),
             configs: Vec::new(),
@@ -117,6 +144,17 @@ mod tests {
             stop_signal: None,
             hostname: None,
         }
+    }
+
+    #[test]
+    fn sanitize_cwd_segment_total_and_safe() {
+        // #75 FIX-2: already-grammar projects pass through (lowercased); illegal
+        // chars become `_`; an empty/all-illegal project degrades to "default"
+        // (never the un-namespaced `lightr-svc--<run_name>`).
+        assert_eq!(sanitize_cwd_segment("proj_a-1"), "proj_a-1");
+        assert_eq!(sanitize_cwd_segment("My/Proj"), "my_proj");
+        assert_eq!(sanitize_cwd_segment(""), "default");
+        assert_eq!(sanitize_cwd_segment("///"), "default");
     }
 
     #[test]
