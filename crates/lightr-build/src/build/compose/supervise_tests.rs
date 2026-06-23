@@ -16,6 +16,7 @@ fn svc_with_deps(name: &str, deps: Vec<(&str, DepCondition)>) -> ServiceSpec {
         ports: Vec::new(),
         env: Vec::new(),
         eager: true,
+        run_dirs: Vec::new(),
         run_dir: None,
         secrets: Vec::new(),
         configs: Vec::new(),
@@ -59,7 +60,7 @@ fn prepare_service_cwd_hydrates_image_ref() {
     lightr_index::snapshot(src.path(), &store, "svc-img").unwrap();
     let mut svc = svc_with_deps("hydrate-me", vec![]);
     svc.image_ref = "svc-img".to_string();
-    let cwd = prepare_service_cwd(&svc, &store, &svc.name).unwrap();
+    let cwd = prepare_service_cwd(&svc, &store, &svc.name, "proj").unwrap();
     assert!(
         cwd.join("marker.txt").exists(),
         "image_ref file must be hydrated"
@@ -76,7 +77,7 @@ fn prepare_service_cwd_empty_ref_is_clean() {
     let store_tmp = TempDir::new().unwrap();
     let store = Store::open(store_tmp.path()).unwrap();
     let svc = svc_with_deps("cmd-only", vec![]);
-    let cwd = prepare_service_cwd(&svc, &store, &svc.name).unwrap();
+    let cwd = prepare_service_cwd(&svc, &store, &svc.name, "proj").unwrap();
     assert!(cwd.is_dir());
     assert_eq!(std::fs::read_dir(&cwd).unwrap().count(), 0);
     let _ = std::fs::remove_dir_all(&cwd);
@@ -364,10 +365,10 @@ fn container_name_overrides_run_dir_name() {
     // For N=1 the computed run name is the container_name override.
     let names = replica_run_names(&svc).unwrap();
     assert_eq!(names, vec!["custom-run".to_string()]);
-    let cwd = prepare_service_cwd(&svc, &store, &names[0]).unwrap();
+    let cwd = prepare_service_cwd(&svc, &store, &names[0], "proj").unwrap();
     assert!(
-        cwd.to_string_lossy().contains("lightr-svc-custom-run"),
-        "container_name must drive the run-dir name, got {cwd:?}"
+        cwd.to_string_lossy().contains("lightr-svc-proj-custom-run"),
+        "container_name must drive the run-dir name (project-namespaced), got {cwd:?}"
     );
     let _ = std::fs::remove_dir_all(&cwd);
 }
@@ -382,10 +383,10 @@ fn absent_container_name_uses_service_name_for_run_dir() {
     // For N=1 with no container_name the computed run name is the service name.
     let names = replica_run_names(&svc).unwrap();
     assert_eq!(names, vec!["plain-svc".to_string()]);
-    let cwd = prepare_service_cwd(&svc, &store, &names[0]).unwrap();
+    let cwd = prepare_service_cwd(&svc, &store, &names[0], "proj").unwrap();
     assert!(
-        cwd.to_string_lossy().contains("lightr-svc-plain-svc"),
-        "absent container_name must fall back to the service name, got {cwd:?}"
+        cwd.to_string_lossy().contains("lightr-svc-proj-plain-svc"),
+        "absent container_name must fall back to the service name (project-namespaced), got {cwd:?}"
     );
     let _ = std::fs::remove_dir_all(&cwd);
 }
