@@ -42,12 +42,16 @@ impl Drop for RunGuard {
 /// Parse `id=<id>` from stdout.
 fn parse_id_from_stdout(stdout: &[u8]) -> String {
     let text = String::from_utf8_lossy(stdout);
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("id=") {
-            return rest.trim().to_owned();
+    // Detached run prints the bare container id (Docker parity, #77); tolerate a
+    // legacy `id=` prefix too. Take the last non-empty stdout line.
+    for line in text.lines().rev() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
         }
+        return t.strip_prefix("id=").unwrap_or(t).to_owned();
     }
-    panic!("could not find 'id=<id>' in stdout:\n{text}");
+    panic!("could not find a container id in stdout:\n{text}");
 }
 
 /// True if `python3` is on PATH (probe `python3 --version`).
