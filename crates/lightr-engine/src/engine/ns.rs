@@ -66,6 +66,15 @@ mod ns_impl {
         command: &[String],
         limits: &lightr_core::ResourceLimits,
     ) -> i32 {
+        // Capture the REAL outer uid/gid BEFORE unsharing the user namespace.
+        // After unshare(CLONE_NEWUSER) and before a map is written, the process
+        // has no mapping, so getuid()/getgid() return the overflow id (65534);
+        // writing "0 65534 1" to uid_map is rejected by the kernel (the map must
+        // target the writer's real id in the parent userns). Reading first fixes
+        // the "uid/gid map failed" that broke the ns engine on Linux.
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+
         // unshare user+mount+pid namespaces
         let flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
         if unsafe { libc::unshare(flags) } != 0 {
@@ -76,9 +85,7 @@ mod ns_impl {
             return 1;
         }
 
-        // Map uid 0 inside → current uid outside
-        let uid = unsafe { libc::getuid() };
-        let gid = unsafe { libc::getgid() };
+        // Map uid 0 inside → real outer uid (captured above)
         if write_map("/proc/self/uid_map", &format!("0 {} 1\n", uid)).is_err()
             || write_map("/proc/self/setgroups", "deny\n").is_err()
             || write_map("/proc/self/gid_map", &format!("0 {} 1\n", gid)).is_err()
