@@ -1,14 +1,50 @@
 name: linux-validation
 
 # Real-Linux validation the macOS gate cannot do, on GitHub-hosted ubuntu-latest
-# (org has CI credits). Two jobs:
-#   cri-linux        — CRI backend cfg(linux) netns/CNI runtime + /proc stats
-#   acceptance-batch — owner-gated acceptance (#51): real pull (NET) + push (REG)
+# (org has CI credits). Jobs:
+#   cri-linux         — CRI backend cfg(linux) netns/CNI runtime + /proc stats
+#   acceptance-batch  — owner-gated acceptance (#51): real pull (NET) + push (REG)
+#   ns-net-isolation  — #81: prove `lightr run --engine ns --net=none` isolates the
+#                       network namespace (only `lo` visible) vs host-net default.
 # Manual only (workflow_dispatch).
 on:
   workflow_dispatch:
 
 jobs:
+  ns-net-isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --no-self-update && rustup default 1.96.0
+      - name: Build lightr (release) — also proves cfg(linux) ns.rs compiles
+        run: cargo build -p lightr-cli --release -j2
+      - name: Prepare alpine rootfs (has busybox `ip`)
+        run: |
+          set -e -x
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+          BIN="$PWD/target/release/lightr"
+          cid=$(docker create alpine:latest); docker export "$cid" -o /tmp/al.tar; docker rm "$cid"
+          mkdir -p /tmp/alroot && sudo tar -xf /tmp/al.tar -C /tmp/alroot
+          "$BIN" snapshot --dir /tmp/alroot --name alpine
+      - name: Verify --net=none isolates the network namespace
+        run: |
+          set +e
+          BIN="$PWD/target/release/lightr"
+          echo "=== HOST-net mode (default): container sees host interfaces ==="
+          "$BIN" run --engine ns --rootfs alpine -- ip -o link 2>&1 | tee /tmp/host.txt
+          HOST_N=$(grep -c ':' /tmp/host.txt)
+          echo "=== ISOLATED mode (--net=none): container should see ONLY lo ==="
+          "$BIN" run --engine ns --net=none --rootfs alpine -- ip -o link 2>&1 | tee /tmp/iso.txt
+          ISO_N=$(grep -c ':' /tmp/iso.txt)
+          echo "=== --net=none still runs (lo up) ==="
+          "$BIN" run --engine ns --net=none --rootfs alpine -- /bin/true; echo "iso_true_exit=$?"
+          echo "=== native + --net=none → honest error (exit 2) ==="
+          "$BIN" run --net=none -- /bin/true; echo "native_netnone_exit=$?"
+          echo "HOST_IFACES=$HOST_N  ISOLATED_IFACES=$ISO_N"
+          # PASS iff isolated sees fewer interfaces than host AND isolated has >=1 (lo up)
+          if [ "$ISO_N" -ge 1 ] && [ "$HOST_N" -gt "$ISO_N" ]; then echo "NS_NET_ISO=PASS"; else echo "NS_NET_ISO=FAIL"; fi
+
   cri-linux:
     runs-on: ubuntu-latest
     steps:
