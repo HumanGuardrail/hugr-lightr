@@ -7,10 +7,15 @@
 ## Method
 - All four runtimes on the **same runner, same job, back-to-back**, N iterations,
   wall-clock averaged.
-- **Apples-to-apples isolation:** lightr `--engine ns --rootfs <ref>` =
-  user+mount+pid namespaces + `pivot_root` into a CAS-materialized rootfs — the
-  **same isolation primitives** Docker/Podman/containerd use. lightr runs this
-  **rootless** (unprivileged user namespace); the others ran as root (daemon/sudo).
+- **Isolation level (NOT identical — read carefully):** lightr `--engine ns
+  --rootfs <ref>` = user+mount+pid namespaces + `pivot_root` into a CAS-materialized
+  rootfs, **rootless** (unprivileged user namespace). IMPORTANT: it does **NOT**
+  create a network namespace (`ns.rs` unshares `CLONE_NEWUSER|NEWNS|NEWPID`, no
+  `CLONE_NEWNET` — the container shares the host network), whereas
+  Docker/Podman/containerd DO isolate the network (veth/bridge). So this is **not
+  full isolation parity**: part of lightr's cold-start advantage is skipping
+  network-namespace + veth setup. A same-isolation comparison would run the
+  competitors with `--network=host` (and/or add `CLONE_NEWNET` to lightr-ns).
 - Competitors run the equivalent `alpine` workload; lightr materializes the same
   alpine rootfs from its content-addressed store (the 29 ms figure **includes**
   that CoW hydrate).
@@ -19,16 +24,21 @@
 
 | Dimension | **lightr** | Docker | Podman | containerd |
 |---|---|---|---|---|
-| **Cold-start, ISOLATED (namespaces — fair)** | **~29 ms** | ~213 ms | ~253 ms | ~110 ms |
+| Cold-start (lightr = **lighter** isolation, see note) | **~29 ms** | ~213 ms | ~253 ms | ~110 ms |
 | Idle / daemon RAM | **0 MB** | ~155 MB | 0 MB | (part of Docker) |
 | Re-run real build (20k-fn C compile, memoized) | **~11 ms** | ~20,380 ms | n/a | n/a |
 | Cold-start, native (no isolation — trusted/CI) | ~10 ms | — | — | — |
 
-**Headline (fair):** at the **same isolation level**, and **rootless**, lightr
-cold-starts **~7× faster than Docker** (29 vs 213 ms), ~3.8× faster than
-containerd, ~8.6× faster than Podman — with **0 MB idle footprint** and
-**memoized re-builds ~1,900×** faster (Docker recompiles every run; lightr
-returns the cached result).
+**Headline (honest):** lightr cold-starts far faster than the daemon-based
+runtimes — ~29 ms vs containerd ~110 ms (**~3.8×**, the fastest competitor and
+the fairest single baseline), Docker ~213 ms, Podman ~253 ms. **This is NOT yet a
+same-isolation number:** lightr-ns omits the network namespace (see note) and ran
+rootless while the others ran rootful, so part of the gap is lighter isolation +
+no daemon, not pure runtime speed. A clean same-isolation comparison (competitors
+`--network=host`, equal privilege, `+CLONE_NEWNET` in lightr-ns) is **pending**.
+The **unambiguous** wins: **daemonless (0 MB idle vs ~155 MB)** and **memoized
+re-builds ~1,900×** — the latter being a lightr *feature* Docker lacks, not a
+runtime-vs-runtime measurement.
 
 ## Honest caveats (read these)
 1. **Microbenchmark of runtime overhead.** Cold-start uses `true`; a heavy app's
