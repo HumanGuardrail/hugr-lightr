@@ -1,11 +1,13 @@
 name: lightr-benchmark
 
-# SOTA adversarial benchmark: lightr vs Docker / containerd / Podman on an
-# identical GitHub-hosted Linux runner (reproducible, public hardware).
-# FAIR comparison: lightr `--engine ns --rootfs <ref>` = user+mount+pid
-# namespaces + pivot_root into a CAS-materialized rootfs = SAME isolation class
-# as the container runtimes. Plus lightr native (no-isolation, trusted/CI mode,
-# labeled) and memoization (orthogonal). Honest; resilient; manual.
+# Adversarial benchmark: lightr vs Docker / containerd / Podman on an identical
+# GitHub-hosted Linux runner (reproducible, public hardware).
+# CAVEAT (corrected 2026-06-23 after re-audit): lightr `--engine ns` =
+# user+mount+pid namespaces + pivot_root, but NOT a network namespace (no
+# CLONE_NEWNET) and rootless — so the cold-start is NOT same-isolation vs the
+# container runtimes (which isolate the net + ran rootful). See docs/benchmarks/
+# RESULTS.md for the honest framing + task #82 for the clean same-isolation re-run.
+# Unambiguous wins here: daemonless footprint + memoization. Honest; manual.
 on:
   workflow_dispatch:
     inputs:
