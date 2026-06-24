@@ -199,6 +199,10 @@ pub(super) fn forward(parsed: DockerRunArgs, json: bool, explain: bool) -> i32 {
         &[], // mounts: docker `--mount` is grammar-mismatch (honest-errored above)
         engine,
         rootfs,
+        // WP-NET-ISO: the docker compat shim keeps host networking (the docker
+        // `--network` grammar is honest-errored elsewhere); `--net=none` is the
+        // lightr-native flag, not exposed through this shim.
+        "host",
         false,
         parsed.memory.as_deref(),
         parsed.cpus.as_deref(),

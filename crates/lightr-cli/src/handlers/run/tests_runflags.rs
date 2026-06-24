@@ -62,18 +62,19 @@ fn run_fg(dir: &str, command: &[String], flags: RawRunFlags) -> i32 {
         false, // publish_all (WP-B2)
         &[],   // mounts
         "native",
-        None,  // rootfs
-        false, // deep_memo
-        None,  // memory
-        None,  // cpus
-        &[],   // secrets
-        &[],   // configs
-        &[],   // env_set
-        None,  // env_file
-        None,  // workdir
-        None,  // user
-        None,  // restart
-        None,  // stop_signal
+        None,   // rootfs
+        "host", // net (WP-NET-ISO)
+        false,  // deep_memo
+        None,   // memory
+        None,   // cpus
+        &[],    // secrets
+        &[],    // configs
+        &[],    // env_set
+        None,   // env_file
+        None,   // workdir
+        None,   // user
+        None,   // restart
+        None,   // stop_signal
         &HealthFlags::default(),
         RawRcFlags::default(),
         flags,

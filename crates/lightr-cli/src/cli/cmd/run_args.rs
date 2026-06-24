@@ -39,6 +39,10 @@ pub(crate) struct RunArgs {
     /// Hydrate a ref CoW into a temp dir and hand it to the engine as rootfs
     #[arg(long, value_name = "REF")]
     pub(crate) rootfs: Option<String>,
+    /// Network mode: host (default, share host network) or none (isolated
+    /// netns, loopback only — ns/vz engines). Other values ⇒ error.
+    #[arg(long = "net", default_value = "host", value_name = "MODE")]
+    pub(crate) net: String,
     /// Process-tree memoization (opt-in; honest fallback to whole-run memo)
     #[arg(long)]
     pub(crate) deep_memo: bool,

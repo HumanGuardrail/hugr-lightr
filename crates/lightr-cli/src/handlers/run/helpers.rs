@@ -34,6 +34,35 @@ pub(super) fn publish_all_policy_error(
     None
 }
 
+/// WP-NET3: the vz container-networking flags (`--network`/`--network-alias`/
+/// `--add-host`/`--dns`) are honored ONLY on the `--engine vz --rootfs <img>`
+/// path — that is where a per-container mesh NIC + guest `/etc/hosts`/resolv.conf
+/// exist. The native engine SHARES the host network (no per-container netns) and
+/// has no container rootfs to write, so any networking flag on native (or vz
+/// without a rootfs) is an honest exit 2, never a silent drop. Guarded BEFORE any
+/// provisioning, because only the handler has the engine + rootfs. Returns
+/// `Some(2)` for a bad combo, `None` when valid (no networking flag, or vz+rootfs).
+pub(super) fn network_flags_policy_error(
+    runflags: &super::runflags::RunFlags,
+    engine: EngineKind,
+    rootfs_ref: Option<&str>,
+) -> Option<i32> {
+    let net_flag = runflags.network.is_some()
+        || !runflags.network_alias.is_empty()
+        || !runflags.add_host.is_empty()
+        || !runflags.dns.is_empty();
+    let vz_container = engine == EngineKind::Vz && rootfs_ref.is_some();
+    if net_flag && !vz_container {
+        eprintln!(
+            "lightr: --network/--network-alias/--add-host/--dns require --engine vz \
+             --rootfs <img> (the native engine shares the host network — no per-container \
+             netns or rootfs)"
+        );
+        return Some(2);
+    }
+    None
+}
+
 /// WP-RUNFLAGS: claim `--name` for a just-spawned detached run, then print its id
 /// (the success line). On a duplicate name the run is rolled back (removed) and an
 /// honest exit 1 returned — Docker refuses a duplicate name. `None` ⇒ no claim,

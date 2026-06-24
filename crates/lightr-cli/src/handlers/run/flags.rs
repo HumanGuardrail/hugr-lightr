@@ -227,6 +227,33 @@ impl HealthFlags {
     }
 }
 
+/// WP-NET-ISO: map `--net` to `net_isolate`. `host` ⇒ false (share host
+/// network, the default/current behavior); `none` ⇒ true (isolated netns).
+/// Any other value is an honest error to stderr + `Err(2)` (fail-closed).
+pub(crate) fn net_isolate_from_str(net: &str) -> Result<bool, i32> {
+    match net {
+        "host" => Ok(false),
+        "none" => Ok(true),
+        other => {
+            eprintln!("lightr: invalid --net value '{other}' (expected host|none)");
+            Err(2)
+        }
+    }
+}
+
+/// WP-NET-ISO: resolve `--net` AND enforce that `--net=none` has a netns to
+/// create. `is_pure_native` is `native engine && no rootfs` — that path has no
+/// netns, so isolation is an honest exit 2 (never a silently-shared host net).
+/// Only ns (or vz, via its VM) can give a netns. Returns the `net_isolate` bool.
+pub(crate) fn resolve_net_isolate(net: &str, is_pure_native: bool) -> Result<bool, i32> {
+    let net_isolate = net_isolate_from_str(net)?;
+    if net_isolate && is_pure_native {
+        eprintln!("lightr: --net=none (network isolation) requires --engine ns or vz");
+        return Err(2);
+    }
+    Ok(net_isolate)
+}
+
 #[cfg(test)]
 #[path = "flags_rc_tests.rs"]
 mod rc_tests;

@@ -208,6 +208,7 @@ fn run_bad_engine_string_rejected_at_handler() {
         &[],
         "bogus",
         None,
+        "host", // net (WP-NET-ISO)
         false,
         None,
         None,
