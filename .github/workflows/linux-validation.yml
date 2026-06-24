@@ -31,29 +31,25 @@ jobs:
         run: |
           set +e
           BIN="$PWD/target/release/lightr"
-          # Bare alpine has no `ip`/iproute2 and we don't mount /proc, so probe from
-          # the HOST with lsns (util-linux): a --net=none run must show up as an
-          # EXTRA net namespace; a host-net run must not. No container tools needed.
-          # Warm the CoW hydrate so container setup is fast, then poll for the MAX
-          # netns count across the run window (robust to setup-timing).
-          "$BIN" run --engine ns --net=none --rootfs alpine -- /bin/true >/dev/null 2>&1
-          "$BIN" run --engine ns --rootfs alpine -- /bin/true >/dev/null 2>&1
-          base=$(sudo lsns -t net -n 2>/dev/null | wc -l)
-          poll_max(){ local m=$base c; for w in $(seq 1 8); do sleep 0.7; c=$(sudo lsns -t net -n 2>/dev/null | wc -l); [ "$c" -gt "$m" ] && m=$c; done; echo "$m"; }
-          echo "=== HOST-net mode (default): no new net namespace ==="
-          "$BIN" run --engine ns --rootfs alpine -- sleep 8 & p1=$!
-          HOST_N=$(poll_max); wait $p1
-          echo "=== ISOLATED mode (--net=none): one EXTRA net namespace ==="
-          "$BIN" run --engine ns --net=none --rootfs alpine -- sleep 8 & p2=$!
-          ISO_N=$(poll_max); wait $p2
-          echo "base_netns=$base"
+          # FUNCTIONAL isolation proof (lsns can't see a rootless user-ns'd netns):
+          # listen on the HOST loopback, then have the container try to reach it.
+          # host-net default → reaches it (shares host lo); --net=none → cannot
+          # (its own empty lo, nothing listening). busybox `wget` ships in alpine.
+          python3 -m http.server 18080 --bind 127.0.0.1 >/dev/null 2>&1 & srv=$!
+          sleep 1
+          echo "=== HOST-net mode (default): should REACH host 127.0.0.1:18080 ==="
+          "$BIN" run --engine ns --rootfs alpine -- wget -T 4 -q -O - http://127.0.0.1:18080 >/tmp/h.txt 2>&1; HOST_REACH=$?
+          echo "host_reach_exit=$HOST_REACH"; head -2 /tmp/h.txt
+          echo "=== ISOLATED (--net=none): should FAIL to reach it (isolated lo) ==="
+          "$BIN" run --engine ns --net=none --rootfs alpine -- wget -T 4 -q -O - http://127.0.0.1:18080 >/tmp/i.txt 2>&1; ISO_REACH=$?
+          echo "iso_reach_exit=$ISO_REACH"; head -2 /tmp/i.txt
+          kill $srv 2>/dev/null
           echo "=== --net=none still runs (lo up) ==="
           "$BIN" run --engine ns --net=none --rootfs alpine -- /bin/true; echo "iso_true_exit=$?"
           echo "=== native + --net=none → honest error (exit 2) ==="
           "$BIN" run --net=none -- /bin/true; echo "native_netnone_exit=$?"
-          echo "NETNS_DURING_HOSTMODE=$HOST_N  NETNS_DURING_ISOMODE=$ISO_N"
-          # PASS iff the --net=none run created an EXTRA net namespace vs the host-net run.
-          if [ "$ISO_N" -gt "$HOST_N" ]; then echo "NS_NET_ISO=PASS"; else echo "NS_NET_ISO=FAIL"; fi
+          # PASS iff host-net REACHED the listener (exit 0) and --net=none did NOT.
+          if [ "$HOST_REACH" = 0 ] && [ "$ISO_REACH" != 0 ]; then echo "NS_NET_ISO=PASS"; else echo "NS_NET_ISO=FAIL"; fi
 
   cri-linux:
     runs-on: ubuntu-latest
