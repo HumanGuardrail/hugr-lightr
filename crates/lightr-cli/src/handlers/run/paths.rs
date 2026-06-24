@@ -67,6 +67,9 @@ pub(super) fn run_engine(
     env_explicit: &[(String, String)],
     // WP-IMG-ENVUSER: CLI `-u`/`--user` — OVERRIDES the image USER. `None` ⇒ image.
     user: Option<&str>,
+    // WP-NET-ISO: `--net=none` ⇒ true: the ns engine creates a netns
+    // (CLONE_NEWNET, loopback only). native ignores it; vz isolates via its VM.
+    net_isolate: bool,
 ) -> i32 {
     // Hydrate rootfs ref into a temp dir if provided
     let rootfs_tmp: Option<tempfile::TempDir>;
@@ -129,6 +132,7 @@ pub(super) fn run_engine(
         rootfs: rootfs_path.as_deref(),
         limits,
         net: false,   // synchronous CLI engine path; networked vz is detached (supervisor)
+        net_isolate,  // WP-NET-ISO: `--net=none` ⇒ ns engine creates a netns (loopback only)
         net_fd: None, // mesh NIC is wired by the supervisor path (ADR-0018), not here
         net_mac: None,
         mounts: &[],
