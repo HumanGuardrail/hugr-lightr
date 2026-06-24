@@ -31,21 +31,24 @@ jobs:
         run: |
           set +e
           BIN="$PWD/target/release/lightr"
-          # busybox `ip link` reads via netlink (reflects the netns; no /proc needed).
-          # Count interface header lines like "1: lo: <...>", "2: eth0: <...>".
-          echo "=== HOST-net mode (default): container sees host interfaces ==="
-          "$BIN" run --engine ns --rootfs alpine -- ip link 2>&1 | tee /tmp/host.txt
-          HOST_N=$(grep -cE '^[0-9]+:' /tmp/host.txt)
-          echo "=== ISOLATED mode (--net=none): container should see ONLY lo ==="
-          "$BIN" run --engine ns --net=none --rootfs alpine -- ip link 2>&1 | tee /tmp/iso.txt
-          ISO_N=$(grep -cE '^[0-9]+:' /tmp/iso.txt)
+          # Bare alpine has no `ip`/iproute2 and we don't mount /proc, so probe from
+          # the HOST with lsns (util-linux): a --net=none run must show up as an
+          # EXTRA net namespace; a host-net run must not. No container tools needed.
+          base=$(sudo lsns -t net -n 2>/dev/null | wc -l)
+          echo "=== HOST-net mode (default): no new net namespace ==="
+          "$BIN" run --engine ns --rootfs alpine -- sleep 5 & p1=$!
+          sleep 2; HOST_N=$(sudo lsns -t net -n 2>/dev/null | wc -l); wait $p1
+          echo "=== ISOLATED mode (--net=none): one EXTRA net namespace ==="
+          "$BIN" run --engine ns --net=none --rootfs alpine -- sleep 5 & p2=$!
+          sleep 2; ISO_N=$(sudo lsns -t net -n 2>/dev/null | wc -l); wait $p2
+          echo "base_netns=$base"
           echo "=== --net=none still runs (lo up) ==="
           "$BIN" run --engine ns --net=none --rootfs alpine -- /bin/true; echo "iso_true_exit=$?"
           echo "=== native + --net=none → honest error (exit 2) ==="
           "$BIN" run --net=none -- /bin/true; echo "native_netnone_exit=$?"
-          echo "HOST_IFACES=$HOST_N  ISOLATED_IFACES=$ISO_N"
-          # PASS iff isolated sees fewer interfaces than host AND isolated has >=1 (lo up)
-          if [ "$ISO_N" -ge 1 ] && [ "$HOST_N" -gt "$ISO_N" ]; then echo "NS_NET_ISO=PASS"; else echo "NS_NET_ISO=FAIL"; fi
+          echo "NETNS_DURING_HOSTMODE=$HOST_N  NETNS_DURING_ISOMODE=$ISO_N"
+          # PASS iff the --net=none run created an EXTRA net namespace vs the host-net run.
+          if [ "$ISO_N" -gt "$HOST_N" ]; then echo "NS_NET_ISO=PASS"; else echo "NS_NET_ISO=FAIL"; fi
 
   cri-linux:
     runs-on: ubuntu-latest
