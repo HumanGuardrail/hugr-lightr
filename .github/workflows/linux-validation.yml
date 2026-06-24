@@ -34,13 +34,18 @@ jobs:
           # Bare alpine has no `ip`/iproute2 and we don't mount /proc, so probe from
           # the HOST with lsns (util-linux): a --net=none run must show up as an
           # EXTRA net namespace; a host-net run must not. No container tools needed.
+          # Warm the CoW hydrate so container setup is fast, then poll for the MAX
+          # netns count across the run window (robust to setup-timing).
+          "$BIN" run --engine ns --net=none --rootfs alpine -- /bin/true >/dev/null 2>&1
+          "$BIN" run --engine ns --rootfs alpine -- /bin/true >/dev/null 2>&1
           base=$(sudo lsns -t net -n 2>/dev/null | wc -l)
+          poll_max(){ local m=$base c; for w in $(seq 1 8); do sleep 0.7; c=$(sudo lsns -t net -n 2>/dev/null | wc -l); [ "$c" -gt "$m" ] && m=$c; done; echo "$m"; }
           echo "=== HOST-net mode (default): no new net namespace ==="
-          "$BIN" run --engine ns --rootfs alpine -- sleep 5 & p1=$!
-          sleep 2; HOST_N=$(sudo lsns -t net -n 2>/dev/null | wc -l); wait $p1
+          "$BIN" run --engine ns --rootfs alpine -- sleep 8 & p1=$!
+          HOST_N=$(poll_max); wait $p1
           echo "=== ISOLATED mode (--net=none): one EXTRA net namespace ==="
-          "$BIN" run --engine ns --net=none --rootfs alpine -- sleep 5 & p2=$!
-          sleep 2; ISO_N=$(sudo lsns -t net -n 2>/dev/null | wc -l); wait $p2
+          "$BIN" run --engine ns --net=none --rootfs alpine -- sleep 8 & p2=$!
+          ISO_N=$(poll_max); wait $p2
           echo "base_netns=$base"
           echo "=== --net=none still runs (lo up) ==="
           "$BIN" run --engine ns --net=none --rootfs alpine -- /bin/true; echo "iso_true_exit=$?"
