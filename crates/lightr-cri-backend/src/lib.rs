@@ -353,8 +353,16 @@ mod tests {
             .expect("run_sandbox succeeds");
         let st = b.sandbox_status(&id).unwrap();
         assert_eq!(st.state, SandboxState::Ready);
-        // macOS gate: no CNI → no pod IP (probe-truthful).
-        assert!(st.ip.is_none());
+        // Pod IP is CNI-dependent: None on the macOS gate / no CNI (probe-truthful),
+        // Some(addr) on Linux when a CNI conflist+plugins are present — validated in
+        // the linux-validation lane, where CNI ADD assigns e.g. 10.88.0.x. Both are
+        // correct; an assigned IP must be a non-empty, parseable address.
+        if let Some(ip) = st.ip.as_deref() {
+            assert!(
+                !ip.is_empty() && ip.parse::<std::net::IpAddr>().is_ok(),
+                "CNI-assigned pod IP must be a valid address, got {ip:?}"
+            );
+        }
         // Streaming is wired: a missing container fails closed with NotFound
         // (the seam never panics), and open_attach on the same id likewise.
         assert!(matches!(
