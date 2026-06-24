@@ -37,12 +37,14 @@ jobs:
           # (its own empty lo, nothing listening). busybox `wget` ships in alpine.
           python3 -m http.server 18080 --bind 127.0.0.1 >/dev/null 2>&1 & srv=$!
           sleep 1
+          # NOTE: the ns engine execs ABSOLUTE paths only (no $PATH search), so invoke
+          # busybox directly. host-net reaches the host listener; --net=none cannot.
           echo "=== HOST-net mode (default): should REACH host 127.0.0.1:18080 ==="
-          "$BIN" run --engine ns --rootfs alpine -- wget -T 4 -q -O - http://127.0.0.1:18080 >/tmp/h.txt 2>&1; HOST_REACH=$?
-          echo "host_reach_exit=$HOST_REACH"; head -2 /tmp/h.txt
+          "$BIN" run --engine ns --rootfs alpine -- /bin/busybox wget -T 4 -q -O - http://127.0.0.1:18080 >/tmp/h.txt 2>&1; HOST_REACH=$?
+          echo "host_reach_exit=$HOST_REACH"; head -3 /tmp/h.txt
           echo "=== ISOLATED (--net=none): should FAIL to reach it (isolated lo) ==="
-          "$BIN" run --engine ns --net=none --rootfs alpine -- wget -T 4 -q -O - http://127.0.0.1:18080 >/tmp/i.txt 2>&1; ISO_REACH=$?
-          echo "iso_reach_exit=$ISO_REACH"; head -2 /tmp/i.txt
+          "$BIN" run --engine ns --net=none --rootfs alpine -- /bin/busybox wget -T 4 -q -O - http://127.0.0.1:18080 >/tmp/i.txt 2>&1; ISO_REACH=$?
+          echo "iso_reach_exit=$ISO_REACH"; head -3 /tmp/i.txt
           kill $srv 2>/dev/null
           echo "=== --net=none still runs (lo up) ==="
           "$BIN" run --engine ns --net=none --rootfs alpine -- /bin/true; echo "iso_true_exit=$?"
