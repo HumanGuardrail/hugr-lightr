@@ -107,6 +107,7 @@ fn boot_vm(
         // net:true ⇒ NAT NIC (eth0) + `ip=dhcp` on the cmdline. net_fd:Some ⇒
         // the file-handle mesh NIC (eth1) over our socketpair → the VSwitch.
         net: true,
+        net_isolate: false,
         net_fd: Some(guest_fd),
         // net_mac: the registry-assigned per-member MAC. The fix plumbs this
         // through the engine FFI to vz.swift so the guest's eth1 emits THIS MAC

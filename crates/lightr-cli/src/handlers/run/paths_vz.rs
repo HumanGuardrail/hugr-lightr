@@ -71,8 +71,9 @@ pub(crate) fn run_vz_memo(
             command,
             rootfs: Some(rootfs_path.as_path()),
             limits,
-            net: false,   // vz-memo path is non-detached + non-networked
-            net_fd: None, // no mesh NIC on the memo path (ADR-0018)
+            net: false,         // vz-memo path is non-detached + non-networked
+            net_isolate: false, // vz isolates via its VM; no netns flag needed
+            net_fd: None,       // no mesh NIC on the memo path (ADR-0018)
             net_mac: None,
             mounts: &[],
             env: &[],

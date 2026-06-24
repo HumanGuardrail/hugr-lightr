@@ -26,6 +26,9 @@ mod ns_impl {
             let cwd_str = spec.cwd.to_string_lossy().into_owned();
             let command: Vec<String> = spec.command.to_vec();
             let limits = spec.limits;
+            // WP-NET-ISO: `--net=none` ⇒ create a network namespace (CLONE_NEWNET)
+            // so the container gets an isolated, empty net stack (loopback only).
+            let net_isolate = spec.net_isolate;
 
             // Fork so the child becomes PID 1 in the new PID namespace.
             // Safety: standard fork+exec pattern; we exec immediately in child.
@@ -34,7 +37,8 @@ mod ns_impl {
                 -1 => Err(LightrError::Io(std::io::Error::last_os_error())),
                 0 => {
                     // ── child ──────────────────────────────────────────────
-                    let rc = run_in_namespaces(&rootfs_path, &cwd_str, &command, &limits);
+                    let rc =
+                        run_in_namespaces(&rootfs_path, &cwd_str, &command, &limits, net_isolate);
                     std::process::exit(rc);
                 }
                 child_pid => {
@@ -65,6 +69,7 @@ mod ns_impl {
         cwd: &str,
         command: &[String],
         limits: &lightr_core::ResourceLimits,
+        net_isolate: bool,
     ) -> i32 {
         // Capture the REAL outer uid/gid BEFORE unsharing the user namespace.
         // After unshare(CLONE_NEWUSER) and before a map is written, the process
@@ -75,8 +80,15 @@ mod ns_impl {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
 
-        // unshare user+mount+pid namespaces
-        let flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+        // unshare user+mount+pid namespaces. WP-NET-ISO: with `--net=none`, also
+        // unshare the network namespace (CLONE_NEWNET) so the container starts
+        // with an isolated, empty net stack (loopback only); host interfaces and
+        // ports are invisible. When net_isolate=false the flags are byte-identical
+        // to before (share host network — zero regression).
+        let mut flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+        if net_isolate {
+            flags |= libc::CLONE_NEWNET;
+        }
         if unsafe { libc::unshare(flags) } != 0 {
             eprintln!(
                 "lightr-engine ns: unshare failed: {}",
@@ -92,6 +104,18 @@ mod ns_impl {
         {
             eprintln!("lightr-engine ns: uid/gid map failed");
             return 1;
+        }
+
+        // WP-NET-ISO: with `--net=none` the new netns starts with `lo` DOWN, so
+        // even loopback traffic fails. Bring `lo` up here — we hold CAP_NET_ADMIN
+        // in the new userns, so this works rootless. MUST run AFTER the uid/gid
+        // map is written (the cap is only effective once the map exists) and
+        // BEFORE pivot_root/exec. Fail closed: any error returns 1.
+        if net_isolate {
+            if let Err(e) = bring_up_loopback() {
+                eprintln!("lightr-engine ns: bring up loopback failed: {e}");
+                return 1;
+            }
         }
 
         // Mount rootfs as private bind mount so we can pivot_root
@@ -227,6 +251,62 @@ mod ns_impl {
 
     fn write_map(path: &str, content: &str) -> std::io::Result<()> {
         std::fs::write(path, content.as_bytes())
+    }
+
+    // WP-NET-ISO: bring the loopback interface up inside the new netns. Opens a
+    // DGRAM socket, reads `lo`'s flags (SIOCGIFFLAGS), ORs in IFF_UP|IFF_RUNNING,
+    // writes them back (SIOCSIFFLAGS), and closes the socket. Returns an honest
+    // io::Error on any failure (the caller fails closed). We define a minimal
+    // `ifreq` whose first union member is the 16-bit flags field — the only field
+    // these two ioctls touch — laid out to match the C `struct ifreq`.
+    fn bring_up_loopback() -> std::io::Result<()> {
+        // `struct ifreq` on Linux: char ifr_name[IFNAMSIZ=16] followed by a union
+        // whose largest member is 16 bytes (sockaddr/etc.). For the FLAGS ioctls
+        // only `ifr_flags` (a `short` at the start of the union) is read/written.
+        #[repr(C)]
+        struct IfReq {
+            ifr_name: [libc::c_char; libc::IFNAMSIZ],
+            ifr_flags: libc::c_short,
+            // Pad the union out to its full size so the struct matches the kernel's
+            // `struct ifreq` layout (the ioctls copy a full ifreq in/out).
+            _pad: [u8; 22],
+        }
+
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let mut req = IfReq {
+            ifr_name: [0; libc::IFNAMSIZ],
+            ifr_flags: 0,
+            _pad: [0; 22],
+        };
+        // Copy "lo" into ifr_name (NUL-terminated; the array is zero-initialized).
+        let lo = b"lo";
+        for (i, &b) in lo.iter().enumerate() {
+            req.ifr_name[i] = b as libc::c_char;
+        }
+
+        // SIOCGIFFLAGS: read current flags.
+        if unsafe { libc::ioctl(fd, libc::SIOCGIFFLAGS, &mut req) } != 0 {
+            let e = std::io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(e);
+        }
+
+        // OR in IFF_UP | IFF_RUNNING.
+        req.ifr_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
+
+        // SIOCSIFFLAGS: write them back.
+        if unsafe { libc::ioctl(fd, libc::SIOCSIFFLAGS, &req) } != 0 {
+            let e = std::io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(e);
+        }
+
+        unsafe { libc::close(fd) };
+        Ok(())
     }
 }
 

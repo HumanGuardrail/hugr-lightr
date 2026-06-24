@@ -156,6 +156,7 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         rootfs: Some(&rootfs_dir),
                         limits,
                         net: true,
+                        net_isolate: false,
                         // ADR-0018 dual-NIC: when this run joined a `--network`,
                         // `mesh_fd` is the guest end of the mesh NIC (eth1) the L2
                         // switch owns the host end of; eth0 (NAT egress) is

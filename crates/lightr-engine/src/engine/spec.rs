@@ -59,6 +59,12 @@ pub struct ExecSpec<'a> {
     /// guest. Other engines ignore it (native/ns/wsl don't VM-network here). NOT
     /// part of any memo key (runtime, like `limits`/`ports`). Default false.
     pub net: bool,
+    /// When true, the ns engine creates a network namespace (CLONE_NEWNET) so
+    /// the container gets an isolated, empty net stack (loopback only) — host
+    /// interfaces/ports are invisible. native ignores it (no netns); vz already
+    /// isolates via its VM. Default false = share host network (current
+    /// behavior). NOT part of any memo key (runtime, like `net`/`limits`).
+    pub net_isolate: bool,
     /// ADR-0018 dual-NIC mesh (WP-C6/C7). The GUEST-side fd of a
     /// `socketpair(AF_UNIX, SOCK_DGRAM)` whose host end is owned by the userspace
     /// L2 switch (a later WP creates the pair and owns the host end). When

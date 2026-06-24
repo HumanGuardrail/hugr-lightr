@@ -89,6 +89,9 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                     &a.mount,
                     &a.engine,
                     a.rootfs.as_deref(),
+                    // WP-NET-ISO: `--net host|none` → net_isolate (ns CLONE_NEWNET).
+                    // `host` (default) ⇒ share host network, as before.
+                    &a.net,
                     a.deep_memo,
                     a.memory.as_deref(),
                     a.cpus.as_deref(),

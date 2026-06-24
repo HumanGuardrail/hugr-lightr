@@ -59,6 +59,7 @@ fn publish_without_detach_exits_2() {
         &[],
         "native",
         None,
+        "host", // net (WP-NET-ISO)
         false,
         None,
         None,
@@ -94,6 +95,7 @@ fn publish_on_engine_path_exits_2() {
         &[],
         "vz", // engine path ⇒ Phase 2
         None,
+        "host", // net (WP-NET-ISO)
         false,
         None,
         None,
@@ -148,6 +150,7 @@ fn dash_e_runs_not_stubbed() {
         &[],   // mounts
         "native",
         None,                     // rootfs
+        "host",                   // net (WP-NET-ISO)
         false,                    // deep_memo
         None,                     // memory
         None,                     // cpus
@@ -208,6 +211,7 @@ fn dash_w_runs_not_stubbed_and_honored() {
         &[],   // mounts
         "native",
         None,           // rootfs
+        "host",         // net (WP-NET-ISO)
         false,          // deep_memo
         None,           // memory
         None,           // cpus
@@ -290,6 +294,7 @@ fn dash_u_current_uid_runs_not_stubbed() {
         &[],   // mounts
         "native",
         None,       // rootfs
+        "host",     // net (WP-NET-ISO)
         false,      // deep_memo
         None,       // memory
         None,       // cpus
@@ -344,6 +349,7 @@ fn stop_signal_runs_not_stubbed() {
         &[],   // mounts
         "native",
         None,           // rootfs
+        "host",         // net (WP-NET-ISO)
         false,          // deep_memo
         None,           // memory
         None,           // cpus

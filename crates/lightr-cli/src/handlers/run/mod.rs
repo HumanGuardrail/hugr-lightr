@@ -40,7 +40,7 @@ use helpers::expose_port_maps;
 // Flag parsing + value types live in `flags.rs` (skeleton-split for headroom).
 // Re-exported at the `run` module root so sibling files + tests reach them via
 // `super::Item` / `super::super::Item` exactly as before (zero-diff siblings).
-pub(super) use flags::{parse_mount, parse_store_file, RcConfig, RunJson};
+pub(super) use flags::{parse_mount, parse_store_file, resolve_net_isolate, RcConfig, RunJson};
 // WP-B2: `parse_publish` (single-port wrapper) now has TEST-only callers — the
 // run path consumes the range-aware `parse_publish_spec` via `flags::publish::`.
 #[cfg(test)]
@@ -73,6 +73,8 @@ pub fn run(
     mounts_raw: &[String],
     engine_str: &str,
     rootfs_ref: Option<&str>,
+    // WP-NET-ISO: `--net host|none` (host=default, share host network).
+    net_str: &str,
     deep_memo: bool,
     memory: Option<&str>,
     cpus: Option<&str>,
@@ -132,27 +134,17 @@ pub fn run(
         Err(e) => return die_lightr(&e),
     };
 
-    // WP-NET3: the vz container-networking flags (`--network`/`--network-alias`/
-    // `--add-host`/`--dns`) are honored ONLY on the `--engine vz --rootfs <img>`
-    // path — that is where a per-container mesh NIC + guest `/etc/hosts`/resolv.conf
-    // exist. The native engine SHARES the host network (no per-container netns) and
-    // has no container rootfs to write, so any networking flag on native (or vz
-    // without a rootfs) is an honest exit 2, never a silent drop. Guarded here,
-    // BEFORE any provisioning, because only the handler has the engine + rootfs.
-    {
-        let net_flag = runflags.network.is_some()
-            || !runflags.network_alias.is_empty()
-            || !runflags.add_host.is_empty()
-            || !runflags.dns.is_empty();
-        let vz_container = engine_kind == EngineKind::Vz && rootfs_ref.is_some();
-        if net_flag && !vz_container {
-            eprintln!(
-                "lightr: --network/--network-alias/--add-host/--dns require --engine vz \
-                 --rootfs <img> (the native engine shares the host network — no per-container \
-                 netns or rootfs)"
-            );
-            return 2;
-        }
+    // WP-NET-ISO: parse `--net` + enforce `none` has a netns (fail-closed, exit 2).
+    let is_pure_native = engine_kind == EngineKind::Native && rootfs_ref.is_none();
+    let net_isolate = match resolve_net_isolate(net_str, is_pure_native) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+
+    // WP-NET3: vz container-networking flags require `--engine vz --rootfs <img>`
+    // (helper owns the doctrine + honest exit 2; fail-closed BEFORE provisioning).
+    if let Some(code) = helpers::network_flags_policy_error(&runflags, engine_kind, rootfs_ref) {
+        return code;
     }
 
     // Parse resource caps (F-203). Malformed ⇒ exit 2 (fail closed).
@@ -366,6 +358,7 @@ pub fn run(
             workdir,
             &env_explicit,
             user,
+            net_isolate,
         );
     }
 
@@ -397,3 +390,6 @@ pub fn run(
         runflags,
     })
 }
+
+#[cfg(test)]
+mod tests_net;

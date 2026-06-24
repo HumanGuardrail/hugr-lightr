@@ -65,6 +65,7 @@ pub(in crate::build) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
         rootfs: None,
         limits: Default::default(),
         net: false,
+        net_isolate: false,
         net_fd: None,
         net_mac: None,
         mounts: &[],
