@@ -31,12 +31,14 @@ jobs:
         run: |
           set +e
           BIN="$PWD/target/release/lightr"
+          # busybox `ip link` reads via netlink (reflects the netns; no /proc needed).
+          # Count interface header lines like "1: lo: <...>", "2: eth0: <...>".
           echo "=== HOST-net mode (default): container sees host interfaces ==="
-          "$BIN" run --engine ns --rootfs alpine -- ip -o link 2>&1 | tee /tmp/host.txt
-          HOST_N=$(grep -c ':' /tmp/host.txt)
+          "$BIN" run --engine ns --rootfs alpine -- ip link 2>&1 | tee /tmp/host.txt
+          HOST_N=$(grep -cE '^[0-9]+:' /tmp/host.txt)
           echo "=== ISOLATED mode (--net=none): container should see ONLY lo ==="
-          "$BIN" run --engine ns --net=none --rootfs alpine -- ip -o link 2>&1 | tee /tmp/iso.txt
-          ISO_N=$(grep -c ':' /tmp/iso.txt)
+          "$BIN" run --engine ns --net=none --rootfs alpine -- ip link 2>&1 | tee /tmp/iso.txt
+          ISO_N=$(grep -cE '^[0-9]+:' /tmp/iso.txt)
           echo "=== --net=none still runs (lo up) ==="
           "$BIN" run --engine ns --net=none --rootfs alpine -- /bin/true; echo "iso_true_exit=$?"
           echo "=== native + --net=none → honest error (exit 2) ==="
