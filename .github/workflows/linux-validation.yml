@@ -209,14 +209,9 @@ jobs:
           BIN="$PWD/target/release/lightr"
           cid=$(docker create alpine:latest); docker export "$cid" -o /tmp/al.tar; docker rm "$cid"
           mkdir -p /tmp/alroot && sudo tar -xf /tmp/al.tar -C /tmp/alroot
-          # `docker export` ships an EMPTY /dev — busybox sh job-control (`cmd &`)
-          # needs /dev/null, without which it prints "can't open '/dev/null'" and
-          # the pids fork probe can't background. (Runtimes mount a minimal /dev;
-          # the ns engine not doing so is tracked separately.) Create the nodes the
-          # probe needs so the pids.max signal is clean, not masked by a missing dev.
-          sudo mkdir -p /tmp/alroot/dev
-          sudo mknod -m 666 /tmp/alroot/dev/null c 1 3 2>/dev/null || true
-          sudo mknod -m 666 /tmp/alroot/dev/zero c 1 5 2>/dev/null || true
+          # NOTE: the materialized rootfs has a device-less /dev (lightr's snapshot
+          # carries file content, not device nodes), so the pids probe uses a
+          # PIPELINE (no /dev/null / job-control needed) rather than `&`.
           "$BIN" snapshot --dir /tmp/alroot --name alpine
       - name: Prove memory.max OOM-kill + cpu.max + pids.max fork-cap (as root)
         run: |
@@ -246,19 +241,20 @@ jobs:
             >/tmp/cpu.txt 2>&1
           CPU_EXIT=$?; echo "RESLIMITS_CPU_EXIT=$CPU_EXIT"; tail -2 /tmp/cpu.txt
 
-          # ── PIDS: count fork failures. busybox reports the pids.max EAGAIN as
-          # "can't fork". A small, self-reaping workload (20 × `sleep 1` then wait)
-          # keeps the host unstressed and avoids the 200-fork interference that made
-          # the earlier probe (and its control) hit the runner's own limits. With
-          # pids.max=4 the cap MUST produce ≥1 "can't fork"; the control (no
-          # --pids-limit → no cgroup) runs the SAME 20 forks with ZERO failures, so
-          # the cap is provably what bit. ──────────────────────────────────────────
-          LOOP='i=0; while [ $i -lt 20 ]; do sleep 1 & i=$((i+1)); done; wait; echo loopdone'
+          # ── PIDS: a PIPELINE forks one process per stage at construction time,
+          # WITHOUT needing /dev/null or shell job-control — the CAS-materialized
+          # rootfs has a device-less /dev (snapshot doesn't carry device nodes), so
+          # `cmd &` backgrounding fails on a missing /dev/null and masks the signal.
+          # A 12-stage pipeline of `sleep 2` forks 12 procs into the cgroup; with
+          # pids.max=4 the forks past the cap fail with EAGAIN → busybox "can't fork".
+          # Control (no --pids-limit → no cgroup) runs the SAME 12 with ZERO failures,
+          # so the cap is provably what bit. ─────────────────────────────────────────
+          PIPE='sleep 2 | sleep 2 | sleep 2 | sleep 2 | sleep 2 | sleep 2 | sleep 2 | sleep 2 | sleep 2 | sleep 2 | sleep 2 | sleep 2; echo pipedone'
           echo "=== PIDS capped: --pids-limit 4 → expect 'can't fork' (pids.max EAGAIN) ==="
-          RUN run --engine ns --pids-limit 4 --rootfs alpine -- /bin/busybox sh -c "$LOOP" >/tmp/pcap.txt 2>&1
+          RUN run --engine ns --pids-limit 4 --rootfs alpine -- /bin/busybox sh -c "$PIPE" >/tmp/pcap.txt 2>&1
           CAP_FORKFAIL=$(grep -c "can't fork" /tmp/pcap.txt); echo "cap fork-failures=$CAP_FORKFAIL"; tail -3 /tmp/pcap.txt
           echo "=== PIDS control: NO --pids-limit → expect 0 'can't fork' ==="
-          RUN run --engine ns --rootfs alpine -- /bin/busybox sh -c "$LOOP" >/tmp/pfree.txt 2>&1
+          RUN run --engine ns --rootfs alpine -- /bin/busybox sh -c "$PIPE" >/tmp/pfree.txt 2>&1
           FREE_FORKFAIL=$(grep -c "can't fork" /tmp/pfree.txt); echo "free fork-failures=$FREE_FORKFAIL"; tail -3 /tmp/pfree.txt
           echo "RESLIMITS_PIDS_CAP_FORKFAIL=$CAP_FORKFAIL RESLIMITS_PIDS_FREE_FORKFAIL=$FREE_FORKFAIL"
 
