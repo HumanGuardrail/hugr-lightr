@@ -6,6 +6,8 @@ name: linux-validation
 #   acceptance-batch  — owner-gated acceptance (#51): real pull (NET) + push (REG)
 #   ns-net-isolation  — #81: prove `lightr run --engine ns --net=none` isolates the
 #                       network namespace (only `lo` visible) vs host-net default.
+#   cas-kpis          — WP-#86/#87: CI-signed CAS-dedup KPI probes (0-byte re-pull
+#                       + N-image disk dedup ratio vs containerd) on ubuntu-latest.
 # Manual only (workflow_dispatch).
 on:
   workflow_dispatch:
@@ -136,3 +138,42 @@ jobs:
           export LIGHTR_NET_TESTS=1 LIGHTR_REG_TESTS=1 LIGHTR_PUSH_TARGET=localhost:5000/lightr-acceptance
           cargo test --workspace -j2 2>&1 | grep -iE "test result:|FAILED|A21|A22|real-pull|push round|error\[|panicked" | tail -45
           code=${PIPESTATUS[0]}; echo "ACCEPTANCE_EXIT=$code"; exit "$code"  # gate for real
+
+  cas-kpis:
+    # WP-#86/#87: prove lightr's content-addressed dedup moat with numbers a CI
+    # run actually measures. KPI 1 = 0 new CAS bytes on re-pull; KPI 2 = N-image
+    # disk dedup ratio + an honest containerd A/B. Each probe HARD-fails the job
+    # on a failed bar (the script's non-zero exit propagates verbatim). NOTE: the
+    # runbook's aspirational [self-hosted,linux] is overridden to ubuntu-latest —
+    # we have no Linux self-hosted runner.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --no-self-update && rustup default 1.96.0
+      - name: Start docker + install/start containerd + bc
+        run: |
+          set -e -x
+          sudo systemctl start docker || sudo service docker start
+          sudo apt-get update
+          sudo apt-get install -y containerd bc
+          sudo systemctl start containerd || sudo service containerd start || true
+          docker version
+          ctr --version
+          du -sb . >/dev/null  # confirm GNU du -sb is available
+      - name: Build lightr (release)
+        run: cargo build --release -p lightr-cli -j2
+      - name: Put release lightr on PATH
+        run: echo "$PWD/target/release" >> "$GITHUB_PATH"
+      - name: KPI 1 — pull dedup (0 new CAS bytes on re-pull)
+        run: |
+          set +e
+          KPI_BACKEND_READY=1 LIGHTR_BIN="$PWD/target/release/lightr" \
+            ./ci/linux-kpis/kpi1-pull-dedup.sh
+          code=$?; echo "CAS_KPI1_EXIT=$code"; exit "$code"  # gate for real
+      - name: KPI 2 — disk dedup ratio + containerd A/B
+        run: |
+          set +e
+          KPI_BACKEND_READY=1 LIGHTR_BIN="$PWD/target/release/lightr" \
+            ./ci/linux-kpis/kpi2-disk-dedup.sh
+          code=$?; echo "CAS_KPI2_EXIT=$code"; exit "$code"  # gate for real
