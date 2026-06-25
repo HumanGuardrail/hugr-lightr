@@ -72,7 +72,7 @@ The go-live hardening wave merged gate-green: **411 tests, 0 failures**, clippy
 | F-201 | native engine | ✅ | A19; lightr-engine unit |
 | F-202 | exec/logs/ps/stop | ✅ | A9, A10, A9b, A9e |
 | F-203 | resource limits | ✅ Linux-mem / 🟡 honest per-engine | **WP-A1 (2026-06-18):** memory — Linux native `RLIMIT_AS`+`DATA` (enforced, `pre_exec`); macOS/Windows native honest `Err`→`--engine vz` (Darwin ignores rlimits — verified `EINVAL`; the VM is the hard cap, = Docker's Mac mechanism). cpu-share — native honest `Err`→ns/vz (`RLIMIT_CPU`≠share). ns — cgroup v2 `memory.max`/`cpu.max`, honest `Err` if v2 absent/undelegated. vz — shim FFI `memorySize`/`cpuCount`. Validated EARLY (pre-AC-lookup, no cache-hit bypass). Unit-tested per-OS; ns/vz runtime cfg-gated (HW/CI) |
-| F-204 | ns engine (Linux) | ✅ | **RUNTIME-VALIDATED on GitHub-hosted Linux CI (ubuntu-latest, public reproducible hardware), 2026-06-25.** Two green proofs: (1) **cold-start benchmark** `lightr run --engine ns --net=none` ran 100/100 ok at ~30.8 ms (full `CLONE_NEWUSER|NEWNS|NEWPID|NEWNET` + pivot_root, rootless) — ~4.05× faster than rootless podman `--network=none` at the SAME isolation + privilege (`docs/benchmarks/RESULTS.md`); (2) **network-namespace isolation** functionally proven (`linux-validation.yml` ns-net-isolation job: host-net reaches a host listener, `--net=none` cannot). A real uid/gid-map bug was found+fixed during validation (read ids before `unshare`). HONEST caveats: rootless ns is **not** a hostile-tenant boundary (use `vz`/`fc`); needs `kernel.apparmor_restrict_unprivileged_userns=0` on hardened hosts (honest error otherwise); not yet battle-tested at production scale. probe honest on macOS (A19). **CRI netns/CNI lifecycle = separate, pending #83.** |
+| F-204 | ns engine (Linux) | ✅ | **RUNTIME-VALIDATED on GitHub-hosted Linux CI (ubuntu-latest, public reproducible hardware), 2026-06-25.** Two green proofs: (1) **cold-start benchmark** `lightr run --engine ns --net=none` ran 100/100 ok at ~30.8 ms (full `CLONE_NEWUSER|NEWNS|NEWPID|NEWNET` + pivot_root, rootless) — ~4.05× faster than rootless podman `--network=none` at the SAME isolation + privilege (`docs/benchmarks/RESULTS.md`); (2) **network-namespace isolation** functionally proven (`linux-validation.yml` ns-net-isolation job: host-net reaches a host listener, `--net=none` cannot). A real uid/gid-map bug was found+fixed during validation (read ids before `unshare`). HONEST caveats: rootless ns is **not** a hostile-tenant boundary (use `vz`/`fc`); needs `kernel.apparmor_restrict_unprivileged_userns=0` on hardened hosts (honest error otherwise); not yet battle-tested at production scale. probe honest on macOS (A19). **CRI backend netns/CNI FULL lifecycle also validated on Linux CI (#83):** netns created+pinned, CNI wired real connectivity (ping the bridge gateway), container actually joins the netns (inode-equality proof of the setns pre_exec), and leak-free teardown (no dangling pin/mount/veth — containerd#6143 class) — `tests/netns_lifecycle.rs` green on ubuntu-latest. |
 | F-205 | vz engine boot | ✅ | **VALIDATED end-to-end on Intel x86_64** (i7-9750H, macOS 15.3.2, 2026-06-12): `lightr run --engine vz` boots a real microVM and runs the command — `/bin/echo`→0+stdout, `/bin/sh -c 'exit 7'`→**7**, `/bin/true`→0. The file exit-channel carries the REAL guest code, never a fabricated 0 (missing file ⇒ 255). 3 root-cause boot bugs fixed: (1) shim drove the VM on the **main** dispatch queue while blocking a semaphore → VM wedged in `.starting` forever → now a **dedicated serial queue**; (2) VZ-x86 boots a **bzImage** (x86 setup-header protocol) — a `vmlinux` ELF (even PVH) is rejected "Internal Virtualization error"; (3) virtiofs used `VZMultipleDirectoryShare` (nested rootfs under `/newroot/rootfs`) → now `VZSingleDirectoryShare`. Kernel via `scripts/build-kernel-x86.sh` (Linux 6.18.5 bzImage; virtio-pci/console/fs =y). 4 earlier latent bugs also fixed: pack_dir path, swift rpath, kernel sha256 pin, entitlement XML |
 | F-206 | Apple kernel + Rust PID1 | ✅ | **VALIDATED end-to-end on Intel** (2026-06-12): `lightr-init` PID1 mounts the rootfs virtiofs share, reads the command (`CMD_FILE`), chroots, spawns, writes the REAL exit code (`EXIT_FILE`), powers off cleanly; the host reads the code back. Exit DELIVERY uses the **file channel** (macOS has NO host `AF_VSOCK` — the old vsock receiver was removed as dead code, decisions-log 2026-06-12). kernel-pack pipeline build→assemble→install→**run** all green; `verify_pack` wired into `install-pack`; `scripts/build-kernel-x86.sh` reproduces the bzImage. (arm64 sibling: `spikes/s5-vz-boot-arm64/`, owner-gated on ARM HW) |
 | F-207 | guest views over store | ⏳ | with vz boot, future |
@@ -149,9 +149,9 @@ latter is marked per platform, never assumed.
   vz`) + fmt clean; `--features vz` compiles+links **and boots end-to-end**
   (F-205/F-206); full Windows cross-check (lib+bins + all-targets) 0 errors.
 - **Linux ns runtime — VALIDATED (2026-06-25):** runtime-proven on GitHub-hosted
-  ubuntu-latest (cold-start benchmark + net-namespace isolation, both green; see
-  F-204). Caveat: rootless ≠ hostile-tenant boundary; CRI netns/CNI lifecycle
-  pending #83.
+  ubuntu-latest (cold-start benchmark + net-namespace isolation + CRI backend
+  full netns/CNI lifecycle #83, all green; see F-204). Caveat: rootless ≠
+  hostile-tenant boundary.
 - **Honest-gated (WIN-PATH / runbook):** Windows runtime (named-pipe supervisor,
   WSL2 exec, ReFS block-clone) and arm64 vz boot — each has a one-command runbook
   or a CI job; none is claimed validated.
@@ -167,9 +167,9 @@ latter is marked per platform, never assumed.
   runtime-validated on Intel x86_64** (F-205/F-206).
 - **✅ ns engine (Linux) — validated 2026-06-25:** cold-start benchmark
   (~30.8 ms, ~4.05× vs rootless podman at same isolation) + net-namespace
-  isolation, both green on GitHub-hosted ubuntu-latest (`docs/benchmarks/
-  RESULTS.md`, F-204). Caveats: rootless ≠ hostile-tenant; CRI netns lifecycle
-  pending #83.
+  isolation + CRI backend full netns/CNI lifecycle (#83 — pin, connectivity,
+  container-join, leak-free teardown), all green on GitHub-hosted ubuntu-latest
+  (`docs/benchmarks/RESULTS.md`, F-204). Caveat: rootless ≠ hostile-tenant.
 - **🟡 honest-gated:** wsl engine + arm64 vz boot (probe-truthful;
   HW-gated runbooks/CI — none claimed validated), pull-push (push future),
   deep-memo shim, microwave floor measurement, distribution (publish
