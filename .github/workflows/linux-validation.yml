@@ -238,20 +238,21 @@ jobs:
             >/tmp/cpu.txt 2>&1
           CPU_EXIT=$?; echo "RESLIMITS_CPU_EXIT=$CPU_EXIT"; tail -2 /tmp/cpu.txt
 
-          # ── PIDS: with pids.max=16, most of 200 backgrounded sleeps must FAIL to
-          # fork (EAGAIN) → `started` ≪ 200. CONTROL (no --pids-limit) starts far
-          # more → proves the cap is what bit, not some other limit. ────────────────
-          LOOP='n=0; i=0; while [ $i -lt 200 ]; do (sleep 5 &) 2>/dev/null && n=$((n+1)); i=$((i+1)); done; echo started=$n'
-          echo "=== PIDS capped: --pids-limit 16 → expect started ≪ 200 ==="
-          RUN run --engine ns --pids-limit 16 --rootfs alpine -- /bin/busybox sh -c "$LOOP" >/tmp/pcap.txt 2>&1
-          PIDS_CAP_EXIT=$?; tail -2 /tmp/pcap.txt
-          CAP_STARTED=$(grep -o 'started=[0-9]*' /tmp/pcap.txt | tail -1 | cut -d= -f2)
-          echo "=== PIDS control: NO --pids-limit → expect many more started ==="
+          # ── PIDS: count fork failures. busybox reports the pids.max EAGAIN as
+          # "can't fork". A small, self-reaping workload (20 × `sleep 1` then wait)
+          # keeps the host unstressed and avoids the 200-fork interference that made
+          # the earlier probe (and its control) hit the runner's own limits. With
+          # pids.max=4 the cap MUST produce ≥1 "can't fork"; the control (no
+          # --pids-limit → no cgroup) runs the SAME 20 forks with ZERO failures, so
+          # the cap is provably what bit. ──────────────────────────────────────────
+          LOOP='i=0; while [ $i -lt 20 ]; do sleep 1 & i=$((i+1)); done; wait; echo loopdone'
+          echo "=== PIDS capped: --pids-limit 4 → expect 'can't fork' (pids.max EAGAIN) ==="
+          RUN run --engine ns --pids-limit 4 --rootfs alpine -- /bin/busybox sh -c "$LOOP" >/tmp/pcap.txt 2>&1
+          CAP_FORKFAIL=$(grep -c "can't fork" /tmp/pcap.txt); echo "cap fork-failures=$CAP_FORKFAIL"; tail -3 /tmp/pcap.txt
+          echo "=== PIDS control: NO --pids-limit → expect 0 'can't fork' ==="
           RUN run --engine ns --rootfs alpine -- /bin/busybox sh -c "$LOOP" >/tmp/pfree.txt 2>&1
-          tail -2 /tmp/pfree.txt
-          FREE_STARTED=$(grep -o 'started=[0-9]*' /tmp/pfree.txt | tail -1 | cut -d= -f2)
-          : "${CAP_STARTED:=-1}"; : "${FREE_STARTED:=-1}"
-          echo "RESLIMITS_PIDS_CAP_STARTED=$CAP_STARTED RESLIMITS_PIDS_FREE_STARTED=$FREE_STARTED"
+          FREE_FORKFAIL=$(grep -c "can't fork" /tmp/pfree.txt); echo "free fork-failures=$FREE_FORKFAIL"; tail -3 /tmp/pfree.txt
+          echo "RESLIMITS_PIDS_CAP_FORKFAIL=$CAP_FORKFAIL RESLIMITS_PIDS_FREE_FORKFAIL=$FREE_FORKFAIL"
 
           # ── vz honest-error: --pids-limit --engine vz must exit 2 (no silent drop).
           # (vz is unavailable on Linux, so this also exercises the CLI guard that
@@ -264,11 +265,9 @@ jobs:
           FAIL=0
           [ "$MEM_EXIT" != 0 ] || { echo "FAIL: 64m awk bomb was NOT OOM-killed (exit $MEM_EXIT)"; FAIL=1; }
           [ "$CPU_EXIT" = 0 ]  || { echo "FAIL: --cpus 0.5 limited run did not complete (exit $CPU_EXIT)"; FAIL=1; }
-          # pids.max must bite: capped count strictly less than the free control AND
-          # well under the 200 attempts (a faithful 16-cap lands far below 100).
-          if ! { [ "$CAP_STARTED" -ge 0 ] && [ "$FREE_STARTED" -ge 0 ] \
-                 && [ "$CAP_STARTED" -lt "$FREE_STARTED" ] && [ "$CAP_STARTED" -lt 100 ]; }; then
-            echo "FAIL: pids.max did not cap forks (capped=$CAP_STARTED free=$FREE_STARTED)"; FAIL=1
+          # pids.max must bite: the capped run shows fork failures, the control none.
+          if ! { [ "$CAP_FORKFAIL" -ge 1 ] && [ "$FREE_FORKFAIL" -eq 0 ]; }; then
+            echo "FAIL: pids.max did not cap forks (cap_forkfail=$CAP_FORKFAIL free_forkfail=$FREE_FORKFAIL)"; FAIL=1
           fi
           [ "$VZ_EXIT" = 2 ]   || { echo "FAIL: vz+--pids-limit did not honest-error with exit 2 (exit $VZ_EXIT)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "RESLIMITS=PASS"; else echo "RESLIMITS=FAIL"; exit 1; fi  # gate for real
