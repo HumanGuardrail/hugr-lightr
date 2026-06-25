@@ -1,17 +1,25 @@
 name: lightr-benchmark
 
-# Adversarial benchmark: lightr vs Docker / containerd / Podman on an identical
-# GitHub-hosted Linux runner (reproducible, public hardware).
-# CAVEAT (corrected 2026-06-23 after re-audit): lightr `--engine ns` =
-# user+mount+pid namespaces + pivot_root, but NOT a network namespace (no
-# CLONE_NEWNET) and rootless — so the cold-start is NOT same-isolation vs the
-# container runtimes (which isolate the net + ran rootful). See docs/benchmarks/
-# RESULTS.md for the honest framing + task #82 for the clean same-isolation re-run.
-# Unambiguous wins here: daemonless footprint + memoization. Honest; manual.
+# Adversarial benchmark: lightr vs Docker / Podman on an identical GitHub-hosted
+# Linux runner (reproducible, public hardware).
+#
+# HONEST SAME-ISOLATION (task #82, after #81 landed `--net=none`): the cold-start
+# section now runs EVERY variant with a full namespace set INCLUDING the network
+# namespace — lightr `--engine ns --net=none` (CLONE_NEWUSER|NEWNS|NEWPID|NEWNET,
+# rootless) vs `podman --network=none` (rootless — the fairest apples-to-apples,
+# same privilege class + same ns set) vs `docker --network=none` (rootful daemon —
+# labelled as reference, NOT same privilege). Privilege class is printed in every
+# row so the comparison cannot be silently overstated again.
+#
+# Variance: n=100 by default; each row reports mean / stddev / p50 / p95 / min /
+# max (nearest-rank percentiles) — a single avg hides the daemon's tail latency.
+#
+# Unambiguous wins (not runtime-vs-runtime): daemonless footprint + memoization.
+# See docs/benchmarks/RESULTS.md for the honest framing. Manual dispatch only.
 on:
   workflow_dispatch:
     inputs:
-      iterations: { description: "iterations", default: "20" }
+      iterations: { description: "iterations (>=100 for stable variance)", default: "100" }
 
 jobs:
   bench:
@@ -21,24 +29,9 @@ jobs:
       - name: Kernel userns diagnostic (environment vs lightr bug)
         run: |
           set +e -x
-          echo "=== reference: unshare util rootless container ==="
-          unshare --user --map-root-user --mount --pid --fork -- /bin/true; echo "REF_FULL_EXIT=$?"
+          echo "=== reference: unshare util rootless container (now WITH netns) ==="
+          unshare --user --map-root-user --mount --pid --net --fork -- /bin/true; echo "REF_FULL_EXIT=$?"
           unshare --user --map-root-user -- id 2>&1 | head -2; echo "REF_MAPROOT_EXIT=$?"
-          echo "=== python: lightr's exact sequence, per-step errno ==="
-          python3 - <<'PY'
-          import ctypes,os
-          libc=ctypes.CDLL(None,use_errno=True)
-          NEWUSER=0x10000000;NEWNS=0x00020000;NEWPID=0x20000000
-          uid=os.getuid();gid=os.getgid()
-          pid=os.fork()
-          if pid==0:
-            r=libc.unshare(NEWUSER|NEWNS|NEWPID); print("unshare rc",r,"errno",ctypes.get_errno())
-            for p,c in [("/proc/self/uid_map","0 %d 1\n"%uid),("/proc/self/setgroups","deny\n"),("/proc/self/gid_map","0 %d 1\n"%gid)]:
-              try: open(p,"w").write(c); print("wrote",p,"OK")
-              except OSError as e: print("FAIL",p,"errno",e.errno,os.strerror(e.errno))
-            os._exit(0)
-          os.waitpid(pid,0)
-          PY
           true
       - name: Toolchain
         run: rustup toolchain install 1.96.0 --profile minimal --no-self-update && rustup default 1.96.0
@@ -50,14 +43,16 @@ jobs:
           sudo systemctl start docker 2>/dev/null || sudo service docker start 2>/dev/null
           sudo apt-get update -qq && sudo apt-get install -y -qq podman bc
           # ubuntu-24.04 GH runners harden unprivileged userns via AppArmor; allow
-          # it (the default on normal Linux hosts) so lightr's rootless ns engine runs
+          # it (the default on normal Linux hosts) so BOTH lightr's rootless ns
+          # engine AND rootless podman can create user+net namespaces.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
           sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
+          echo "=== subuid/subgid present for rootless podman? ==="
+          grep "$(id -un)" /etc/subuid /etc/subgid 2>/dev/null || echo "NO subuid/subgid (rootless podman may be UNAVAILABLE)"
           docker pull -q alpine:latest; docker pull -q gcc:latest
-          sudo podman pull -q docker.io/library/alpine:latest
-          sudo ctr -n default images pull docker.io/library/alpine:latest 2>&1 | tail -1
-          # user namespaces enabled? (needed for lightr --engine ns rootless)
-          echo "unpriv_userns=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 'n/a')"
+          # ROOTLESS podman store (separate from rootful) — pull without sudo so the
+          # same-isolation comparison runs rootless, matching lightr --engine ns.
+          podman pull -q docker.io/library/alpine:latest 2>&1 | tail -1
           true
 
       - name: Prepare alpine rootfs as a lightr CAS ref
@@ -66,46 +61,71 @@ jobs:
           BIN="$PWD/target/release/lightr"
           cid=$(docker create alpine:latest); docker export "$cid" -o /tmp/al.tar; docker rm "$cid"
           mkdir -p /tmp/alroot && sudo tar -xf /tmp/al.tar -C /tmp/alroot
-          echo "=== snapshot --help ==="; "$BIN" snapshot --help 2>&1 | head -20
-          echo "=== snapshot alpine rootfs into ref ==="; "$BIN" snapshot --dir /tmp/alroot --name alpine 2>&1 | head -8
-          echo "=== SMOKE: ns run x3 (does repeated run break?) ==="
-          for k in 1 2 3; do echo "--- ns run $k ---"; "$BIN" run --engine ns --rootfs alpine -- /bin/true 2>&1 | tail -6; echo "ns_run_${k}_exit=${PIPESTATUS[0]}"; done
-          echo "=== /tmp dir count after 3 ns runs (leak?) ==="; ls /tmp | wc -l
+          "$BIN" snapshot --dir /tmp/alroot --name alpine 2>&1 | head -8
+          echo "=== SMOKE: ns --net=none runs (full isolation incl. netns) ==="
+          "$BIN" run --engine ns --net=none --rootfs alpine -- /bin/true 2>&1 | tail -4; echo "ns_netnone_smoke_exit=${PIPESTATUS[0]}"
           true
 
       - name: Benchmark
         run: |
           set +e
           BIN="$PWD/target/release/lightr"; N="${{ inputs.iterations }}"
-          R=/tmp/bench.txt; : > "$R"; ms(){ date +%s.%N; }
-          bench(){ local n="$1"; shift; local s=0 a b i ok=0
-            for i in $(seq 1 "$N"); do a=$(ms); eval "$@" >/dev/null 2>&1 && ok=$((ok+1)); b=$(ms); s=$(echo "$s+($b-$a)"|bc -l); done
-            if [ "$ok" = 0 ]; then printf "%-30s UNAVAILABLE (0/%d)\n" "$n" "$N"|tee -a "$R"
-            else printf "%-30s avg=%9.1f ms (ok %d/%d)\n" "$n" "$(echo "scale=4;($s/$N)*1000"|bc -l)" "$ok" "$N"|tee -a "$R"; fi; }
+          R=/tmp/bench.txt; : > "$R"
 
-          echo "===== FOOTPRINT idle =====" | tee -a "$R"
+          # Collect every sample, then report mean/sd/p50/p95/min/max (nearest-rank).
+          bench(){
+            local name="$1"; shift
+            local tmp=/tmp/samp.$$; : > "$tmp"; local i a b ok=0
+            for i in $(seq 1 "$N"); do
+              a=$(date +%s.%N)
+              if eval "$@" >/dev/null 2>&1; then
+                b=$(date +%s.%N)
+                awk -v a="$a" -v b="$b" 'BEGIN{printf "%.4f\n",(b-a)*1000}' >> "$tmp"
+                ok=$((ok+1))
+              fi
+            done
+            if [ "$ok" = 0 ]; then
+              printf "%-30s UNAVAILABLE (0/%d)\n" "$name" "$N" | tee -a "$R"; rm -f "$tmp"; return
+            fi
+            sort -n "$tmp" | awk -v name="$name" -v ok="$ok" -v n="$N" '
+              function rank(p,  r){ r=int((p/100)*NR + 0.999999); if(r<1)r=1; if(r>NR)r=NR; return v[r] }
+              {v[NR]=$1; s+=$1}
+              END{
+                m=s/NR; for(i=1;i<=NR;i++){d=v[i]-m; ss+=d*d} sd=sqrt(ss/NR)
+                printf "%-30s mean=%8.1f sd=%7.1f p50=%8.1f p95=%8.1f min=%8.1f max=%8.1f ms (ok %d/%d)\n", \
+                  name, m, sd, rank(50), rank(95), v[1], v[NR], ok, n
+              }' | tee -a "$R"
+            rm -f "$tmp"
+          }
+
+          echo "===== FOOTPRINT idle (daemonless = unambiguous win) =====" | tee -a "$R"
           dr=$(ps -o rss= -p "$(pgrep -f dockerd|head -1)" 2>/dev/null|tr -d ' '); cr=$(ps -o rss= -p "$(pgrep -x containerd|head -1)" 2>/dev/null|tr -d ' ')
-          printf "docker daemons: %d MB | podman: 0 | lightr: 0\n" $(( (${dr:-0}+${cr:-0})/1024 ))|tee -a "$R"
+          printf "docker daemons: %d MB | podman: 0 (forks per run) | lightr: 0 (no daemon)\n" $(( (${dr:-0}+${cr:-0})/1024 ))|tee -a "$R"
 
-          echo "===== COLD-START, APPLES-TO-APPLES (all namespace-isolated, run \`true\`) =====" | tee -a "$R"
-          docker run --rm alpine true >/dev/null 2>&1; sudo podman run --rm alpine true >/dev/null 2>&1
-          "$BIN" run --engine ns --rootfs alpine -- /bin/true >/dev/null 2>&1
-          bench "docker (ns container)"      'docker run --rm alpine true'
-          bench "podman (ns container)"      'sudo podman run --rm alpine true'
-          bench "containerd (ns container)"  'sudo ctr -n default run --rm docker.io/library/alpine:latest c$RANDOM$i true'
-          bench "lightr --engine ns (FAIR)"  '"'"$BIN"'" run --engine ns --rootfs alpine -- /bin/true'
+          echo "" | tee -a "$R"
+          echo "===== COLD-START — HONEST SAME-ISOLATION (full ns INCL. network ns) =====" | tee -a "$R"
+          echo "  rootless rows = same privilege class as lightr; rootful = reference only" | tee -a "$R"
+          # warm each path once (page cache / first-run setup) before timing
+          "$BIN" run --engine ns --net=none --rootfs alpine -- /bin/true >/dev/null 2>&1
+          podman run --rm --network=none alpine true >/dev/null 2>&1
+          docker run --rm --network=none alpine true >/dev/null 2>&1
+          bench "lightr ns --net=none [rootless]"  '"'"$BIN"'" run --engine ns --net=none --rootfs alpine -- /bin/true'
+          bench "podman --network=none [rootless]" 'podman run --rm --network=none alpine true'
+          bench "docker --network=none [rootful]"  'docker run --rm --network=none alpine true'
 
+          echo "" | tee -a "$R"
           echo "===== lightr NATIVE (no isolation — trusted/CI mode, for context) =====" | tee -a "$R"
           "$BIN" run -- true >/dev/null 2>&1
-          bench "lightr native (no isol.)"   '"'"$BIN"'" run -- true'
+          bench "lightr native (no isol.)"  '"'"$BIN"'" run -- true'
 
-          echo "===== MEMOIZATION on real build (compile 20k C fns -O2) =====" | tee -a "$R"
+          echo "" | tee -a "$R"
+          echo "===== MEMOIZATION on real build (compile 20k C fns -O2; a FEATURE docker lacks) =====" | tee -a "$R"
           python3 -c "print('\n'.join('int f%d(int x){return x*%d+%d;}'%(i,i,i) for i in range(20000)))" > /tmp/w.c
-          bench "docker compile (always)"    'docker run --rm -v /tmp:/w gcc:latest gcc -O2 -c /w/w.c -o /tmp/d.o'
+          bench "docker compile (always)"   'docker run --rm -v /tmp:/w gcc:latest gcc -O2 -c /w/w.c -o /tmp/d.o'
           "$BIN" run -- gcc -O2 -c /tmp/w.c -o /tmp/l.o >/dev/null 2>&1
-          bench "lightr compile (memoized)"  '"'"$BIN"'" run -- gcc -O2 -c /tmp/w.c -o /tmp/l.o'
+          bench "lightr compile (memoized)" '"'"$BIN"'" run -- gcc -O2 -c /tmp/w.c -o /tmp/l.o'
 
-          { echo "## lightr SOTA benchmark — ubuntu-latest, $N iters"; echo '```'; cat "$R"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "## lightr SOTA benchmark — ubuntu-latest, $N iters (variance)"; echo '```'; cat "$R"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "----- RESULTS -----"; cat "$R"
       - uses: actions/upload-artifact@v4
         if: always()
