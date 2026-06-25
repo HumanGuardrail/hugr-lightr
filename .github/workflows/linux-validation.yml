@@ -51,7 +51,7 @@ jobs:
           echo "=== native + --net=none → honest error (exit 2) ==="
           "$BIN" run --net=none -- /bin/true; echo "native_netnone_exit=$?"
           # PASS iff host-net REACHED the listener (exit 0) and --net=none did NOT.
-          if [ "$HOST_REACH" = 0 ] && [ "$ISO_REACH" != 0 ]; then echo "NS_NET_ISO=PASS"; else echo "NS_NET_ISO=FAIL"; fi
+          if [ "$HOST_REACH" = 0 ] && [ "$ISO_REACH" != 0 ]; then echo "NS_NET_ISO=PASS"; else echo "NS_NET_ISO=FAIL"; exit 1; fi  # gate for real
 
   cri-linux:
     runs-on: ubuntu-latest
@@ -81,7 +81,7 @@ jobs:
           CARGO="$HOME/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo"
           sudo -E env "PATH=$PATH" LIGHTR_CNI_CONF=$LIGHTR_CNI_CONF LIGHTR_CNI_BIN=$LIGHTR_CNI_BIN \
             "$CARGO" test -p lightr-cri-backend -j2 2>&1 | tail -45
-          echo "CRI_LINUX_EXIT=${PIPESTATUS[0]}"
+          code=${PIPESTATUS[0]}; echo "CRI_LINUX_EXIT=$code"; exit "$code"  # gate for real
 
   cri-netns-lifecycle:
     # WP-#83: prove the CRI backend's FULL netns + CNI lifecycle (pin, real
@@ -115,7 +115,7 @@ jobs:
           CARGO="$HOME/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo"
           sudo -E env "PATH=$PATH" LIGHTR_NETNS_IT=1 LIGHTR_CNI_CONF=$LIGHTR_CNI_CONF LIGHTR_CNI_BIN=$LIGHTR_CNI_BIN \
             "$CARGO" test -p lightr-cri-backend --test netns_lifecycle -- --nocapture 2>&1 | tail -60
-          echo "NETNS_LIFECYCLE_EXIT=${PIPESTATUS[0]}"
+          code=${PIPESTATUS[0]}; echo "NETNS_LIFECYCLE_EXIT=$code"; exit "$code"  # gate for real
 
   acceptance-batch:
     runs-on: ubuntu-latest
@@ -135,4 +135,4 @@ jobs:
           set +e
           export LIGHTR_NET_TESTS=1 LIGHTR_REG_TESTS=1 LIGHTR_PUSH_TARGET=localhost:5000/lightr-acceptance
           cargo test --workspace -j2 2>&1 | grep -iE "test result:|FAILED|A21|A22|real-pull|push round|error\[|panicked" | tail -45
-          echo "ACCEPTANCE_EXIT=${PIPESTATUS[0]}"
+          code=${PIPESTATUS[0]}; echo "ACCEPTANCE_EXIT=$code"; exit "$code"  # gate for real
