@@ -34,7 +34,13 @@
 //!   * `cap_add` / `cap_drop` / `privileged` (Linux capabilities),
 //!   * `tty` (a real pty would rewrite the streaming/memo stdio plumbing),
 //!   * `init` (PID 1 zombie reaper), `read_only` (mount-ns rootfs),
-//!   * `pids_limit` (cgroup `pids.max`), `shm_size` (`/dev/shm` mount).
+//!   * `shm_size` (`/dev/shm` mount).
+//!
+//! RECORDED-ONLY here, ENFORCED on the `ns` engine (WP-#90):
+//!   * `pids_limit` (cgroup `pids.max`) — the native engine honest-ERRORS on a
+//!     pids request (`limits::check_native_support`); the real cap is the `ns`
+//!     engine's `ResourceLimits.pids_max` → `apply_cgroup`. This carry-field stays
+//!     recorded + inspectable but never enforced on native (see `apply_pids_limit`).
 //!
 //! Cross-platform (template 8a): the unix-only appliers are `#[cfg(unix)]` on the
 //! fn ITSELF and their dispatch calls are `#[cfg(unix)]`-gated, so none is dead
@@ -241,9 +247,17 @@ fn i32_to_bytes(value: i32, buf: &mut [u8; 12]) -> &[u8] {
     &buf[i..]
 }
 
-/// `--pids-limit`. HONEST-RECORDED (cgroup `pids.max`). Capping the pid count
-/// needs a delegated cgroup the native engine does not create; recorded +
-/// inspectable, honored under `vz`. `None` ⇒ no-op.
+/// `--pids-limit`. RECORDED-ONLY on the native supervisor (WP-#90 — the prior
+/// "HONEST-RECORDED (cgroup pids.max)" comment LIED: this slot enforces nothing).
+/// Capping the pid count needs cgroup v2 `pids.max`, which the native host process
+/// cannot create. ENFORCEMENT lives on the `ns` engine via
+/// `ResourceLimits.pids_max` → `lightr_engine::limits::apply_cgroup` (a real
+/// `pids.max` write in a transient cgroup). The native engine HONEST-ERRORS on a
+/// pids request upstream (`check_native_support`), and vz honest-errors at the CLI,
+/// so a pids cap is never silently dropped — this carry-field is recorded +
+/// inspectable (spec.json / `inspect`) only, never enforced here. Intentional
+/// no-op; `RunSpec`/`SpecOnDisk.pids_limit` remain as recorded fields (memo-key +
+/// spec.json roundtrip tests depend on them). `None` ⇒ no-op.
 #[cfg(unix)]
 fn apply_pids_limit(pids_limit: Option<i64>, cmd: &mut Command) {
     let _ = (pids_limit, cmd);

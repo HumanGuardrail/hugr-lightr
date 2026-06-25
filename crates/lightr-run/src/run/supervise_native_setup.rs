@@ -61,6 +61,9 @@ pub(super) fn spawn_child(
     let limits = lightr_core::ResourceLimits {
         memory_bytes: spec.mem_limit_bytes,
         cpu_millis: spec.cpu_limit_millis,
+        // pids is cgroup-only; the native supervisor records the `pids_limit`
+        // carry-field (recorded-only) but never enforces it here ⇒ never set.
+        pids_max: None,
     };
     crate::limits::apply_native(&mut cmd, &limits)?;
 

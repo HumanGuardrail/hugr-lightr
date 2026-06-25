@@ -135,6 +135,9 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
     let limits = lightr_core::ResourceLimits {
         memory_bytes: spec.mem_limit_bytes,
         cpu_millis: spec.cpu_limit_millis,
+        // vz cannot set a guest per-container pids.max; a pids request is honest-
+        // errored at the CLI before a detached vz run is ever spawned ⇒ never set.
+        pids_max: None,
     };
     {
         let vm_done = Arc::clone(&vm_done);

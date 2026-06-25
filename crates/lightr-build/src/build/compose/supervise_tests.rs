@@ -330,6 +330,7 @@ fn deploy_limits_survive_spec_roundtrip_into_runspec() {
     let limits = lightr_core::ResourceLimits {
         memory_bytes: s.mem_limit_bytes,
         cpu_millis: s.cpu_limit_millis,
+        pids_max: None,
     };
     assert_eq!(limits.memory_bytes, Some(512 * 1024 * 1024));
     assert_eq!(limits.cpu_millis, Some(1500));
@@ -347,6 +348,7 @@ fn deploy_limits_absent_roundtrip_to_unlimited() {
     let limits = lightr_core::ResourceLimits {
         memory_bytes: s.mem_limit_bytes,
         cpu_millis: s.cpu_limit_millis,
+        pids_max: None,
     };
     assert!(
         limits.is_unlimited(),
