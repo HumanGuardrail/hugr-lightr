@@ -136,6 +136,64 @@ pub struct ContainerConfig {
     pub tty: bool,
     #[serde(default)]
     pub stdin: bool,
+    // v1.2 addition (owner-approved 2026-06-25): the security-context subset, so a
+    // profile name can physically reach the backend (the frozen seam had NO
+    // security field — KPI 4 / AppArmor was unreachable). Additive + `serde(default)`
+    // ⇒ backward-compatible (old specs/vectors deserialize with `None`), exactly
+    // like the v1.1 tty/stdin additions. None = runtime default / unset.
+    #[serde(default)]
+    pub security: Option<SecurityContext>,
+}
+
+/// v1.2 security-context subset mirrored from CRI
+/// `LinuxContainerSecurityContext`. **Enforcement status (honest):** `apparmor`
+/// is the one wired to an enforcement point (the ns engine applies it at
+/// container start — validated by the KPI 4 critest AppArmor specs, which are
+/// integration-gated on the composed `cri serve`). `seccomp` and `capabilities`
+/// are carried on the seam (so the shell can populate them and the contract is
+/// future-proof for the Security Context critest family) but their enforcement is
+/// STAGED — they are NOT claimed as enforced until their own validated landing.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SecurityContext {
+    /// AppArmor profile to apply at container start. Enforced (ns engine, KPI 4).
+    #[serde(default)]
+    pub apparmor: Option<SecurityProfile>,
+    /// Seccomp profile. CARRIED on the seam; enforcement STAGED (not yet wired).
+    #[serde(default)]
+    pub seccomp: Option<SecurityProfile>,
+    /// Linux capability add/drop. CARRIED on the seam; enforcement STAGED.
+    #[serde(default)]
+    pub capabilities: Option<Capabilities>,
+}
+
+/// Mirrors CRI `SecurityProfile`: a profile kind + an optional localhost ref
+/// (the profile name/path when `Localhost`).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SecurityProfile {
+    pub profile_type: ProfileType,
+    /// The loaded profile name (AppArmor) or path (seccomp) when `Localhost`;
+    /// empty otherwise.
+    #[serde(default)]
+    pub localhost_ref: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ProfileType {
+    /// The runtime's default profile.
+    RuntimeDefault,
+    /// No profile (explicitly unconfined).
+    Unconfined,
+    /// A specific loaded profile named by `localhost_ref`.
+    Localhost,
+}
+
+/// CRI capability add/drop sets (`CAP_*` without the `CAP_` prefix, CRI style).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Capabilities {
+    #[serde(default)]
+    pub add: Vec<String>,
+    #[serde(default)]
+    pub drop: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
