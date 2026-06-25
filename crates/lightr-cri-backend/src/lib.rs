@@ -373,8 +373,18 @@ mod tests {
             b.open_attach(&ContainerId("c".into())),
             Err(BackendError::NotFound(_))
         ));
-        // probe-truthful: no CNI wired → network not ready.
-        assert!(!b.network_ready());
+        // probe-truthful + CNI-aware: `network_ready()` is the `cni_available()`
+        // probe, and a pod IP is assigned iff CNI was available at setup — so the
+        // two must AGREE. No CNI (macOS gate / unprivileged) → both false; root +
+        // CNI conflist (the linux-validation lane) → both true. Asserting the
+        // invariant (not a hard-coded false) is what the deeper Linux run exposed.
+        assert_eq!(
+            b.network_ready(),
+            st.ip.is_some(),
+            "network_ready() ({}) must agree with whether CNI assigned a pod IP ({:?})",
+            b.network_ready(),
+            st.ip
+        );
     }
 
     /// Object-safe behind `dyn CriBackend` (the shell consumes it as a trait
