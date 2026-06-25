@@ -54,6 +54,7 @@ fn ct_cfg(name: &str) -> ContainerConfig {
         log_path: String::new(),
         tty: false,
         stdin: false,
+        security: None,
     }
 }
 

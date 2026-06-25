@@ -37,6 +37,7 @@ fn cfg(command: Vec<&str>) -> ContainerConfig {
         log_path: String::new(),
         tty: false,
         stdin: false,
+        security: None,
     }
 }
 
