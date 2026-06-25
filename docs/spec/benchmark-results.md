@@ -1,5 +1,11 @@
 # The humiliation benchmark — Lightr vs Docker, head-to-head
 
+> **Scope:** this file is the **macOS app-level** comparison (`lightr bench-compare`
+> on the Intel box: cold-run, install, idle). The **Linux runtime** numbers (`ns`
+> engine cold-start, footprint, memoization, measured on public GitHub-hosted CI)
+> live in [`../benchmarks/RESULTS.md`](../benchmarks/RESULTS.md). Different
+> hardware + different layers — they do not overlap.
+
 > **Status:** methodology FROZEN; numbers filled only from an authoritative run
 > on named hardware. This document obeys the tense law (`performance-bar.md`,
 > ADR-0012): **no number appears here that the harness did not measure on the

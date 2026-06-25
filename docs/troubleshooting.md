@@ -63,12 +63,15 @@ That is the honest probe, not a bug. `ns` needs Linux; `wsl` needs Windows +
 WSL2; `vz` needs macOS + an installed pack (and a codesigned binary). The
 detail column tells you exactly why on this host.
 
-**Is the `vz` engine validated on my machine?**
-Only **Intel x86_64 macOS** is runtime-validated end-to-end today. Apple
-Silicon `vz`, Linux `ns`, and Windows `wsl` are code-complete but
+**Is my engine validated on my machine?**
+**Intel x86_64 macOS `vz`** and **Linux x86_64 `ns`** are both runtime-validated
+end-to-end today (the latter on public GitHub-hosted Linux CI — cold-start
+benchmark + net-namespace isolation, `docs/benchmarks/RESULTS.md`). Apple
+Silicon `vz`, Linux **aarch64** `ns`, and Windows `wsl` are code-complete but
 hardware-gated and **not** claimed validated — see the matrix in
 [`docs/spec/parity-audit.md`](spec/parity-audit.md). On those platforms expect
-runbook-stage behavior, not a guaranteed boot.
+runbook-stage behavior, not a guaranteed boot. (Rootless `ns` is not a
+hostile-tenant boundary — use `vz`/`fc` for that.)
 
 ---
 

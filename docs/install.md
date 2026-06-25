@@ -198,14 +198,16 @@ each tier exactly.
 |---|---|---|---|
 | **macOS Intel x86_64** | ✅ | `vz` (x86_64 guest) | ✅ **runtime-validated end-to-end** (F-205/F-206, Intel i7-9750H, macOS 15.3.2) |
 | macOS Apple Silicon | ✅ (same code) | `vz` (arm64 guest) | 🟡 **not validated** — code-complete; runbook at `spikes/s5-vz-boot-arm64/` |
-| Linux x86_64 | ✅ (same code) | `ns` (namespaces) | 🟡 **not validated** — code-complete; CI / target box gated |
-| Linux aarch64 | ✅ (same code) | `ns` | 🟡 **not validated** — code-complete; CI cross-check gated |
+| **Linux x86_64** | ✅ (same code) | `ns` (namespaces) | ✅ **runtime-validated on GitHub-hosted Linux CI** — cold-start benchmark (~30.8 ms, ~4.05× vs rootless podman, same isolation) + net-namespace isolation (`docs/benchmarks/RESULTS.md`) |
+| Linux aarch64 | ✅ (same code) | `ns` | 🟡 **not validated** — same code as x86_64 (validated); aarch64 CI cross-check gated |
 | Windows x86_64 | 🟡 code-complete | `wsl` (ns inside WSL2) | 🟡 **not validated** — code-complete; runbook (Windows box) gated |
 
-**Read this literally:** only the **macOS Intel x86_64 `vz`** path has been run
-end-to-end and proven. Apple Silicon `vz`, Linux `ns`, and Windows `wsl` are
-written and compile/cross-check clean, with runbooks under `spikes/`, but are
-**hardware-gated and not claimed validated**. The daemonless core (store,
+**Read this literally:** the **macOS Intel x86_64 `vz`** path and the **Linux
+x86_64 `ns`** path are both run end-to-end and proven (the latter on public
+GitHub-hosted Linux CI). Apple Silicon `vz`, Linux **aarch64** `ns`, and Windows
+`wsl` are written and compile/cross-check clean, with runbooks under `spikes/`,
+but are **hardware-gated and not claimed validated**. Note: rootless `ns` is
+**not** a hostile-tenant boundary (use `vz`/`fc`). The daemonless core (store,
 memoized `run`/`build`, OCI import, time-axis verbs, compose, docker compat,
 agent surface) is the same code on every platform and is fully tested.
 

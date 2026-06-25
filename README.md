@@ -27,8 +27,15 @@ $ lightr bench --vs-docker                          # run the table yourself
 > boots a real microVM and returns the guest's real exit code (F-205/F-206);
 > the arm64 sibling is **press-go on Apple Silicon** via the runbook in
 > `spikes/s5-vz-boot-arm64/` (code-complete, not yet claimed validated).
-> What is **NOT yet validated/built**: the `ns` (Linux) and `wsl` (Windows)
-> engines are code-complete but hardware-gated (runbooks/CI, none claimed
+> The **`ns` (Linux) engine is runtime-validated on GitHub-hosted Linux CI**
+> (public, reproducible hardware): a cold-start benchmark (`--net=none`, full
+> user+mount+pid+net namespaces, rootless) at ~30.8 ms — **~4.05× faster than
+> rootless podman `--network=none` at the same isolation + privilege** — plus a
+> functional network-namespace isolation proof (`docs/benchmarks/RESULTS.md`).
+> Caveat: rootless ns is **not** a hostile-tenant boundary (use `vz`/`fc`) and
+> is not yet battle-tested at production scale.
+> What is **NOT yet validated/built**: the `wsl` (Windows)
+> engine is code-complete but hardware-gated (runbook/CI, none claimed
 > validated); the **O(1) "views" backends** (composefs/NFS-loopback/projfs)
 > are a planned perf optimization (ADR-0013 spike, honest `Unsupported`,
 > unwired — the shipped runtime already materializes via CoW hydrate); and a
@@ -36,7 +43,12 @@ $ lightr bench --vs-docker                          # run the table yourself
 > **Apache-2.0** per ADR-0008, naming cleared, metadata ready; see
 > [`docs/RELEASE.md`](docs/RELEASE.md)). The headline ~ms / boot-never perf
 > targets bind to the O(1) views layer + Apple Silicon and remain **targets,
-> not measurements** (the measured release numbers are in `spikes/RESULTS.md`).
+> not measurements**. Measured numbers, by scope: **Linux runtime cold-start /
+> footprint / memoization** in
+> [`docs/benchmarks/RESULTS.md`](docs/benchmarks/RESULTS.md) (GitHub-hosted CI);
+> **macOS app-level cold-run / install / idle** in
+> [`docs/spec/benchmark-results.md`](docs/spec/benchmark-results.md) (Intel box);
+> the clonefile micro-spike in `spikes/RESULTS.md`.
 > Full feature-by-feature truth ledger:
 > [`docs/spec/parity-audit.md`](docs/spec/parity-audit.md).
 
