@@ -64,10 +64,12 @@ directly against the **real** `LightrBackend`, no scaffold).
 NOT exercised on our macOS CI. What *is* exercised on macOS: the sandbox
 **state machine** and the **pure helpers**. Probe-truthful by construction — on
 macOS there is no CNI, so `pod_ip = None` and no vector asserts a CNI-assigned
-IP (`vectors.rs:17–22`). The Linux netns/CNI runtime lane is **dormant /
-queued**, to be tracked in `docs/runbooks/linux-validation.md` (to be authored
-as part of the Linux-validation work — see §5). Nothing about CNI on a real
-netns is claimed as proven yet.
+IP (`vectors.rs:17–22`). **UPDATE (2026-06-25, #83): the Linux netns/CNI runtime
+lane is now VALIDATED** on GitHub-hosted ubuntu-latest — `.github/workflows/
+linux-validation.yml` runs `tests/netns_lifecycle.rs` (root + CNI bridge) and the
+`cri-linux` lib lane as root, both green: netns pin, real connectivity (ping the
+bridge gateway), container-join (inode-equality proof of the setns pre_exec), and
+leak-free teardown (containerd#6143 class). CNI on a real netns is now proven.
 
 ---
 
