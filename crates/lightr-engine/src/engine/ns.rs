@@ -210,7 +210,20 @@ mod ns_impl {
             return 1;
         }
 
-        // Unmount put_old
+        // #91: give the container a minimal /dev. The CAS-materialized rootfs has
+        // an EMPTY /dev (snapshot carries file content, not device nodes), so
+        // programs that need /dev/null (e.g. any shell job-control `cmd &`),
+        // /dev/zero, /dev/urandom, … fail. Rootless cannot `mknod` (no CAP_MKNOD in
+        // the init userns), so we BIND-mount the host's device nodes — still
+        // reachable at /.put_old/dev/* until put_old is unmounted just below. A
+        // tmpfs at /dev gives a clean, writable surface for the bind targets
+        // without mutating the rootfs. Best-effort: a device we can't wire is
+        // skipped (a missing optional node must not fail an otherwise-good run;
+        // pre-#91 there was no /dev at all).
+        setup_minimal_dev();
+
+        // Unmount put_old (AFTER /dev binds are established from /.put_old/dev/*;
+        // MNT_DETACH is lazy so the already-bound device mounts survive).
         let inner_put_old = CString::new("/.put_old").unwrap();
         let _ = unsafe { libc::umount2(inner_put_old.as_ptr(), libc::MNT_DETACH) };
 
@@ -313,6 +326,66 @@ mod ns_impl {
 
         unsafe { libc::close(fd) };
         Ok(())
+    }
+
+    /// #91: populate the container's /dev with the standard device nodes by
+    /// BIND-mounting the host's (rootless cannot `mknod`). Called after pivot_root
+    /// + `chdir /` but BEFORE `/.put_old` is unmounted, while the host nodes are
+    /// still reachable at `/.put_old/dev/*`. A fresh tmpfs at /dev gives a clean,
+    /// writable surface for the bind targets without mutating the rootfs. Entirely
+    /// best-effort: any step that fails is skipped (a device we can't wire must not
+    /// fail an otherwise-good run — pre-#91 there was no /dev at all).
+    fn setup_minimal_dev() {
+        use std::ffi::CString;
+        let _ = std::fs::create_dir_all("/dev");
+        // Fresh tmpfs at /dev (tmpfs is mountable in a user namespace).
+        if let (Ok(src), Ok(tgt), Ok(fstype), Ok(opts)) = (
+            CString::new("tmpfs"),
+            CString::new("/dev"),
+            CString::new("tmpfs"),
+            CString::new("mode=0755"),
+        ) {
+            unsafe {
+                libc::mount(
+                    src.as_ptr(),
+                    tgt.as_ptr(),
+                    fstype.as_ptr(),
+                    libc::MS_NOSUID,
+                    opts.as_ptr() as *const libc::c_void,
+                );
+            }
+        }
+        // Bind each standard node from the still-mounted old root.
+        for name in ["null", "zero", "full", "random", "urandom", "tty"] {
+            let src = format!("/.put_old/dev/{name}");
+            let dst = format!("/dev/{name}");
+            if std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&dst)
+                .is_err()
+            {
+                continue;
+            }
+            if let (Ok(s), Ok(d)) = (CString::new(src), CString::new(dst)) {
+                unsafe {
+                    libc::mount(
+                        s.as_ptr(),
+                        d.as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_BIND,
+                        std::ptr::null(),
+                    );
+                }
+            }
+        }
+        // Convenience symlinks programs expect (harmless if /proc isn't mounted —
+        // creating the link always succeeds; only following it would need /proc).
+        let _ = std::os::unix::fs::symlink("/proc/self/fd", "/dev/fd");
+        let _ = std::os::unix::fs::symlink("/proc/self/fd/0", "/dev/stdin");
+        let _ = std::os::unix::fs::symlink("/proc/self/fd/1", "/dev/stdout");
+        let _ = std::os::unix::fs::symlink("/proc/self/fd/2", "/dev/stderr");
     }
 }
 
