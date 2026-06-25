@@ -83,6 +83,40 @@ jobs:
             "$CARGO" test -p lightr-cri-backend -j2 2>&1 | tail -45
           echo "CRI_LINUX_EXIT=${PIPESTATUS[0]}"
 
+  cri-netns-lifecycle:
+    # WP-#83: prove the CRI backend's FULL netns + CNI lifecycle (pin, real
+    # connectivity, container-join, leak-free teardown) — not just "ADD gave an
+    # IP". Runs only this one root+CNI-gated test binary so the host-veth leak
+    # baseline is not perturbed by other netns'd tests.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --no-self-update && rustup default 1.96.0
+      - name: Install CNI plugins + a bridge conflist (same as cri-linux)
+        run: |
+          set -e -x
+          sudo mkdir -p /opt/cni/bin /etc/cni/net.d /run/netns
+          curl -sL https://github.com/containernetworking/plugins/releases/download/v1.5.1/cni-plugins-linux-amd64-v1.5.1.tgz \
+            | sudo tar -xz -C /opt/cni/bin
+          ls /opt/cni/bin | head
+          sudo tee /etc/cni/net.d/10-lightr-bridge.conflist >/dev/null <<'JSON'
+          { "cniVersion":"1.0.0","name":"lightrnet","plugins":[
+            {"type":"bridge","bridge":"lightr0","isGateway":true,"ipMasq":true,
+             "ipam":{"type":"host-local","subnet":"10.88.0.0/16","routes":[{"dst":"0.0.0.0/0"}]}} ]}
+          JSON
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+      - name: Build the netns-lifecycle test binary
+        run: cargo test -p lightr-cri-backend --test netns_lifecycle --no-run -j2
+      - name: Run the netns + CNI full-lifecycle test as root
+        run: |
+          set +e
+          export LIGHTR_CNI_CONF=/etc/cni/net.d LIGHTR_CNI_BIN=/opt/cni/bin
+          CARGO="$HOME/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo"
+          sudo -E env "PATH=$PATH" LIGHTR_NETNS_IT=1 LIGHTR_CNI_CONF=$LIGHTR_CNI_CONF LIGHTR_CNI_BIN=$LIGHTR_CNI_BIN \
+            "$CARGO" test -p lightr-cri-backend --test netns_lifecycle -- --nocapture 2>&1 | tail -60
+          echo "NETNS_LIFECYCLE_EXIT=${PIPESTATUS[0]}"
+
   acceptance-batch:
     runs-on: ubuntu-latest
     steps:
