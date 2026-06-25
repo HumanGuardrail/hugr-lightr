@@ -106,6 +106,20 @@ mod ns_impl {
             return 1;
         }
 
+        // F-203 (#90): apply cgroup v2 caps (memory.max / cpu.max / pids.max) HERE
+        // — after the uid/gid map, but **before** the mount sequence + pivot_root.
+        // The mount namespace is unshared yet still carries the host mounts, so the
+        // host's cgroup-v2 hierarchy is still visible at `/sys/fs/cgroup`. After
+        // pivot_root the root is the container rootfs whose `/sys/fs/cgroup` is an
+        // empty dir, so apply_cgroup there always failed "cgroup v2 not mounted"
+        // (the Linux-CI resource-limits job exposed this — the caps never actually
+        // applied). cgroup membership survives the later mount-ns pivot, and exec
+        // inherits it. Fail closed: any error returns 1.
+        if let Err(e) = crate::limits::apply_cgroup(limits) {
+            eprintln!("lightr-engine ns: apply_cgroup failed: {e}");
+            return 1;
+        }
+
         // WP-NET-ISO: with `--net=none` the new netns starts with `lo` DOWN, so
         // even loopback traffic fails. Bring `lo` up here — we hold CAP_NET_ADMIN
         // in the new userns, so this works rootless. MUST run AFTER the uid/gid
@@ -208,14 +222,6 @@ mod ns_impl {
         };
         unsafe {
             libc::chdir(cwd_c.as_ptr());
-        }
-
-        // F-203: apply cgroup v2 caps before exec. Writes memory.max / cpu.max
-        // into a transient delegated cgroup subtree; returns honest Err if cgroup
-        // v2 is unavailable or the caller lacks delegation / CAP_SYS_RESOURCE.
-        if let Err(e) = crate::limits::apply_cgroup(limits) {
-            eprintln!("lightr-engine ns: apply_cgroup failed: {e}");
-            return 1;
         }
 
         // exec command
