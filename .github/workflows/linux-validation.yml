@@ -209,6 +209,14 @@ jobs:
           BIN="$PWD/target/release/lightr"
           cid=$(docker create alpine:latest); docker export "$cid" -o /tmp/al.tar; docker rm "$cid"
           mkdir -p /tmp/alroot && sudo tar -xf /tmp/al.tar -C /tmp/alroot
+          # `docker export` ships an EMPTY /dev — busybox sh job-control (`cmd &`)
+          # needs /dev/null, without which it prints "can't open '/dev/null'" and
+          # the pids fork probe can't background. (Runtimes mount a minimal /dev;
+          # the ns engine not doing so is tracked separately.) Create the nodes the
+          # probe needs so the pids.max signal is clean, not masked by a missing dev.
+          sudo mkdir -p /tmp/alroot/dev
+          sudo mknod -m 666 /tmp/alroot/dev/null c 1 3 2>/dev/null || true
+          sudo mknod -m 666 /tmp/alroot/dev/zero c 1 5 2>/dev/null || true
           "$BIN" snapshot --dir /tmp/alroot --name alpine
       - name: Prove memory.max OOM-kill + cpu.max + pids.max fork-cap (as root)
         run: |
