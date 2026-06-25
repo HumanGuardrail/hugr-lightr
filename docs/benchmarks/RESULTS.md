@@ -4,6 +4,12 @@
 `.github/workflows/benchmark.yml` (`workflow_dispatch`) on a GitHub-hosted
 `ubuntu-latest` runner — public, documented hardware that anyone can re-run.
 
+> **Scope:** this file is the **Linux runtime** benchmark (`ns` engine cold-start,
+> footprint, memoization). The **macOS app-level** numbers (vz cold-run, install,
+> idle) live in [`../spec/benchmark-results.md`](../spec/benchmark-results.md);
+> the clonefile micro-spike in `../../spikes/RESULTS.md`. Different hardware +
+> different layers — they do not overlap.
+
 ## Method
 - All runtimes on the **same runner, same job, back-to-back**, n=100 iterations
   for cold-start (variance reported, not just an average).
