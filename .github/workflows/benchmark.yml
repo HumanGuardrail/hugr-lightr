@@ -73,10 +73,13 @@ jobs:
           R=/tmp/bench.txt; : > "$R"
 
           # Collect every sample, then report mean/sd/p50/p95/min/max (nearest-rank).
+          # $1=name, $2=iters, rest=command. Cold-start uses the full N (variance);
+          # the memoization probe uses a small count (each docker compile is ~20s —
+          # the ~1900x gap is structural, it does NOT need n=100 to be visible).
           bench(){
-            local name="$1"; shift
+            local name="$1" reps="$2"; shift 2
             local tmp=/tmp/samp.$$; : > "$tmp"; local i a b ok=0
-            for i in $(seq 1 "$N"); do
+            for i in $(seq 1 "$reps"); do
               a=$(date +%s.%N)
               if eval "$@" >/dev/null 2>&1; then
                 b=$(date +%s.%N)
@@ -85,9 +88,9 @@ jobs:
               fi
             done
             if [ "$ok" = 0 ]; then
-              printf "%-30s UNAVAILABLE (0/%d)\n" "$name" "$N" | tee -a "$R"; rm -f "$tmp"; return
+              printf "%-30s UNAVAILABLE (0/%d)\n" "$name" "$reps" | tee -a "$R"; rm -f "$tmp"; return
             fi
-            sort -n "$tmp" | awk -v name="$name" -v ok="$ok" -v n="$N" '
+            sort -n "$tmp" | awk -v name="$name" -v ok="$ok" -v n="$reps" '
               function rank(p,  r){ r=int((p/100)*NR + 0.999999); if(r<1)r=1; if(r>NR)r=NR; return v[r] }
               {v[NR]=$1; s+=$1}
               END{
@@ -109,21 +112,22 @@ jobs:
           "$BIN" run --engine ns --net=none --rootfs alpine -- /bin/true >/dev/null 2>&1
           podman run --rm --network=none alpine true >/dev/null 2>&1
           docker run --rm --network=none alpine true >/dev/null 2>&1
-          bench "lightr ns --net=none [rootless]"  '"'"$BIN"'" run --engine ns --net=none --rootfs alpine -- /bin/true'
-          bench "podman --network=none [rootless]" 'podman run --rm --network=none alpine true'
-          bench "docker --network=none [rootful]"  'docker run --rm --network=none alpine true'
+          bench "lightr ns --net=none [rootless]"  "$N" '"'"$BIN"'" run --engine ns --net=none --rootfs alpine -- /bin/true'
+          bench "podman --network=none [rootless]" "$N" 'podman run --rm --network=none alpine true'
+          bench "docker --network=none [rootful]"  "$N" 'docker run --rm --network=none alpine true'
 
           echo "" | tee -a "$R"
           echo "===== lightr NATIVE (no isolation — trusted/CI mode, for context) =====" | tee -a "$R"
           "$BIN" run -- true >/dev/null 2>&1
-          bench "lightr native (no isol.)"  '"'"$BIN"'" run -- true'
+          bench "lightr native (no isol.)"  "$N" '"'"$BIN"'" run -- true'
 
           echo "" | tee -a "$R"
           echo "===== MEMOIZATION on real build (compile 20k C fns -O2; a FEATURE docker lacks) =====" | tee -a "$R"
+          echo "  (n=10 — each docker compile is ~20s; the gap is structural, not a tail)" | tee -a "$R"
           python3 -c "print('\n'.join('int f%d(int x){return x*%d+%d;}'%(i,i,i) for i in range(20000)))" > /tmp/w.c
-          bench "docker compile (always)"   'docker run --rm -v /tmp:/w gcc:latest gcc -O2 -c /w/w.c -o /tmp/d.o'
+          bench "docker compile (always)"   10 'docker run --rm -v /tmp:/w gcc:latest gcc -O2 -c /w/w.c -o /tmp/d.o'
           "$BIN" run -- gcc -O2 -c /tmp/w.c -o /tmp/l.o >/dev/null 2>&1
-          bench "lightr compile (memoized)" '"'"$BIN"'" run -- gcc -O2 -c /tmp/w.c -o /tmp/l.o'
+          bench "lightr compile (memoized)" 10 '"'"$BIN"'" run -- gcc -O2 -c /tmp/w.c -o /tmp/l.o'
 
           { echo "## lightr SOTA benchmark — ubuntu-latest, $N iters (variance)"; echo '```'; cat "$R"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "----- RESULTS -----"; cat "$R"
