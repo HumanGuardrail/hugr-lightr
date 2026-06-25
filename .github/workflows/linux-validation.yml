@@ -57,6 +57,21 @@ jobs:
           "$BIN" run --net=none -- /bin/true; echo "native_netnone_exit=$?"
           # PASS iff host-net REACHED the listener (exit 0) and --net=none did NOT.
           if [ "$HOST_REACH" = 0 ] && [ "$ISO_REACH" != 0 ]; then echo "NS_NET_ISO=PASS"; else echo "NS_NET_ISO=FAIL"; exit 1; fi  # gate for real
+      - name: Verify the container has a populated /dev (#91)
+        run: |
+          set +e
+          BIN="$PWD/target/release/lightr"
+          # Before #91 the container's /dev was EMPTY → busybox job-control (`&`)
+          # failed "can't open '/dev/null'". Prove the standard nodes now work:
+          # write /dev/null, read /dev/zero, and run a backgrounded job (needs
+          # /dev/null) — all must succeed with NO "can't open" / "can't fork".
+          PROBE='echo x > /dev/null && head -c 8 /dev/zero | wc -c && sleep 1 & wait; echo DEV_OK'
+          "$BIN" run --engine ns --rootfs alpine -- /bin/busybox sh -c "$PROBE" >/tmp/dev.txt 2>&1
+          DEV_EXIT=$?; echo "dev_exit=$DEV_EXIT"; cat /tmp/dev.txt
+          if grep -qiE "can't open|can't fork|No such file" /tmp/dev.txt; then
+            echo "NS_DEV=FAIL (device-less /dev)"; exit 1
+          fi
+          if [ "$DEV_EXIT" = 0 ] && grep -q "DEV_OK" /tmp/dev.txt; then echo "NS_DEV=PASS"; else echo "NS_DEV=FAIL"; exit 1; fi  # gate for real
 
   cri-linux:
     runs-on: ubuntu-latest
