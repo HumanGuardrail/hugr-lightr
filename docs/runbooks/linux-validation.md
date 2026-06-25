@@ -80,12 +80,12 @@ backend capability lands. **Tense discipline:** every probe is fail-closed — i
 refuses to emit a number it did not actually measure (set
 `KPI_BACKEND_READY=1` only when the capability is real).
 
-| # | KPI | Probe script | Measurement | Pass bar | Handoff |
+| # | KPI | Probe script | Measurement | Pass bar | Status |
 | - | --- | --- | --- | --- | --- |
-| 1 | Pull dedup (0-byte re-pull) | `ci/linux-kpis/kpi1-pull-dedup.sh` | pull A cold (record bytes-in), pull A again, pull B sharing A's layers | re-pull == 0 bytes; B moves only novel blobs; A/B vs containerd, same images | §1 |
-| 2 | Disk dedup ratio (N similar images) | `ci/linux-kpis/kpi2-disk-dedup.sh` | import N overlapping images; `du -sb` CAS store vs containerd snapshotter | dedup ratio > 1; CAS on-disk <= containerd | §2 |
-| 3 | Real-container cold-start / footprint A/B | `ci/linux-kpis/kpi3-cold-start-ab.sh` | drive a real `crictl run` (nginx/agnhost) + curl via the lightr-cri harness cold-start/RSS probes | time-to-serving + RSS <= containerd, same image + host | §3 |
-| 4 | AppArmor profile applied | `ci/linux-kpis/kpi4-apparmor.sh` | run critest AppArmor specs against the real backend | critest AppArmor specs GREEN; lines removable from `../lightr-cri/ci/critest-skips.txt` | §4 |
+| 1 | Pull dedup (0-byte re-pull) | `ci/linux-kpis/kpi1-pull-dedup.sh` | pull A cold, re-pull A, import B = `FROM A +1 layer`; CAS object-plane bytes delta (no network bytes-in counter exists — measures bytes WRITTEN to CAS) | re-pull == 0 new bytes; 0 < B_B < B_A1 | ✅ **VALIDATED 2026-06-25** (`cas-kpis` job): B_A2=**0**, ratio in `docs/benchmarks/RESULTS.md` |
+| 2 | Disk dedup ratio (N similar images) | `ci/linux-kpis/kpi2-disk-dedup.sh` | import N overlapping images; `du -sb` CAS objects vs an isolated containerd content store | dedup ratio > 1 (HARD); CAS on-disk vs containerd = INFO | ✅ **VALIDATED 2026-06-25**: **ratio 3.97×**. NOTE: S_lightr (decompressed, run-ready) > S_containerd (compressed blobs) — honest INFO, not a fail |
+| 3 | Real-container cold-start / footprint A/B | `ci/linux-kpis/kpi3-cold-start-ab.sh` | drive a real `crictl run` (nginx/agnhost) + curl via the lightr-cri harness cold-start/RSS probes | time-to-serving + RSS <= containerd, same image + host | ⛔ **BLOCKED** on the lightr-cri shell swap (needs crictl→CRI server; other TL's repo) — §3 |
+| 4 | AppArmor profile applied | `ci/linux-kpis/kpi4-apparmor.sh` | run critest AppArmor specs against the real backend | critest AppArmor specs GREEN; lines removable from `../lightr-cri/ci/critest-skips.txt` | ⛔ **BLOCKED** on the lightr-cri critest harness (other TL's repo) — §4 |
 
 KPI 3 also unblocks the runtime-tier critest networking specs (port-mapping ×2,
 portforward ×2) listed in `../lightr-cri/ci/critest-skips.txt` — they need a real

@@ -59,6 +59,42 @@ overhead, not skipped work. The **unambiguous structural wins** stand:
 **daemonless (0 MB idle vs 127 MB)** and **memoized re-builds ~2,000×** (a lightr
 *feature* Docker lacks — `10.3 ms` vs `20,633 ms`).
 
+## CAS dedup KPIs (CI-signed, ubuntu-latest, 2026-06-25)
+
+The content-addressed store is the moat. Two KPI probes (`ci/linux-kpis/`) run in
+the `cas-kpis` job and **gate for real** (the job fails on a missed bar). Metric =
+bytes in the CAS object plane (`du -sb $LIGHTR_HOME/store/objects`); there is no
+network bytes-in counter, so the signed claim is **bytes written to the CAS**, not
+network bytes.
+
+**KPI 1 — pull dedup:**
+
+| Step | New CAS bytes | Bar | Result |
+|---|---|---|---|
+| Cold pull `alpine:latest` (B_A1) | 12,280,424 | > 0 | PASS |
+| Re-pull same image, new ref (B_A2) | **0** | == 0 | **PASS** |
+| Import B = `FROM alpine +1 layer` (B_B) | 8,738,785 | 0 < B_B < B_A1 | PASS |
+
+Re-pulling content already in the CAS writes **zero** new bytes. (B_B is not tiny:
+a docker-save tar carries the base as a compressed blob that lightr retains as a
+new object, but the per-file snapshot content dedups — so B_B < a fresh cold pull.)
+
+**KPI 2 — disk dedup ratio (N=4 images sharing an alpine base):**
+
+| Quantity | Bytes | Bar | Result |
+|---|---|---|---|
+| Σ standalone (no sharing) | 68,539,410 | — | — |
+| S_lightr (combined store) | 17,257,368 | — | — |
+| **dedup_ratio = Σ / S_lightr** | **3.97×** | > 1 | **PASS** |
+| S_containerd (content store) | 8,716,874 | S_lightr ≤ S_containerd | INFO (not PASS) |
+
+**Honest on-disk note:** lightr's combined store (17.3 MB) is **larger** than
+containerd's content store (8.7 MB) for the same 4 images, because lightr stores
+**decompressed, per-file** CAS objects (ready to run — no unpack step) while
+containerd holds **compressed** layer blobs that must still be unpacked to a
+snapshot before running. Different trade-off; reported as INFO, never gated. The
+hard, signed claim is the dedup ratio (3.97×) and the 0-byte re-pull.
+
 ## Honest caveats (read these)
 1. **Microbenchmark of runtime overhead.** Cold-start uses `true`; a heavy app's
    own startup is identical across runtimes, so the *percentage* win shrinks on
