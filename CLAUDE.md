@@ -19,11 +19,17 @@ HuGR (the company / brand)
    hugit (the forge for agent fleets)                          (campaign #3)
 ```
 
-**Status (2026-06-11, overnight): SPEC COMPLETE — whitepaper v2 (working
-backwards) is canon; feature tree F-001…F-605 drives the build; ADRs
-0009–0016 Accepted under the owner overnight mandate (docs/decisions-log.md,
-subject to morning review); R0 wave in flight. TechLead installed
-(`.techlead/`, map at `.techlead/memory/MAP.md`).
+**Status (2026-06-25): R0–R4 LOCAL PRODUCT DELIVERED** — whitepaper v2 is canon;
+feature tree F-001…F-605 built; ADRs 0009–0018 Accepted (docs/decisions-log.md).
+Validated: the daemonless local core (store, memoized run/build, OCI import,
+time-axis, lazy compose, docker compat, agent/MCP), the **`vz` engine end-to-end
+on Intel x86_64** (F-205/F-206), and the **`ns` engine on public GitHub-hosted
+Linux CI** (cold-start benchmark + net-namespace isolation — `docs/benchmarks/
+RESULTS.md`). Honest-gated (not claimed validated): arm64 vz, Windows `wsl`,
+Linux aarch64 `ns`; publish owner-gated (`G-PUBLISH`). In flight: CRI integration
+front (`lightr-cri` sibling + this repo's `lightr-cri-backend`). Truth ledger:
+`docs/spec/parity-audit.md`. TechLead installed (`.techlead/`, map at
+`.techlead/memory/MAP.md`).
 
 Read first: `docs/whitepaper/hugr-lightr-v2.md` (**canonical vision** — source
 of truth) · `docs/adr/` (decision records — code is written only against
@@ -54,9 +60,16 @@ pricing posture, open decisions) · `docs/VISION.md` (the funnel) ·
 - CoreLink dedup is **intra-tenant at GA**; cross-tenant is **staged**
   (`CAP-DEDUP-CROSS-TENANT`). Never claim cross-tenant dedup as live; the
   network-effect moat *depends on it landing* and is stated as such.
-- Lightr is **design-phase**: no benchmark, install count, or perf number may
-  be claimed as measured. The comparison tables are targets from cited
-  precedents (Firecracker, Lambda, OrbStack), not our measurements.
+- **Measured numbers are allowed ONLY when actually measured on named,
+  reproducible hardware and cited as such** (updated 2026-06-25, owner-approved —
+  Lightr is past design-phase). A benchmark/perf/footprint number may be claimed
+  only with its run context (the box or the public CI runner) and a reproduce
+  path; the measured ledgers are `docs/benchmarks/RESULTS.md` (Linux runtime, CI)
+  and `docs/spec/benchmark-results.md` (macOS app-level, Intel box). Anything not
+  yet measured stays an explicit **target** from cited precedents (Firecracker,
+  Lambda, OrbStack), never stated as measured. Install counts: none claimed until
+  real. The `performance-bar.md` targets remain DRAFT until a harness measures
+  them on stated hardware.
 
 ## Relationship to the rest of HuGR
 
