@@ -214,6 +214,9 @@ fn start_one_instance(
         limits: lightr_core::ResourceLimits {
             memory_bytes: svc.mem_limit_bytes,
             cpu_millis: svc.cpu_limit_millis,
+            // compose `deploy.resources` has no pids field; the native supervisor
+            // cannot enforce pids anyway (cgroup-only) ⇒ never set here.
+            pids_max: None,
         },
         // RC-SEAM-FREEZE (NON-OWNED site): remaining new RC fields (labels/
         // read_only/...) are future WPs' jobs → no-op defaults here.

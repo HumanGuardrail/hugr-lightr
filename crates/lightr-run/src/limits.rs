@@ -35,6 +35,13 @@ pub fn check_native_support(limits: &ResourceLimits) -> Result<()> {
                 .to_string(),
         ));
     }
+    // A pids cap needs cgroup v2 `pids.max` — unavailable to the native host
+    // process. Honest `Err` (WP-#90), never a silent no-op; enforced on `ns`.
+    if limits.pids_max.is_some() {
+        return Err(LightrError::InvalidRef(
+            "native engine cannot enforce a pids limit; use --engine ns (cgroup)".to_string(),
+        ));
+    }
     #[cfg(not(target_os = "linux"))]
     if limits.memory_bytes.is_some() {
         return Err(LightrError::InvalidRef(
@@ -159,6 +166,9 @@ mod cgroup_v2 {
             let quota = millis.saturating_mul(100);
             write_ctl(&leaf, "cpu.max", &format!("{quota} 100000"))?;
         }
+        if let Some(p) = limits.pids_max {
+            write_ctl(&leaf, "pids.max", &p.to_string())?;
+        }
 
         write_ctl(&leaf, "cgroup.procs", &std::process::id().to_string())?;
         Ok(())
@@ -200,11 +210,25 @@ mod tests {
         let limits = ResourceLimits {
             memory_bytes: None,
             cpu_millis: Some(500),
+            pids_max: None,
         };
         let err = apply_native(&mut cmd, &limits).expect_err("cpu share must error");
         assert!(
             err.to_string().contains("cpu share"),
             "expected a cpu-share error, got: {err}"
+        );
+    }
+
+    // A pids cap on the native memo path is an honest error (cgroup-only; WP-#90).
+    #[cfg(unix)]
+    #[test]
+    fn apply_native_pids_limit_is_honest_err() {
+        let mut cmd = std::process::Command::new("/bin/true");
+        let limits = ResourceLimits::default().with_pids(Some(16));
+        let err = apply_native(&mut cmd, &limits).expect_err("pids limit must error");
+        assert!(
+            err.to_string().contains("pids limit"),
+            "expected a pids-limit error, got: {err}"
         );
     }
 
@@ -217,6 +241,7 @@ mod tests {
         let limits = ResourceLimits {
             memory_bytes: Some(64 * 1024 * 1024),
             cpu_millis: None,
+            pids_max: None,
         };
         assert!(apply_native(&mut cmd, &limits).is_ok());
     }
@@ -228,6 +253,7 @@ mod tests {
         let limits = ResourceLimits {
             memory_bytes: Some(64 * 1024 * 1024),
             cpu_millis: None,
+            pids_max: None,
         };
         let err = apply_native(&mut cmd, &limits).expect_err("memory cap must error off-Linux");
         assert!(

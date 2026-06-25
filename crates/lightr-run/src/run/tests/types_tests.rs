@@ -158,6 +158,7 @@ fn runspec_limits_map_onto_spec_on_disk_fields() {
         limits: lightr_core::ResourceLimits {
             memory_bytes: Some(256 * 1024 * 1024),
             cpu_millis: Some(500),
+            pids_max: None,
         },
         ..Default::default()
     };

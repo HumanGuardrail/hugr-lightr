@@ -233,6 +233,12 @@ mod vz_impl {
     /// * cpu — `ceil(millis / 1000)`, min 1 vcpu (VZ has no sub-core grain).
     /// * mem — `ceil(bytes / MiB)`. The VZ memory floor is enforced by the shim
     ///   (config failure rather than a silent clamp).
+    ///
+    /// NOTE (WP-#90): `limits.pids_max` is intentionally NOT consumed here — the
+    /// shim cannot set a guest per-container `pids.max` (the VM owns its own pid
+    /// space, not a delegated cgroup). A `--pids-limit --engine vz` request is
+    /// honest-errored upstream at the CLI (run handler) BEFORE the VM boots, so it
+    /// is never silently dropped; nothing reaches this function with a pids cap.
     fn vz_caps(limits: &lightr_core::ResourceLimits) -> (u64, u64) {
         let cpu_count = match limits.cpu_millis {
             None => 0,
@@ -262,6 +268,7 @@ mod vz_impl {
                 vz_caps(&ResourceLimits {
                     memory_bytes: None,
                     cpu_millis: Some(m),
+                    pids_max: None,
                 })
                 .1
             };
@@ -278,6 +285,7 @@ mod vz_impl {
                 vz_caps(&ResourceLimits {
                     memory_bytes: Some(b),
                     cpu_millis: None,
+                    pids_max: None,
                 })
                 .0
             };

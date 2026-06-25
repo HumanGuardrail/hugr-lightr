@@ -11,11 +11,15 @@ pub struct ResourceLimits {
     pub memory_bytes: Option<u64>,
     /// CPU as milli-CPUs: 1000 = one full core, 500 = half. `None` = unlimited.
     pub cpu_millis: Option<u64>,
+    /// Max process/thread count (Docker `--pids-limit`, cgroup v2 `pids.max`).
+    /// `None` = unlimited. Enforced ONLY on the `ns` engine (cgroup v2); native
+    /// and vz honest-error when this is set (no per-container pids cap there).
+    pub pids_max: Option<u64>,
 }
 
 impl ResourceLimits {
     pub fn is_unlimited(&self) -> bool {
-        self.memory_bytes.is_none() && self.cpu_millis.is_none()
+        self.memory_bytes.is_none() && self.cpu_millis.is_none() && self.pids_max.is_none()
     }
 
     /// Parse Docker-style strings. memory: "512m" "1g" "2048k" "1073741824".
@@ -32,7 +36,17 @@ impl ResourceLimits {
         Ok(ResourceLimits {
             memory_bytes,
             cpu_millis,
+            pids_max: None,
         })
+    }
+
+    /// Builder: fold in the `--pids-limit` value (Docker semantics). A value
+    /// `<= 0` (Docker's "unlimited") clears the cap to `None`; a positive value
+    /// becomes the cgroup `pids.max`. Keeps `parse` signature stable so existing
+    /// callers are untouched.
+    pub fn with_pids(mut self, pids: Option<i64>) -> Self {
+        self.pids_max = pids.filter(|n| *n > 0).map(|n| n as u64);
+        self
     }
 }
 
@@ -141,5 +155,34 @@ mod resource_limits_tests {
         assert!(!ResourceLimits::parse(Some("1m"), None)
             .unwrap()
             .is_unlimited());
+    }
+
+    #[test]
+    fn with_pids_sets_and_clears() {
+        // Positive ⇒ cap set.
+        assert_eq!(
+            ResourceLimits::default().with_pids(Some(16)).pids_max,
+            Some(16)
+        );
+        // None ⇒ no cap.
+        assert_eq!(ResourceLimits::default().with_pids(None).pids_max, None);
+        // Docker's "unlimited" (<= 0) ⇒ cleared to None (never a 0 cap).
+        assert_eq!(ResourceLimits::default().with_pids(Some(0)).pids_max, None);
+        assert_eq!(ResourceLimits::default().with_pids(Some(-1)).pids_max, None);
+        // with_pids does not disturb the other caps.
+        let l = ResourceLimits::parse(Some("64m"), Some("0.5"))
+            .unwrap()
+            .with_pids(Some(32));
+        assert_eq!(l.memory_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(l.cpu_millis, Some(500));
+        assert_eq!(l.pids_max, Some(32));
+    }
+
+    #[test]
+    fn is_unlimited_reflects_pids() {
+        // pids alone makes a spec NON-unlimited.
+        assert!(!ResourceLimits::default().with_pids(Some(8)).is_unlimited());
+        // clearing it back to None is unlimited again.
+        assert!(ResourceLimits::default().with_pids(Some(-1)).is_unlimited());
     }
 }

@@ -124,10 +124,14 @@ pub fn run(a: RunArgs, json: bool) -> i32 {
     }
 
     // ── Resource caps + env (same lowering `run` performs) ─────────────────────
-    let limits = match lightr_core::ResourceLimits::parse(a.memory.as_deref(), a.cpus.as_deref()) {
-        Ok(l) => l,
-        Err(e) => return die_lightr(&e),
-    };
+    // WP-#90: fold in `--pids-limit`. `create` is native-only (guarded above), and
+    // the native supervisor records-but-does-not-enforce pids (cgroup-only); the
+    // `pids_limit` carry-field persists to spec.json + `inspect` for honesty.
+    let limits =
+        match lightr_core::ResourceLimits::parse(a.memory.as_deref(), a.cpus.as_deref()) {
+            Ok(l) => l.with_pids(a.pids_limit),
+            Err(e) => return die_lightr(&e),
+        };
     let env_explicit = match resolve_env_explicit(&a.env_set, a.env_file.as_deref()) {
         Ok(pairs) => pairs,
         Err(code) => return code,

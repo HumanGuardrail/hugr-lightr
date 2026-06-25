@@ -147,11 +147,25 @@ pub fn run(
         return code;
     }
 
-    // Parse resource caps (F-203). Malformed ⇒ exit 2 (fail closed).
+    // Parse resource caps (F-203). Malformed ⇒ exit 2 (fail closed). WP-#90:
+    // fold in `--pids-limit` (cgroup v2 `pids.max`) — enforced on the `ns` engine.
     let limits = match ResourceLimits::parse(memory, cpus) {
-        Ok(l) => l,
+        Ok(l) => l.with_pids(rc.pids_limit),
         Err(e) => return die_lightr(&e),
     };
+
+    // WP-#90: a pids cap needs cgroup v2 `pids.max`, which only the `ns` engine
+    // owns. vz is a microVM (no delegated per-container cgroup via the shim) — so a
+    // `--pids-limit --engine vz` request is honest-errored HERE, before the VM
+    // boots, rather than silently dropped. native is honest-errored at the engine
+    // boundary (`check_native_support`); the carry-field stays recorded-only.
+    if engine_kind == EngineKind::Vz && limits.pids_max.is_some() {
+        eprintln!(
+            "lightr: vz engine cannot enforce a pids limit (no per-container cgroup \
+             in the microVM); use --engine ns"
+        );
+        return 2;
+    }
 
     // Parse secrets/configs (F-309) — split NAME=REF.
     let mut secrets: Vec<StoreFile> = Vec::new();

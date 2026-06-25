@@ -8,6 +8,9 @@ name: linux-validation
 #                       network namespace (only `lo` visible) vs host-net default.
 #   cas-kpis          — WP-#86/#87: CI-signed CAS-dedup KPI probes (0-byte re-pull
 #                       + N-image disk dedup ratio vs containerd) on ubuntu-latest.
+#   resource-limits   — WP-#90: prove F-203 cgroup v2 enforcement on real Linux AS
+#                       ROOT — memory.max OOM-kill, cpu.max limited run, and the new
+#                       pids.max fork-cap (the parity-honesty gap this WP closed).
 # Manual only (workflow_dispatch).
 on:
   workflow_dispatch:
@@ -183,3 +186,89 @@ jobs:
           KPI_BACKEND_READY=1 LIGHTR_BIN="$PWD/target/release/lightr" \
             ./ci/linux-kpis/kpi2-disk-dedup.sh
           code=$?; echo "CAS_KPI2_EXIT=$code"; exit "$code"  # gate for real
+
+  resource-limits:
+    # WP-#90: prove F-203 resource caps are ACTUALLY enforced by cgroup v2 on the
+    # `ns` engine — not just persisted. Runs the release lightr AS ROOT (sudo): the
+    # cgroup-v2 root /sys/fs/cgroup is writable by root, so `apply_cgroup` creates a
+    # transient leaf and writes memory.max/cpu.max/pids.max. (Rootless needs a
+    # delegated subtree — `systemd-run --user -p Delegate=yes` — which GitHub's
+    # ubuntu-latest does not pre-provision; root is the honest CI path here.) The ns
+    # engine execs ABSOLUTE paths only, so every probe invokes /bin/busybox directly.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --no-self-update && rustup default 1.96.0
+      - name: Build lightr (release)
+        run: cargo build -p lightr-cli --release -j2
+      - name: Prepare alpine rootfs (busybox awk/sh)
+        run: |
+          set -e -x
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+          BIN="$PWD/target/release/lightr"
+          cid=$(docker create alpine:latest); docker export "$cid" -o /tmp/al.tar; docker rm "$cid"
+          mkdir -p /tmp/alroot && sudo tar -xf /tmp/al.tar -C /tmp/alroot
+          "$BIN" snapshot --dir /tmp/alroot --name alpine
+      - name: Prove memory.max OOM-kill + cpu.max + pids.max fork-cap (as root)
+        run: |
+          set +e
+          BIN="$PWD/target/release/lightr"
+          # Snapshot store lives under the invoking user's HOME; pass it to root so
+          # `sudo lightr` resolves the same `alpine` ref (LIGHTR_HOME is honored).
+          export LIGHTR_HOME="$HOME/.lightr"
+          RUN() { sudo -E env "LIGHTR_HOME=$LIGHTR_HOME" "$BIN" "$@"; }
+
+          # ── MEMORY: busybox awk doubles a string forever → must be OOM-killed
+          # under memory.max=64m. A faithful cap kills it ⇒ NON-zero exit (137 on
+          # SIGKILL). If it ran to "completion" (exit 0) the cap did NOT bite. ──────
+          echo "=== MEMORY: --memory 64m awk string-bomb → expect OOM kill (non-zero) ==="
+          RUN run --engine ns --memory 64m --rootfs alpine -- \
+            /bin/busybox awk 'BEGIN{s="x";while(1)s=s s}' >/tmp/mem.txt 2>&1
+          MEM_EXIT=$?; echo "RESLIMITS_MEM_EXIT=$MEM_EXIT"; tail -3 /tmp/mem.txt
+
+          # ── CPU: a short cpu-bound busybox loop under --cpus 0.5 must still RUN to
+          # completion (the share throttles, it does not kill). Proves the cpu.max
+          # apply path does not error the run. (cpu.max VALUE assertion is covered by
+          # the unit/apply path — the transient cgroup is process-scoped + torn down,
+          # so a post-hoc host read is unreliable; this proves the limited run works.)
+          echo "=== CPU: --cpus 0.5 short loop → expect completion (exit 0) ==="
+          RUN run --engine ns --cpus 0.5 --rootfs alpine -- \
+            /bin/busybox sh -c 'i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done; echo cpu_ok' \
+            >/tmp/cpu.txt 2>&1
+          CPU_EXIT=$?; echo "RESLIMITS_CPU_EXIT=$CPU_EXIT"; tail -2 /tmp/cpu.txt
+
+          # ── PIDS: with pids.max=16, most of 200 backgrounded sleeps must FAIL to
+          # fork (EAGAIN) → `started` ≪ 200. CONTROL (no --pids-limit) starts far
+          # more → proves the cap is what bit, not some other limit. ────────────────
+          LOOP='n=0; i=0; while [ $i -lt 200 ]; do (sleep 5 &) 2>/dev/null && n=$((n+1)); i=$((i+1)); done; echo started=$n'
+          echo "=== PIDS capped: --pids-limit 16 → expect started ≪ 200 ==="
+          RUN run --engine ns --pids-limit 16 --rootfs alpine -- /bin/busybox sh -c "$LOOP" >/tmp/pcap.txt 2>&1
+          PIDS_CAP_EXIT=$?; tail -2 /tmp/pcap.txt
+          CAP_STARTED=$(grep -o 'started=[0-9]*' /tmp/pcap.txt | tail -1 | cut -d= -f2)
+          echo "=== PIDS control: NO --pids-limit → expect many more started ==="
+          RUN run --engine ns --rootfs alpine -- /bin/busybox sh -c "$LOOP" >/tmp/pfree.txt 2>&1
+          tail -2 /tmp/pfree.txt
+          FREE_STARTED=$(grep -o 'started=[0-9]*' /tmp/pfree.txt | tail -1 | cut -d= -f2)
+          : "${CAP_STARTED:=-1}"; : "${FREE_STARTED:=-1}"
+          echo "RESLIMITS_PIDS_CAP_STARTED=$CAP_STARTED RESLIMITS_PIDS_FREE_STARTED=$FREE_STARTED"
+
+          # ── vz honest-error: --pids-limit --engine vz must exit 2 (no silent drop).
+          # (vz is unavailable on Linux, so this also exercises the CLI guard that
+          # fires BEFORE any engine selection.) ────────────────────────────────────
+          echo "=== vz + --pids-limit → honest exit 2 ==="
+          RUN run --engine vz --pids-limit 16 --rootfs alpine -- /bin/true >/tmp/vz.txt 2>&1
+          VZ_EXIT=$?; echo "RESLIMITS_VZ_PIDS_EXIT=$VZ_EXIT"; tail -2 /tmp/vz.txt
+
+          # ── GATE (no false-green: every proof must hold or the job fails) ─────────
+          FAIL=0
+          [ "$MEM_EXIT" != 0 ] || { echo "FAIL: 64m awk bomb was NOT OOM-killed (exit $MEM_EXIT)"; FAIL=1; }
+          [ "$CPU_EXIT" = 0 ]  || { echo "FAIL: --cpus 0.5 limited run did not complete (exit $CPU_EXIT)"; FAIL=1; }
+          # pids.max must bite: capped count strictly less than the free control AND
+          # well under the 200 attempts (a faithful 16-cap lands far below 100).
+          if ! { [ "$CAP_STARTED" -ge 0 ] && [ "$FREE_STARTED" -ge 0 ] \
+                 && [ "$CAP_STARTED" -lt "$FREE_STARTED" ] && [ "$CAP_STARTED" -lt 100 ]; }; then
+            echo "FAIL: pids.max did not cap forks (capped=$CAP_STARTED free=$FREE_STARTED)"; FAIL=1
+          fi
+          [ "$VZ_EXIT" = 2 ]   || { echo "FAIL: vz+--pids-limit did not honest-error with exit 2 (exit $VZ_EXIT)"; FAIL=1; }
+          if [ "$FAIL" = 0 ]; then echo "RESLIMITS=PASS"; else echo "RESLIMITS=FAIL"; exit 1; fi  # gate for real
