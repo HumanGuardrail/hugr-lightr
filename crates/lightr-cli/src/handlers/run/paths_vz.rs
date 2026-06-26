@@ -91,6 +91,7 @@ pub(crate) fn run_vz_memo(
             // path is its own VM. Defaults (no cap changes).
             cap_drop: &[],
             cap_add: &[],
+            init: false,
         };
         // Suppress the guest CONSOLE (boot log + exit marker) from the host's
         // stdout on a memo MISS: real stdout/stderr come from the capture files

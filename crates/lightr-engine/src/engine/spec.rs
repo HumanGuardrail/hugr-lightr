@@ -137,4 +137,15 @@ pub struct ExecSpec<'a> {
     /// `ns` engine enforces it (see `cap_drop`). NOT part of any memo key. Default
     /// `&[]`.
     pub cap_add: &'a [String],
+
+    /// `--init` (WP-#95). When true, the `ns` engine runs a minimal PID-1 reaper
+    /// inside the new pid namespace: PID 1 forks the workload (which becomes PID 2),
+    /// then `waitpid(-1)`-loops to reap orphaned zombies and propagates the
+    /// workload's exit code. When false, the workload itself is PID 1 (still the
+    /// real fix for the pre-#95 false-isolation bug — the workload now actually
+    /// ENTERS the new pid namespace). Only the `ns` engine honors it; native is a
+    /// host process (no pid namespace) and vz reaps via its own guest PID 1, so for
+    /// them `--init` is a recorded-only carry-slot. NOT part of any memo key
+    /// (runtime, like `read_only`/`limits`). Default false.
+    pub init: bool,
 }

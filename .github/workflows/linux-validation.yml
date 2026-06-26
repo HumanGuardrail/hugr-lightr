@@ -89,6 +89,53 @@ jobs:
           "$BIN" run --engine ns --rootfs alpine -- /bin/busybox test -d /root
           ROOTDIR_EXIT=$?; echo "rootdir_exit=$ROOTDIR_EXIT"
           if [ "$ROOTDIR_EXIT" = 0 ]; then echo "NS_FIDELITY=PASS (/root survived snapshot)"; else echo "NS_FIDELITY=FAIL (/root dropped by snapshot)"; exit 1; fi  # gate for real
+      - name: Verify the PID namespace is ENTERED + /proc mounted (#95)
+        run: |
+          set +e
+          BIN="$PWD/target/release/lightr"
+          # Pre-#95 the ns engine unshared CLONE_NEWPID but NEVER forked a child into
+          # the new pid namespace, so the workload ran in the HOST pid namespace
+          # (false isolation) and there was no /proc. #95 forks PID 1 into the new ns
+          # and mounts /proc there. The ns engine execs ABSOLUTE paths ⇒ /bin/busybox.
+
+          # ── 1) no --init: the workload IS PID 1 AND /proc reflects the new ns ──
+          # `cat /proc/self/status | grep ^Pid:` must report `Pid:\t1` (it can only
+          # read /proc/self/status if /proc is mounted, and the pid is 1 only if the
+          # workload actually entered the new pid ns). Pre-#95: a large host pid (or
+          # the cat fails — no /proc).
+          "$BIN" run --engine ns --rootfs alpine -- \
+            /bin/busybox sh -c 'cat /proc/self/status | grep ^Pid:' >/tmp/pid1.txt 2>&1
+          echo "--- workload /proc/self/status Pid (no --init) ---"; cat /tmp/pid1.txt
+          P1=$(awk '/^Pid:/{print $2; exit}' /tmp/pid1.txt)
+          if [ "$P1" != "1" ]; then
+            echo "NS_PID1=FAIL (workload pid='$P1', expected 1 — pid ns not entered or /proc missing)"; exit 1
+          fi
+          echo "NS_PID1=PASS"
+
+          # ── 2) --init: a minimal reaper is PID 1, so the workload is PID 2 ──
+          "$BIN" run --engine ns --init --rootfs alpine -- \
+            /bin/busybox sh -c 'cat /proc/self/status | grep ^Pid:' >/tmp/pid2.txt 2>&1
+          echo "--- workload /proc/self/status Pid (--init) ---"; cat /tmp/pid2.txt
+          P2=$(awk '/^Pid:/{print $2; exit}' /tmp/pid2.txt)
+          if [ "$P2" != "2" ]; then
+            echo "NS_INIT_PID2=FAIL (workload pid='$P2', expected 2 — init reaper is not PID 1)"; exit 1
+          fi
+          echo "NS_INIT_PID2=PASS"
+
+          # ── 3) --init reaps + PROPAGATES the workload's exit code ──
+          # The PID-1 reaper must exit with the workload's code (7), and that must
+          # bubble all the way out of `lightr run`.
+          "$BIN" run --engine ns --init --rootfs alpine -- /bin/busybox sh -c 'exit 7'
+          IC=$?; echo "init_propagate_exit=$IC"
+          if [ "$IC" != "7" ]; then echo "NS_INIT_EXIT=FAIL (got $IC, expected 7)"; exit 1; fi
+          echo "NS_INIT_EXIT=PASS"
+
+          # ── 4) no regression: a plain ns run still exits 0 ──
+          "$BIN" run --engine ns --rootfs alpine -- /bin/true
+          TC=$?; echo "plain_true_exit=$TC"
+          if [ "$TC" != "0" ]; then echo "NS_TRUE=FAIL (got $TC, expected 0)"; exit 1; fi
+          echo "NS_TRUE=PASS"
+          echo "NS_PIDNS=PASS"
 
   cri-linux:
     runs-on: ubuntu-latest

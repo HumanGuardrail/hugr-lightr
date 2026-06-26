@@ -130,11 +130,10 @@ pub fn run(
     // engine-aware guard fires AFTER `engine_kind` is parsed below; native/vz keep
     // the honest exit-2 (native = no sandbox; vz caps live inside the guest, not
     // managed by the shim).
-    // WP-#92: `--init` is RECORDED but a pid1 reaper is staged (ns pid-namespace
-    // work), not yet enforced — say so honestly (no silent false claim), then run.
-    if rc.init {
-        eprintln!("lightr: note: --init is recorded but not yet enforced (pid1 reaper staged)");
-    }
+    // WP-#95: `--init` is now ENFORCED on the `ns` engine (a real PID-1 reaper inside
+    // the new pid namespace — see ExecSpec.init). The engine-aware honest note for
+    // OTHER engines (native/vz, where it stays a recorded-only carry-slot) fires
+    // AFTER `engine_kind` is parsed below.
 
     // WP-RUNFLAGS: parse `-v`/`--entrypoint` + honest-error the networking flags
     // (fail-closed: bad value / Phase-2 flag ⇒ exit 2).
@@ -175,6 +174,17 @@ pub fn run(
              inside the guest — refusing to run rather than give false security"
         );
         return 2;
+    }
+
+    // WP-#95: `--init` is ENFORCED on the `ns` engine (real PID-1 reaper). On any
+    // OTHER engine it is a recorded-only carry-slot (native is a host process with no
+    // pid namespace; vz reaps via its own guest PID 1) — say so honestly rather than
+    // imply a reaper that won't run.
+    if rc.init && engine_kind != EngineKind::Ns {
+        eprintln!(
+            "lightr: note: --init runs a real PID-1 reaper only on the rootless ns \
+             engine (--engine ns); here it is recorded only (no pid namespace to reap in)"
+        );
     }
 
     // WP-NET-ISO: parse `--net` + enforce `none` has a netns (fail-closed, exit 2).
@@ -426,6 +436,9 @@ pub fn run(
             // RUNTIME-ONLY; never part of the memo key.
             &rc.cap_drop,
             &rc.cap_add,
+            // WP-#95: `--init` reaches the ns engine (a real PID-1 reaper inside the
+            // new pid namespace). RUNTIME-ONLY; never part of the memo key.
+            rc.init,
         );
     }
 

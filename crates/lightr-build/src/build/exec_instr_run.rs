@@ -84,6 +84,7 @@ pub(in crate::build) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
         // behaviour — the build child keeps the full userns capability set).
         cap_drop: &[],
         cap_add: &[],
+        init: false,
     };
     let code = eng.run(&spec)?;
     if code != 0 {

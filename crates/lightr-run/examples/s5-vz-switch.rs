@@ -126,6 +126,7 @@ fn boot_vm(
         shm_size: None,
         cap_drop: &[],
         cap_add: &[],
+        init: false,
     };
     let code = engine
         .run(&spec)
