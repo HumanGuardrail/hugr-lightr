@@ -47,9 +47,12 @@ fn cfg(name: &str, command: Vec<&str>) -> ContainerConfig {
     }
 }
 
-/// Run a Ready sandbox and return its id. create_container is now gated on a
-/// Ready sandbox (WP-CRI-SANDBOX closed the contract gate), so every container
-/// test must first create the pod. On macOS there is no CNI → ip=None.
+/// Run a Ready **host_network** sandbox and return its id. create_container is
+/// gated on a Ready sandbox (WP-CRI-SANDBOX). host_network ⇒ no pinned netns, so
+/// these container/exec/stats/image-plane tests take the HOST-process path
+/// deterministically (they don't test isolation). Post-#99 a netns'd pod would
+/// fail-close on the non-hydratable `test-image`; host_network is the honest fit
+/// for plane tests and removes the prior CNI-presence environment-dependence.
 fn ready_sandbox(b: &LightrBackend) -> SandboxId {
     b.run_sandbox(SandboxConfig {
         name: "pod".into(),
@@ -60,7 +63,7 @@ fn ready_sandbox(b: &LightrBackend) -> SandboxId {
         annotations: BTreeMap::new(),
         log_directory: String::new(),
         hostname: String::new(),
-        host_network: false,
+        host_network: true,
         dns: None,
         port_mappings: Vec::new(),
     })
