@@ -75,6 +75,18 @@ jobs:
             echo "NS_DEV=FAIL (device-less /dev)"; exit 1
           fi
           if [ "$DEV_EXIT" = 0 ] && grep -q "DEV_OK" /tmp/dev.txt; then echo "NS_DEV=PASS"; else echo "NS_DEV=FAIL"; exit 1; fi  # gate for real
+      - name: Verify snapshot preserves unreadable dirs (#93)
+        run: |
+          set +e
+          BIN="$PWD/target/release/lightr"
+          # The alpine rootfs was extracted with `sudo tar` (root-owned /root, mode
+          # 700) and snapshotted as the NON-root runner — so read_dir(/root) is
+          # denied at scan time. Before #93 the empty-check's unwrap_or(false)
+          # treated that as non-empty and DROPPED /root (fail-open) → it vanished
+          # from the rootfs. After #93 the dir is recorded, so it survives hydrate.
+          "$BIN" run --engine ns --rootfs alpine -- /bin/busybox test -d /root
+          ROOTDIR_EXIT=$?; echo "rootdir_exit=$ROOTDIR_EXIT"
+          if [ "$ROOTDIR_EXIT" = 0 ]; then echo "NS_FIDELITY=PASS (/root survived snapshot)"; else echo "NS_FIDELITY=FAIL (/root dropped by snapshot)"; exit 1; fi  # gate for real
 
   cri-linux:
     runs-on: ubuntu-latest

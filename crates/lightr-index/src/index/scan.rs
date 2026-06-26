@@ -129,11 +129,19 @@ pub fn scan(root: &Path, index: &mut Index) -> Result<WalkReport> {
                 cached_digest: None,
             });
         } else if meta.is_dir() {
-            // Only record empty directories
-            let is_empty = std::fs::read_dir(&abs_path)
-                .map(|mut d| d.next().is_none())
-                .unwrap_or(false);
-            if is_empty {
+            // Record a directory entry when it is EMPTY (a non-empty dir is implied
+            // by its children — hydrate re-creates parents via create_dir_all) OR
+            // when we cannot read it. The old `unwrap_or(false)` treated an
+            // UNREADABLE dir (e.g. mode-700 `/root` scanned by a non-root process)
+            // as non-empty and SILENTLY DROPPED it (fail-open) — so the path
+            // vanished from the materialized rootfs. Recording it preserves the
+            // path; unreadable *children* still require snapshotting with read
+            // access (you cannot capture what you cannot read — a usage rule).
+            let record_dir = match std::fs::read_dir(&abs_path) {
+                Ok(mut d) => d.next().is_none(), // readable + empty → record the dir
+                Err(_) => true,                  // unreadable → record so the path survives
+            };
+            if record_dir {
                 candidates.push(WalkCandidate {
                     rel_path: rel,
                     abs_path,
