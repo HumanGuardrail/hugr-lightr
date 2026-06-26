@@ -414,6 +414,7 @@ mod ns_impl {
                 Ok(c) => c,
                 Err(_) => {
                     eprintln!("lightr-engine ns: bad rootfs path");
+                    signal_setup_failed(exec_ready_fd, "bad rootfs path"); // WP-#104
                     unsafe { libc::_exit(1) }
                 }
             };
@@ -435,6 +436,7 @@ mod ns_impl {
                     "lightr-engine ns: MS_PRIVATE on / failed: {}",
                     std::io::Error::last_os_error()
                 );
+                signal_setup_failed(exec_ready_fd, "MS_PRIVATE on / failed"); // WP-#104
                 unsafe { libc::_exit(1) };
             }
 
@@ -453,6 +455,7 @@ mod ns_impl {
                     "lightr-engine ns: bind-mount rootfs failed: {}",
                     std::io::Error::last_os_error()
                 );
+                signal_setup_failed(exec_ready_fd, "bind-mount rootfs failed"); // WP-#104
                 unsafe { libc::_exit(1) };
             }
 
@@ -466,6 +469,7 @@ mod ns_impl {
             let put_old = rootfs.join(".put_old");
             if std::fs::create_dir_all(&put_old).is_err() {
                 eprintln!("lightr-engine ns: cannot create .put_old");
+                signal_setup_failed(exec_ready_fd, "cannot create .put_old"); // WP-#104
                 unsafe { libc::_exit(1) };
             }
 
@@ -473,6 +477,7 @@ mod ns_impl {
                 Ok(c) => c,
                 Err(_) => {
                     eprintln!("lightr-engine ns: bad put_old path");
+                    signal_setup_failed(exec_ready_fd, "bad put_old path"); // WP-#104
                     unsafe { libc::_exit(1) }
                 }
             };
@@ -485,12 +490,14 @@ mod ns_impl {
                     "lightr-engine ns: pivot_root failed: {}",
                     std::io::Error::last_os_error()
                 );
+                signal_setup_failed(exec_ready_fd, "pivot_root failed"); // WP-#104
                 unsafe { libc::_exit(1) };
             }
 
             // chdir to new root
             if unsafe { libc::chdir(c"/".as_ptr()) } != 0 {
                 eprintln!("lightr-engine ns: chdir / failed");
+                signal_setup_failed(exec_ready_fd, "chdir / failed"); // WP-#104
                 unsafe { libc::_exit(1) };
             }
 
@@ -516,6 +523,7 @@ mod ns_impl {
             let shm_bytes = shm_size.unwrap_or(64 * 1024 * 1024);
             if let Err(e) = setup_shm(shm_bytes, shm_size.is_some()) {
                 eprintln!("lightr-engine ns: /dev/shm mount failed: {e}");
+                signal_setup_failed(exec_ready_fd, "/dev/shm mount failed"); // WP-#104
                 unsafe { libc::_exit(1) };
             }
 
@@ -535,6 +543,7 @@ mod ns_impl {
             if read_only {
                 if let Err(e) = remount_root_readonly() {
                     eprintln!("lightr-engine ns: read-only remount failed: {e}");
+                    signal_setup_failed(exec_ready_fd, "read-only remount failed"); // WP-#104
                     unsafe { libc::_exit(1) };
                 }
             }
@@ -559,13 +568,14 @@ mod ns_impl {
                         "lightr-engine ns: init workload fork failed: {}",
                         std::io::Error::last_os_error()
                     );
+                    signal_setup_failed(exec_ready_fd, "init workload fork failed"); // WP-#104
                     unsafe { libc::_exit(1) };
                 }
                 if child == 0 {
                     // ── great-grandchild: the workload (PID 2) ──
                     // Caps applied LAST, in the execing process (fail-closed: a capset
                     // failure `_exit`s rather than exec with the WRONG set).
-                    apply_caps_if_any(desired_caps_vec.as_deref());
+                    apply_caps_if_any(desired_caps_vec.as_deref(), exec_ready_fd);
                     // WP-#102: arm the exec-success pipe (CLOEXEC) right before execv.
                     arm_exec_ready(exec_ready_fd);
                     unsafe { libc::execv(prog_c.as_ptr(), argv_ptrs.as_ptr()) };
@@ -587,7 +597,7 @@ mod ns_impl {
             } else {
                 // No `--init`: the workload itself is PID 1. Caps LAST, in the execing
                 // process (fail-closed via `_exit`).
-                apply_caps_if_any(desired_caps_vec.as_deref());
+                apply_caps_if_any(desired_caps_vec.as_deref(), exec_ready_fd);
                 // WP-#102: arm the exec-success pipe (CLOEXEC) right before execv — a
                 // successful execv auto-closes it ⇒ the backend's reader sees EOF.
                 arm_exec_ready(exec_ready_fd);
@@ -626,10 +636,17 @@ mod ns_impl {
     /// userns set (no-op). Called post-fork/pre-exec, so a capset failure must
     /// `_exit` (fail-closed) rather than return — exec'ing with the WRONG capability
     /// set would be false security (worse than an error).
-    fn apply_caps_if_any(desired: Option<&[u32]>) {
+    ///
+    /// WP-#104: caps are the LAST pre-execv step, so a capset failure here must ALSO
+    /// signal the exec-readiness pipe (`exec_ready_fd`) with bytes before `_exit(1)`
+    /// — otherwise the kernel-closed fd reads as EOF ⇒ a false `Running`. The fd is
+    /// threaded in from the (only) two call sites, both in the PID-1 branch. `None`
+    /// (non-CRI, or no pipe) ⇒ no-op.
+    fn apply_caps_if_any(desired: Option<&[u32]>, exec_ready_fd: Option<libc::c_int>) {
         if let Some(d) = desired {
             if let Err(e) = apply_caps(d) {
                 eprintln!("lightr-engine ns: capability enforcement failed: {e}");
+                signal_setup_failed(exec_ready_fd, "capability enforcement failed"); // WP-#104
                 unsafe { libc::_exit(1) };
             }
         }
@@ -656,6 +673,25 @@ mod ns_impl {
             let msg = format!("exec failed: {err}");
             unsafe {
                 libc::write(fd, msg.as_ptr() as *const libc::c_void, msg.len());
+            }
+        }
+    }
+
+    /// WP-#104: signal a PID-1 SETUP failure (any pre-execv step: rootfs CString,
+    /// MS_PRIVATE, bind-mount, put_old, pivot_root, chdir, /dev/shm, RO remount,
+    /// caps, init-fork) down the exec-readiness pipe by WRITING the message bytes —
+    /// the SAME bytes-mechanism `signal_exec_failed` uses, so the backend's reader
+    /// sees BYTES ⇒ start failed (never EOF ⇒ a false `Running` that the reaper then
+    /// flips to `Exited`). Mirrors `signal_exec_failed` but takes a `&str` (setup
+    /// failures carry a short context string, not an `io::Error`). Called right
+    /// BEFORE the corresponding `_exit(1)`. No-op when no pipe is wired (`None` ⇒
+    /// non-CRI callers are byte-identical to today). Best-effort (raw libc;
+    /// post-fork). The ONLY no-bytes pipe close stays the SUCCESSFUL execv (CLOEXEC).
+    fn signal_setup_failed(fd: Option<libc::c_int>, msg: &str) {
+        if let Some(fd) = fd {
+            let line = format!("setup failed: {msg}");
+            unsafe {
+                libc::write(fd, line.as_ptr() as *const libc::c_void, line.len());
             }
         }
     }
@@ -943,6 +979,46 @@ mod ns_impl {
                         std::ptr::null(),
                     );
                 }
+            }
+        }
+        // #105: give the container a PRIVATE devpts at /dev/pts (Docker mounts one).
+        // The /dev tmpfs above is writable, so mkdir the mountpoint, then mount a
+        // `devpts` with `newinstance` — a private pts namespace, isolated from the
+        // host's (and any other container's) ptys. `ptmxmode=0666` makes the ptmx
+        // node world-rw so unprivileged programs can allocate a pty WITHOUT relying on
+        // the `gid=5` (tty group) option: that gid does NOT map inside the container's
+        // user namespace (rootless/userns), so passing it would EINVAL — we omit gid
+        // by design and rely on ptmxmode. MS_NOSUID|MS_NOEXEC matches Docker/runc
+        // hardening. Mountable here because PID 1 holds CAP_SYS_ADMIN in the new
+        // user+mount ns. Entirely best-effort (eprintln on failure): #103 `exec -it`
+        // already works via isatty WITHOUT a devpts, so a devpts that won't mount must
+        // NOT kill the container — it only adds the /dev/pts NAME surface.
+        let _ = std::fs::create_dir_all("/dev/pts");
+        if let (Ok(src), Ok(tgt), Ok(fstype), Ok(opts)) = (
+            CString::new("devpts"),
+            CString::new("/dev/pts"),
+            CString::new("devpts"),
+            CString::new("newinstance,ptmxmode=0666"),
+        ) {
+            let r = unsafe {
+                libc::mount(
+                    src.as_ptr(),
+                    tgt.as_ptr(),
+                    fstype.as_ptr(),
+                    libc::MS_NOSUID | libc::MS_NOEXEC,
+                    opts.as_ptr() as *const libc::c_void,
+                )
+            };
+            if r != 0 {
+                eprintln!(
+                    "lightr-engine ns: /dev/pts devpts mount failed (continuing): {}",
+                    std::io::Error::last_os_error()
+                );
+            } else {
+                // #105: /dev/ptmx → pts/ptmx (Docker's layout). With `newinstance` the
+                // multiplexor lives at /dev/pts/ptmx; a relative symlink is the simplest
+                // rootless-safe way to expose it at the conventional /dev/ptmx path.
+                let _ = std::os::unix::fs::symlink("pts/ptmx", "/dev/ptmx");
             }
         }
         // Convenience symlinks programs expect (harmless if /proc isn't mounted —
