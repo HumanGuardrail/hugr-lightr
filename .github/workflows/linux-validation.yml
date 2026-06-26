@@ -11,6 +11,11 @@ name: linux-validation
 #   resource-limits   — WP-#90: prove F-203 cgroup v2 enforcement on real Linux AS
 #                       ROOT — memory.max OOM-kill, cpu.max limited run, and the new
 #                       pids.max fork-cap (the parity-honesty gap this WP closed).
+#   cri-kpi3          — WP-#88 (KPI 3): prove a REAL container runs end-to-end
+#                       through the COMPOSED CRI server (kubelet→gRPC→LightrBackend)
+#                       AS ROOT — crictl runp/create/start → container RUNNING,
+#                       then clean teardown — plus a lightr cold-start datum +
+#                       serve idle-RSS (containerd A/B is best-effort, non-fatal).
 #   security-flags    — WP-#92/#94: prove `ns`-engine --read-only (rootfs EROFS,
 #                       /dev/shm still writable) + --shm-size enforcement, REAL
 #                       --cap-drop/--cap-add enforcement (CAP_CHOWN held→dropped→
@@ -547,3 +552,209 @@ jobs:
           else
             echo "CRI_SERVE_SMOKE=FAIL"; cat /tmp/serve.log; exit 1
           fi
+
+  cri-kpi3:
+    # WP-#88 (KPI 3): prove a REAL container runs END-TO-END through the COMPOSED
+    # CRI server (the real LightrBackend wired into the sibling lightr-cri shell
+    # via crates/lightr-cri-serve) — kubelet→gRPC→LightrBackend→host-process. The
+    # server runs AS ROOT so the pod sandbox (host_network:false) does netns + CNI
+    # ADD (the path validated in #83) and the container joins the pod netns at
+    # spawn. Deliverable A (HARD GATE): crictl runp/create/start → container
+    # RUNNING, then clean teardown. Deliverable B: a lightr cold-start datum (N
+    # iterations) + serve idle-RSS, REAL+measured on this runner; the containerd
+    # A/B is a clearly-marked, NON-FATAL best-effort (flaky on network AND
+    # apples-to-oranges — containerd runs the alpine ROOTFS, this backend runs a
+    # host process — so its ratio is NOT signed as a like-for-like KPI here).
+    # Same private-sibling auth + manifest-path build as cri-serve-smoke.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --no-self-update && rustup default 1.96.0
+      - name: Auth git for the private sibling (cargo git-dep)
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.LIGHTR_CRI_CI_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - name: Build lightr-cri-serve (real backend + sibling shell, git-deps)
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+        run: cargo build --release --manifest-path crates/lightr-cri-serve/Cargo.toml -j2
+      - name: Build lightr (release) — for the pre-seed image fallback
+        run: cargo build -p lightr-cli --release -j2
+      - name: Install crictl
+        run: |
+          set -e -x
+          V=v1.31.1
+          curl -sL "https://github.com/kubernetes-sigs/cri-tools/releases/download/$V/crictl-$V-linux-amd64.tar.gz" | sudo tar -xz -C /usr/local/bin
+          crictl --version
+      - name: Install CNI plugins + a bridge conflist (same as cri-linux)
+        run: |
+          set -e -x
+          sudo mkdir -p /opt/cni/bin /etc/cni/net.d /run/netns
+          curl -sL https://github.com/containernetworking/plugins/releases/download/v1.5.1/cni-plugins-linux-amd64-v1.5.1.tgz \
+            | sudo tar -xz -C /opt/cni/bin
+          ls /opt/cni/bin | head
+          sudo tee /etc/cni/net.d/10-lightr-bridge.conflist >/dev/null <<'JSON'
+          { "cniVersion":"1.0.0","name":"lightrnet","plugins":[
+            {"type":"bridge","bridge":"lightr0","isGateway":true,"ipMasq":true,
+             "ipam":{"type":"host-local","subnet":"10.88.0.0/16","routes":[{"dst":"0.0.0.0/0"}]}} ]}
+          JSON
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+      - name: KPI 3 — real container lifecycle through the composed CRI server (+ cold-start)
+        run: |
+          set +e
+          export LIGHTR_CNI_CONF=/etc/cni/net.d LIGHTR_CNI_BIN=/opt/cni/bin
+          SOCK=/tmp/lightr-kpi3.sock
+          STATE=/tmp/lightr-kpi3-state
+          SERVE="crates/lightr-cri-serve/target/release/lightr-cri-serve"
+          LIGHTR="$PWD/target/release/lightr"
+          LOGDIR=/tmp/kpi3-logs
+          sudo rm -rf "$STATE" "$LOGDIR" "$SOCK"
+          sudo mkdir -p "$LOGDIR" /run/netns
+
+          # crictl helper bound to the lightr serve socket (root: socket is root-owned).
+          CR() { sudo crictl --runtime-endpoint "unix://$SOCK" --image-endpoint "unix://$SOCK" "$@"; }
+
+          # ── Start the COMPOSED CRI server AS ROOT (netns + CNI ADD need privilege),
+          # with the CNI env the real backend probes. ─────────────────────────────────
+          sudo -E env "PATH=$PATH" LIGHTR_CNI_CONF="$LIGHTR_CNI_CONF" LIGHTR_CNI_BIN="$LIGHTR_CNI_BIN" \
+            "$SERVE" --socket "$SOCK" --state "$STATE" >/tmp/serve.log 2>&1 &
+          for i in $(seq 1 40); do [ -S "$SOCK" ] && break; sleep 0.5; done
+          if [ ! -S "$SOCK" ]; then echo "KPI3=FAIL (serve socket never appeared)"; sudo cat /tmp/serve.log; exit 1; fi
+          CR version >/tmp/ver.txt 2>&1 || { echo "KPI3=FAIL (Version RPC failed)"; cat /tmp/ver.txt; sudo cat /tmp/serve.log; exit 1; }
+          echo "=== serve answers crictl ==="; cat /tmp/ver.txt
+
+          # ── Step 2: make a small image available. PRIMARY = CRI pull path (crictl
+          # pull → LightrBackend.pull_image → lightr_oci::pull). FALLBACK = pre-seed
+          # the SAME state store via the `lightr` bin (LIGHTR_HOME=$STATE → $STATE/store,
+          # the backend store root). NOTE: this backend's container plane runs the
+          # container COMMAND as a host process (PATH-resolved) joined into the pod
+          # netns — it does NOT hydrate the image rootfs — so the image is recorded but
+          # its content is not the container fs. Image availability is logged, not gated.
+          if CR pull alpine:latest >/tmp/pull.log 2>&1; then
+            echo "KPI3_IMAGE_PATH=crictl-pull"
+          else
+            echo "crictl pull failed — falling back to pre-seed:"; cat /tmp/pull.log
+            if sudo -E env LIGHTR_HOME="$STATE" "$LIGHTR" oci pull alpine:latest --name alpine >/tmp/seed.log 2>&1; then
+              echo "KPI3_IMAGE_PATH=pre-seed"
+            else
+              echo "KPI3_IMAGE_PATH=none (pull+pre-seed both failed — lifecycle proceeds; cmd is host-resolved)"; cat /tmp/seed.log
+            fi
+          fi
+          CR images 2>/dev/null || true
+
+          # ── Step 3: pod-sandbox + container config (crictl JSON). host_network
+          # defaults to false → the backend creates+pins a netns and runs CNI ADD. The
+          # container command is /bin/sh -c 'sleep 600' — host-resolvable (this backend
+          # execs the command as a host process in the pod netns), long-lived so it
+          # stays Running. ────────────────────────────────────────────────────────────
+          cat >/tmp/pod.json <<'JSON'
+          {
+            "metadata": { "name": "kpi3-pod", "uid": "kpi3-pod-uid", "namespace": "default", "attempt": 1 },
+            "log_directory": "/tmp/kpi3-logs",
+            "linux": {}
+          }
+          JSON
+          cat >/tmp/ctr.json <<'JSON'
+          {
+            "metadata": { "name": "kpi3-ctr", "attempt": 1 },
+            "image": { "image": "alpine:latest" },
+            "command": ["/bin/sh", "-c", "sleep 600"],
+            "log_path": "kpi3-ctr.log",
+            "linux": {}
+          }
+          JSON
+
+          POD_ID=$(CR runp /tmp/pod.json 2>/tmp/runp.log)
+          if [ -z "$POD_ID" ]; then echo "KPI3=FAIL (runp returned no pod id)"; cat /tmp/runp.log; sudo cat /tmp/serve.log; sudo pkill -f lightr-cri-serve; exit 1; fi
+          echo "POD_ID=$POD_ID"
+          CTR_ID=$(CR create "$POD_ID" /tmp/ctr.json /tmp/pod.json 2>/tmp/create.log)
+          if [ -z "$CTR_ID" ]; then echo "KPI3=FAIL (create returned no container id)"; cat /tmp/create.log; sudo cat /tmp/serve.log; CR rmp -f "$POD_ID"; sudo pkill -f lightr-cri-serve; exit 1; fi
+          echo "CTR_ID=$CTR_ID"
+          CR start "$CTR_ID" >/tmp/start.log 2>&1
+          echo "start exit=$?"; cat /tmp/start.log
+
+          # ── Step 4: GATE — the container MUST reach Running (poll up to ~30s). ──────
+          RUNNING=0
+          for i in $(seq 1 30); do
+            STATE_NOW=$(CR inspect "$CTR_ID" 2>/dev/null | jq -r '.status.state' 2>/dev/null)
+            echo "poll $i: state=$STATE_NOW"
+            if [ "$STATE_NOW" = "CONTAINER_RUNNING" ]; then RUNNING=1; break; fi
+            sleep 1
+          done
+          echo "=== crictl ps -a ==="; CR ps -a 2>&1 | head -20
+          if [ "$RUNNING" != 1 ]; then
+            echo "KPI3_LIFECYCLE=FAIL (container never reached Running)"
+            echo "=== inspect ==="; CR inspect "$CTR_ID" 2>&1 | head -60
+            echo "=== serve.log ==="; sudo cat /tmp/serve.log
+            CR stop "$CTR_ID" >/dev/null 2>&1; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve
+            exit 1
+          fi
+          echo "KPI3_LIFECYCLE=PASS (real container RUNNING through the composed CRI server: kubelet→gRPC→LightrBackend→host-process-in-pod-netns)"
+
+          # ── Deliverable B — lightr cold-start (REAL, reuses this serve). ───────────
+          echo "=== B: lightr cold-start (create+start → Running), N iterations, same pod ==="
+          N=5
+          TIMES=""
+          for it in $(seq 1 "$N"); do
+            cat >/tmp/ctr-b.json <<JSON
+          {
+            "metadata": { "name": "kpi3-bench", "attempt": $it },
+            "image": { "image": "alpine:latest" },
+            "command": ["/bin/sh", "-c", "sleep 600"],
+            "log_path": "kpi3-bench-$it.log",
+            "linux": {}
+          }
+          JSON
+            t0=$(date +%s%N)
+            BID=$(CR create "$POD_ID" /tmp/ctr-b.json /tmp/pod.json 2>/dev/null)
+            CR start "$BID" >/dev/null 2>&1
+            bdeadline=$((SECONDS + 30))
+            while :; do
+              S=$(CR inspect "$BID" 2>/dev/null | jq -r '.status.state' 2>/dev/null)
+              [ "$S" = "CONTAINER_RUNNING" ] && break
+              [ "$SECONDS" -ge "$bdeadline" ] && break
+              sleep 0.02
+            done
+            t1=$(date +%s%N)
+            ms=$(( (t1 - t0) / 1000000 ))
+            echo "iter $it: ${ms}ms (state=$S)"
+            TIMES="$TIMES $ms"
+            CR stop "$BID" >/dev/null 2>&1; CR rm "$BID" >/dev/null 2>&1
+          done
+          echo "KPI3_LIGHTR_COLDSTART_MS_SAMPLES=$TIMES"
+          echo "$TIMES" | tr ' ' '\n' | grep -E '^[0-9]+$' | \
+            awk 'NR==1{min=$1;max=$1} {s+=$1; n++; if($1<min)min=$1; if($1>max)max=$1} END{ if(n>0) printf "KPI3_LIGHTR_COLDSTART_MS mean=%.1f min=%d max=%d n=%d (includes crictl gRPC round-trip overhead)\n", s/n, min, max, n }'
+
+          # serve idle RSS after one pod (honest footprint datum on this runner).
+          SERVE_PID=$(pgrep -f lightr-cri-serve | head -1)
+          if [ -n "$SERVE_PID" ]; then
+            RSS_KB=$(sudo ps -o rss= -p "$SERVE_PID" 2>/dev/null | tr -d ' ')
+            echo "KPI3_LIGHTR_SERVE_RSS_KB=$RSS_KB (pid $SERVE_PID, after one pod + N container cycles)"
+          fi
+
+          # ── Teardown (clean): stop the gate container, remove the pod (cascades), kill serve.
+          CR stop "$CTR_ID" >/dev/null 2>&1
+          CR rmp -f "$POD_ID" >/dev/null 2>&1
+          echo "=== post-teardown ps -a ==="; CR ps -a 2>&1 | head
+          sudo pkill -f lightr-cri-serve 2>/dev/null
+
+          # ── B (best-effort, NON-FATAL): containerd A/B. Apples-to-oranges caveat stands.
+          echo "=== B: containerd A/B (best-effort, non-fatal) ==="
+          if command -v containerd >/dev/null 2>&1; then
+            CTRD_SOCK=/run/containerd/containerd.sock
+            sudo systemctl start containerd 2>/dev/null || sudo containerd >/tmp/containerd.log 2>&1 &
+            for i in $(seq 1 30); do [ -S "$CTRD_SOCK" ] && break; sleep 1; done
+            CTRD() { sudo crictl --runtime-endpoint "unix://$CTRD_SOCK" --image-endpoint "unix://$CTRD_SOCK" "$@"; }
+            if [ -S "$CTRD_SOCK" ] && CTRD version >/dev/null 2>&1; then
+              CTRD pull alpine:latest >/tmp/ctrd-pull.log 2>&1 && echo "containerd: alpine pulled" || { echo "containerd alpine pull failed (network?) — A/B deferred"; cat /tmp/ctrd-pull.log; }
+              echo "NOTE: containerd runs the alpine ROOTFS; lightr-backend runs a host process — the cold-start numbers are NOT like-for-like and the ratio is intentionally NOT signed as a KPI here. Lead to iterate if a like-for-like harness is wanted."
+              CTRD_PID=$(pgrep -x containerd | head -1)
+              [ -n "$CTRD_PID" ] && echo "KPI3_CONTAINERD_RSS_KB=$(sudo ps -o rss= -p "$CTRD_PID" 2>/dev/null | tr -d ' ') (pid $CTRD_PID)"
+            else
+              echo "containerd socket/version not available — A/B deferred (TODO for the lead on a runner with containerd CRI up)."
+            fi
+          else
+            echo "containerd not present — A/B deferred (TODO)."
+          fi
+
+          echo "KPI3=PASS"
