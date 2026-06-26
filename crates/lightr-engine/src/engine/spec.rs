@@ -169,4 +169,21 @@ pub struct ExecSpec<'a> {
     /// name so `stop` can `cgroup.kill` the whole subtree (PID 1 + descendants).
     /// Other engines ignore it. RUNTIME-ONLY — NOT part of any memo key. Default None.
     pub cgroup_name: Option<&'a str>,
+
+    /// WP-#102: the WRITE end of an exec-readiness pipe (the runc/youki CLOEXEC
+    /// exec-success pipe). When `Some(fd)`, ONLY the `ns` engine honors it: it is
+    /// threaded down to the container's PID 1, which sets it `FD_CLOEXEC` right
+    /// before `execv` (a SUCCESSFUL exec then makes the kernel auto-close it ⇒ the
+    /// reader sees EOF ⇒ the workload is actually running) and, on an `execv`
+    /// FAILURE, writes the error bytes first (the reader sees BYTES ⇒ start failed).
+    /// Every INTERMEDIATE holder of this fd (the `run()` shim parent + the setup
+    /// process) MUST close its copy right after forking the next level down, so
+    /// only PID 1 holds it — otherwise EOF never fires until the container exits.
+    /// The CRI backend reads the read end (with a timeout) and persists `Running`
+    /// only AFTER EOF, so a container is `Running` only once its workload has
+    /// `execv`'d. native/vz/wsl IGNORE this fd. RUNTIME-ONLY — NEVER a memo key
+    /// (like `cgroup_name`/`join_netns`). Carried as a cross-platform `c_int` (a
+    /// `RawFd` on unix) — the same fd-carrier technique as `net_fd`, so the field
+    /// is present on every target and the windows build stays green. Default None.
+    pub exec_ready_fd: Option<std::os::raw::c_int>,
 }

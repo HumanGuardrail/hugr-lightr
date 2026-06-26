@@ -42,6 +42,12 @@ impl LightrBackend {
     /// a Running record with a dead pid recovers as Exited/-1
     /// `lost-exit-reaped-elsewhere`; a Running record with pid 0 (crash between
     /// spawn and pid-persist) recovers as Exited/-1 `lost-start-window`.
+    ///
+    /// WP-#102: the NS path no longer persists `Running` pre-spawn — it persists
+    /// `Created` and flips to `Running` only AFTER the workload `execv`'s. So a crash
+    /// mid-ns-start now leaves `Created` (no false `Running` to reconcile — strictly
+    /// better). The pid-0 `lost-start-window` branch below now applies only to the
+    /// HOST path (which still persists `Running` pre-spawn) and to legacy records.
     pub(crate) fn load_container_cache(&self) -> Cache {
         let dir = self.containers_dir();
         let mut cache = Cache::default();
@@ -215,6 +221,10 @@ impl LightrBackend {
             init: false,
             cap_add,
             cap_drop,
+            // WP-#102: the exec-readiness pipe write end is created+injected by
+            // `start_container_impl` right before spawn (so the fd's lifetime is the
+            // spawn's). The plan itself carries None.
+            exec_ready_fd: None,
         })
     }
 
@@ -311,7 +321,7 @@ impl LightrBackend {
         // unisolated host process (false isolation the kubelet can't see). Only
         // host_network / no-CNI pods (no netns) — and non-linux — take the host path.
         #[cfg(target_os = "linux")]
-        let ns_descriptor: Option<crate::ns_run::RunDescriptor> = {
+        let mut ns_descriptor: Option<crate::ns_run::RunDescriptor> = {
             let pod_has_netns = self
                 .cache()
                 .sandboxes
@@ -326,6 +336,37 @@ impl LightrBackend {
         };
         #[cfg(not(target_os = "linux"))]
         let ns_descriptor: Option<crate::ns_run::RunDescriptor> = None;
+
+        // WP-#102 (NS path only): create the exec-readiness pipe BEFORE building/
+        // spawning `cmd`. The WRITE end (`wr`) travels — inherited (NOT O_CLOEXEC)
+        // across the shim re-exec and threaded by the ns engine down to the
+        // container's PID 1, which sets it CLOEXEC right before `execv` (success ⇒
+        // EOF here) or writes error bytes on `execv` failure. The READ end (`rd`) is
+        // set FD_CLOEXEC so the child process tree never inherits it. We block on
+        // `rd` (with a timeout) AFTER spawn and persist `Running` only on EOF — so a
+        // container is `Running` only once its workload has actually `execv`'d (audit
+        // finding D; KPI-3 cold-start is now execv-milestone-aligned). The host path
+        // is untouched (no pipe, persists Running pre-spawn as before).
+        #[cfg(target_os = "linux")]
+        let mut readiness_rd: Option<std::os::unix::io::RawFd> = None;
+        #[cfg(target_os = "linux")]
+        if let Some(desc) = ns_descriptor.as_mut() {
+            let mut fds = [0 as libc::c_int; 2];
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+                return Err(BackendError::Internal(format!(
+                    "exec-readiness pipe for container {}: {}",
+                    id.0,
+                    std::io::Error::last_os_error()
+                )));
+            }
+            let (rd, wr) = (fds[0], fds[1]);
+            // rd CLOEXEC: the shim child tree must NOT hold the read end (only the
+            // backend reads it). wr is deliberately LEFT non-CLOEXEC so it survives
+            // the shim's re-exec down to PID 1 (pipe() fds are non-CLOEXEC by default).
+            unsafe { libc::fcntl(rd, libc::F_SETFD, libc::FD_CLOEXEC) };
+            desc.exec_ready_fd = Some(wr);
+            readiness_rd = Some(rd);
+        }
 
         let mut cmd = if ns_descriptor.is_some() {
             // ── NS path: re-exec `<current_exe> __ns-run`; descriptor on stdin. ──
@@ -367,7 +408,14 @@ impl LightrBackend {
             c
         };
 
-        // Persist start-intent (Running, pid 0) BEFORE spawning (crash-only).
+        // Persist start-intent BEFORE spawning (crash-only). WP-#102: the NS path
+        // persists an HONEST `Created` (NOT Running) intent — `Running` is written
+        // only AFTER the workload `execv`'s (the readiness wait below). A crash
+        // mid-ns-start now leaves `Created`, never a false `Running` (strictly better
+        // than the pre-#102 `lost-start-window` recovery, which downgraded a false
+        // `Running` to Exited/-1). The HOST path keeps persisting `Running` pre-spawn
+        // exactly as before (its workload is the spawned process — no exec milestone
+        // to await).
         let started_at = now_nanos();
         {
             let mut cache = self.cache();
@@ -375,7 +423,11 @@ impl LightrBackend {
                 .containers
                 .get_mut(&id.0)
                 .ok_or_else(|| BackendError::NotFound(format!("container {}", id.0)))?;
-            entry.state = ContainerState::Running;
+            entry.state = if ns_descriptor.is_some() {
+                ContainerState::Created
+            } else {
+                ContainerState::Running
+            };
             entry.started_at_nanos = started_at;
             entry.pid = 0;
             entry.reason = "starting".to_string();
@@ -407,6 +459,20 @@ impl LightrBackend {
 
         let child_pid = child.id();
 
+        // WP-#102 (NS path): the shim has been forked with the pipe WRITE end
+        // inherited; CLOSE the backend's own copy NOW, immediately after spawn. If
+        // the backend kept it open, the read end would never see EOF (the backend
+        // itself would be a lingering writer) — so we would block until the container
+        // exits instead of until its workload `execv`'s (THE #1 risk). The descriptor
+        // still carries the fd NUMBER (sent over stdin below) — the shim's INHERITED
+        // copy is what reaches PID 1, unaffected by this close.
+        #[cfg(target_os = "linux")]
+        if let Some(desc) = &ns_descriptor {
+            if let Some(wr) = desc.exec_ready_fd {
+                unsafe { libc::close(wr) };
+            }
+        }
+
         // WP-#99 (NS path): hand the `RunDescriptor` to the `__ns-run` shim over
         // its stdin, then CLOSE stdin (drop) so the shim's `read_to_end` returns
         // and it proceeds to run the ns engine. Done BEFORE `register_io_and_tee`
@@ -432,16 +498,36 @@ impl LightrBackend {
         // reader fans raw bytes to attachers, no second reader racing the log.
         self.register_io_and_tee(id, &mut child, &log_shared);
 
-        // Persist the real pid (crash-only). For the NS path also persist the
-        // engine marker + the cgroup leaf so `stop` knows to `cgroup.kill` (the
-        // shim pid alone is NOT the in-pidns PID 1; killing it would orphan the
-        // container).
+        // WP-#102 READINESS WAIT (NS path only): block on the read end until the
+        // container's PID 1 `execv`'s. `register_io_and_tee` ran FIRST so the engine's
+        // execv-failure eprintln (and any container output) lands in the CRI log. EOF
+        // ⇒ exec SUCCEEDED ⇒ fall through to persist `Running`. Bytes/timeout ⇒ the
+        // helper has already persisted `Exited`, reaped the shim, and (on timeout)
+        // killed the cgroup; it returns `Err` and we fail the start (fail-closed —
+        // never a false `Running`). The HOST path has no pipe and skips this entirely.
+        #[cfg(target_os = "linux")]
+        if let Some(rd) = readiness_rd {
+            let cgroup_name = ns_descriptor
+                .as_ref()
+                .map(|d| d.cgroup_name.clone())
+                .unwrap_or_default();
+            self.wait_exec_ready(id, &mut child, rd, &cgroup_name)?;
+        }
+
+        // Persist the real pid (crash-only) + flip to `Running`. WP-#102: for the NS
+        // path this is the FIRST `Running` write (the pre-spawn intent was `Created`),
+        // reached only after the readiness wait above confirmed the workload `execv`'d.
+        // For the HOST path the state is already `Running` (pre-spawn) — setting it
+        // again is idempotent. For the NS path also persist the engine marker + the
+        // cgroup leaf so `stop` knows to `cgroup.kill` (the shim pid alone is NOT the
+        // in-pidns PID 1; killing it would orphan the container).
         {
             let mut cache = self.cache();
             let entry = cache
                 .containers
                 .get_mut(&id.0)
                 .ok_or_else(|| BackendError::NotFound(format!("container {}", id.0)))?;
+            entry.state = ContainerState::Running;
             entry.pid = child_pid;
             entry.reason = String::new();
             if let Some(desc) = &ns_descriptor {
@@ -483,6 +569,119 @@ impl LightrBackend {
         });
 
         Ok(())
+    }
+
+    // ── WP-#102: exec-readiness wait for the NS path (linux only) ─────────────
+
+    /// Block on the exec-readiness pipe READ end `rd` until the container's PID 1
+    /// `execv`'s, distinguishing three outcomes:
+    ///   • EOF (`read` returns 0) ⇒ a SUCCESSFUL `execv` auto-closed the CLOEXEC
+    ///     write end ⇒ the workload is running ⇒ `Ok(())` (caller persists `Running`).
+    ///   • BYTES (`read` returns N) ⇒ the ns engine wrote an `execv`-failure message ⇒
+    ///     reap the shim, persist `Exited`/exec-failed (message = the bytes), `Err`.
+    ///   • TIMEOUT ⇒ `child.kill()` + best-effort `cgroup.kill` on the leaf, reap,
+    ///     persist `Exited`/start-timeout, `Err`.
+    /// Deadline = `LIGHTR_CRI_START_TIMEOUT_MS` (default 30000ms). `rd` is always
+    /// closed before returning. Fail-closed: any non-EOF outcome fails the start so a
+    /// container is NEVER reported `Running` unless its workload actually `execv`'d.
+    #[cfg(target_os = "linux")]
+    fn wait_exec_ready(
+        &self,
+        id: &ContainerId,
+        child: &mut std::process::Child,
+        rd: std::os::unix::io::RawFd,
+        cgroup_name: &str,
+    ) -> Result<()> {
+        let timeout_ms: i64 = std::env::var("LIGHTR_CRI_START_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(30_000);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+
+        // poll(rd, POLLIN) to the deadline, retrying EINTR with the remaining budget.
+        let readable = loop {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break false; // timed out
+            }
+            let remaining_ms =
+                (deadline - now).as_millis().min(i32::MAX as u128) as libc::c_int;
+            let mut pfd = libc::pollfd {
+                fd: rd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let n = unsafe { libc::poll(&mut pfd, 1, remaining_ms) };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.raw_os_error() == Some(libc::EINTR) {
+                    continue; // interrupted — retry with the (shrunk) remaining budget
+                }
+                break false; // genuine poll error → handle as timeout (fail-closed)
+            }
+            if n == 0 {
+                continue; // slice elapsed; the deadline check above ends the loop
+            }
+            break true; // POLLIN/POLLHUP/POLLERR — go read to classify
+        };
+
+        if readable {
+            let mut buf = [0u8; 256];
+            let n =
+                unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            unsafe { libc::close(rd) };
+            if n == 0 {
+                return Ok(()); // EOF ⇒ execv SUCCEEDED
+            }
+            let message = if n > 0 {
+                String::from_utf8_lossy(&buf[..n as usize]).into_owned()
+            } else {
+                format!(
+                    "read exec-readiness pipe: {}",
+                    std::io::Error::last_os_error()
+                )
+            };
+            let _ = child.wait(); // reap the shim
+            self.persist_exec_failed(id, 127, "exec-failed", &message);
+            return Err(BackendError::Internal(format!(
+                "container {} failed to start (exec failed): {message}",
+                id.0
+            )));
+        }
+
+        // Timeout / poll error: tear the whole subtree down and record the failure.
+        unsafe { libc::close(rd) };
+        let _ = child.kill();
+        if !cgroup_name.is_empty() {
+            let leaf = std::path::Path::new("/sys/fs/cgroup").join(cgroup_name);
+            Self::cgroup_force_kill(&leaf, &leaf.join("cgroup.kill"));
+        }
+        let _ = child.wait();
+        let message = format!("container did not signal exec readiness within {timeout_ms}ms");
+        self.persist_exec_failed(id, -1, "start-timeout", &message);
+        Err(BackendError::Internal(format!(
+            "container {} start timed out after {timeout_ms}ms",
+            id.0
+        )))
+    }
+
+    /// WP-#102: record a start-time terminal failure (exec-failed / start-timeout)
+    /// onto the container record. Mirrors the spawn-failed persist; best-effort.
+    #[cfg(target_os = "linux")]
+    fn persist_exec_failed(&self, id: &ContainerId, exit_code: i32, reason: &str, message: &str) {
+        let mut cache = self.cache();
+        if let Some(entry) = cache.containers.get_mut(&id.0) {
+            entry.state = ContainerState::Exited;
+            entry.finished_at_nanos = now_nanos();
+            entry.exit_code = exit_code;
+            entry.reason = reason.to_string();
+            entry.message = message.to_string();
+            let snap = entry.clone();
+            drop(cache);
+            let _ = self.persist(&snap);
+        }
     }
 
     // ── WP-#99: cgroup-based stop for the NS path (linux only) ────────────────

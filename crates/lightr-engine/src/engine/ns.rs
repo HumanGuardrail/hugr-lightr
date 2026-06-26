@@ -162,6 +162,11 @@ mod ns_impl {
             // the child owns its copy, exactly like `command`/`cap_*`.
             let join_netns: Option<std::path::PathBuf> = spec.join_netns.map(|p| p.to_owned());
             let cgroup_name: Option<String> = spec.cgroup_name.map(|s| s.to_owned());
+            // WP-#102: the write end of the exec-readiness pipe (a raw fd number),
+            // captured pre-fork like `cgroup_name`. `None` ⇒ byte-identical to the
+            // pre-#102 path (no pipe, no close-points, no CLOEXEC dance). Each level
+            // CLOSES its copy after forking the next, so only PID 1 holds it.
+            let exec_ready_fd: Option<libc::c_int> = spec.exec_ready_fd;
 
             // WP-#95: fork the SETUP process. NOTE (corrected from a wrong pre-#95
             // comment): this child does NOT become PID 1 — `unshare(CLONE_NEWPID)`
@@ -191,11 +196,20 @@ mod ns_impl {
                         init,
                         join_netns.as_deref(),
                         cgroup_name.as_deref(),
+                        exec_ready_fd,
                     );
                     std::process::exit(rc);
                 }
                 child_pid => {
                     // ── parent: wait ───────────────────────────────────────
+                    // WP-#102: this is the `run()` parent — the `__ns-run` SHIM
+                    // process. It inherited the pipe write end across the spawn but
+                    // must NOT keep it: only PID 1 may hold it, or EOF (the
+                    // exec-success signal) would never fire while the shim lives.
+                    // Close BEFORE waitpid (which blocks for the container's life).
+                    if let Some(fd) = exec_ready_fd {
+                        unsafe { libc::close(fd) };
+                    }
                     let mut wstatus: libc::c_int = 0;
                     let r = unsafe { libc::waitpid(child_pid, &mut wstatus, 0) };
                     if r == -1 {
@@ -231,6 +245,7 @@ mod ns_impl {
         init: bool,
         join_netns: Option<&std::path::Path>,
         cgroup_name: Option<&str>,
+        exec_ready_fd: Option<libc::c_int>,
     ) -> i32 {
         // WP-#99: JOIN the pod's existing netns BEFORE `unshare(CLONE_NEWUSER)`.
         // THE ordering rule: we must `setns(CLONE_NEWNET)` while still real root in
@@ -551,12 +566,21 @@ mod ns_impl {
                     // Caps applied LAST, in the execing process (fail-closed: a capset
                     // failure `_exit`s rather than exec with the WRONG set).
                     apply_caps_if_any(desired_caps_vec.as_deref());
+                    // WP-#102: arm the exec-success pipe (CLOEXEC) right before execv.
+                    arm_exec_ready(exec_ready_fd);
                     unsafe { libc::execv(prog_c.as_ptr(), argv_ptrs.as_ptr()) };
-                    eprintln!(
-                        "lightr-engine ns: exec failed: {}",
-                        std::io::Error::last_os_error()
-                    );
+                    // execv returned ⇒ it FAILED. Signal BYTES down the pipe first.
+                    let e = std::io::Error::last_os_error();
+                    signal_exec_failed(exec_ready_fd, &e);
+                    eprintln!("lightr-engine ns: exec failed: {e}");
                     unsafe { libc::_exit(127) };
+                }
+                // WP-#102: PID 1 (the reaper) must CLOSE its copy of the write end now
+                // that the workload (the only legitimate holder) is forked — otherwise
+                // EOF would wait for the WHOLE container to exit, not the workload's
+                // execv. `--init` only; CRI uses init=false (correctness-for-completeness).
+                if let Some(fd) = exec_ready_fd {
+                    unsafe { libc::close(fd) };
                 }
                 // PID 1 reaper loop — never returns (always `_exit`s).
                 reaper_loop(child);
@@ -564,17 +588,27 @@ mod ns_impl {
                 // No `--init`: the workload itself is PID 1. Caps LAST, in the execing
                 // process (fail-closed via `_exit`).
                 apply_caps_if_any(desired_caps_vec.as_deref());
+                // WP-#102: arm the exec-success pipe (CLOEXEC) right before execv — a
+                // successful execv auto-closes it ⇒ the backend's reader sees EOF.
+                arm_exec_ready(exec_ready_fd);
                 unsafe { libc::execv(prog_c.as_ptr(), argv_ptrs.as_ptr()) };
-                eprintln!(
-                    "lightr-engine ns: exec failed: {}",
-                    std::io::Error::last_os_error()
-                );
+                // execv returned ⇒ it FAILED. Signal BYTES down the pipe first.
+                let e = std::io::Error::last_os_error();
+                signal_exec_failed(exec_ready_fd, &e);
+                eprintln!("lightr-engine ns: exec failed: {e}");
                 unsafe { libc::_exit(127) };
             }
         }
 
         // ── setup process (NOT in the new pid ns; external parent of PID 1) ──────
         // Wait for PID 1 (the grandchild) and propagate its code to `run()`'s parent.
+        // WP-#102: the setup process still holds a copy of the pipe write end
+        // (inherited through both forks). Close it NOW — before the blocking waitpid —
+        // so ONLY PID 1 holds the write end and EOF fires on PID 1's successful execv,
+        // not when the container finally exits (THE #1 EOF-never-fires risk).
+        if let Some(fd) = exec_ready_fd {
+            unsafe { libc::close(fd) };
+        }
         let mut wstatus: libc::c_int = 0;
         let r = unsafe { libc::waitpid(workload_pid, &mut wstatus, 0) };
         if r == -1 {
@@ -597,6 +631,31 @@ mod ns_impl {
             if let Err(e) = apply_caps(d) {
                 eprintln!("lightr-engine ns: capability enforcement failed: {e}");
                 unsafe { libc::_exit(1) };
+            }
+        }
+    }
+
+    /// WP-#102: arm the exec-readiness pipe for a SUCCESSFUL exec by setting the
+    /// write end `FD_CLOEXEC`. A successful `execv` then makes the kernel auto-close
+    /// it ⇒ the backend's reader sees EOF ⇒ the workload is actually running. Called
+    /// in the EXECing process immediately before `execv`. No-op when no pipe is wired
+    /// (`None` ⇒ byte-identical to the pre-#102 path). Best-effort: a failed `fcntl`
+    /// at worst leaves the fd open so EOF waits for exit — not a false `Running`.
+    fn arm_exec_ready(fd: Option<libc::c_int>) {
+        if let Some(fd) = fd {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+    }
+
+    /// WP-#102: signal an `execv` FAILURE down the exec-readiness pipe by WRITING the
+    /// error bytes (the reader distinguishes BYTES ⇒ start failed from EOF ⇒ success).
+    /// Called AFTER `execv` returns (i.e. it failed) and BEFORE `_exit(127)`. No-op
+    /// when no pipe is wired. The write is best-effort (raw libc; we are post-fork).
+    fn signal_exec_failed(fd: Option<libc::c_int>, err: &std::io::Error) {
+        if let Some(fd) = fd {
+            let msg = format!("exec failed: {err}");
+            unsafe {
+                libc::write(fd, msg.as_ptr() as *const libc::c_void, msg.len());
             }
         }
     }
