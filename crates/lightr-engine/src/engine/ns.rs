@@ -162,9 +162,11 @@ mod ns_impl {
             // comment): this child does NOT become PID 1 — `unshare(CLONE_NEWPID)`
             // only places the unsharer's FIRST CHILD into the new pid namespace, and
             // this child is the unsharer, not its child. It is the *external* parent
-            // of PID 1; it performs all sandbox setup (userns map, cgroup, mounts,
-            // pivot_root, caps logic) while holding CAP_SYS_ADMIN in the new userns,
-            // then forks AGAIN inside `run_in_namespaces` so the grandchild is PID 1.
+            // of PID 1; it performs ONLY the unshare-process setup (userns map, cgroup,
+            // optional loopback, caps PARSE) while holding CAP_SYS_ADMIN in the new
+            // userns, then forks AGAIN inside `run_in_namespaces` so the grandchild is
+            // PID 1 — and PID 1 does ALL rootfs setup (mounts, fresh /proc, pivot_root)
+            // so the procfs is mounted while the host /proc is still fully-visible (#96).
             // Safety: standard fork pattern; the child runs setup then forks+execs.
             let pid = unsafe { libc::fork() };
             match pid {
@@ -282,146 +284,22 @@ mod ns_impl {
             }
         }
 
-        // Mount rootfs as private bind mount so we can pivot_root
-        let rootfs_c = match CString::new(rootfs.as_os_str().as_encoded_bytes()) {
-            Ok(c) => c,
-            Err(_) => {
-                eprintln!("lightr-engine ns: bad rootfs path");
-                return 1;
-            }
-        };
-        let none = CString::new("none").unwrap();
-        let empty = CString::new("").unwrap();
+        // WP-#96: the rootfs setup (MS_PRIVATE → bind → fresh procfs → pivot_root →
+        // /dev → /dev/shm → optional read-only remount → chdir cwd) is NO LONGER done
+        // here. It has been RELOCATED into PID 1 (the grandchild forked below) so the
+        // fresh procfs can be mounted while the host `/proc` (inherited via
+        // CLONE_NEWNS) is still fully-visible — the only point at which a rootless
+        // fresh procfs mount is legal (`mount_too_revealing`/`fs_fully_visible`). See
+        // the PID-1 branch for the moved block.
 
-        // Make root mount private
-        let r = unsafe {
-            libc::mount(
-                none.as_ptr(),
-                c"/".as_ptr(),
-                std::ptr::null(),
-                libc::MS_REC | libc::MS_PRIVATE,
-                std::ptr::null(),
-            )
-        };
-        if r != 0 {
-            eprintln!(
-                "lightr-engine ns: MS_PRIVATE on / failed: {}",
-                std::io::Error::last_os_error()
-            );
-            return 1;
-        }
-
-        // Bind-mount rootfs onto itself so it becomes a mountpoint for pivot_root
-        let r = unsafe {
-            libc::mount(
-                rootfs_c.as_ptr(),
-                rootfs_c.as_ptr(),
-                empty.as_ptr(),
-                libc::MS_BIND | libc::MS_REC,
-                std::ptr::null(),
-            )
-        };
-        if r != 0 {
-            eprintln!(
-                "lightr-engine ns: bind-mount rootfs failed: {}",
-                std::io::Error::last_os_error()
-            );
-            return 1;
-        }
-
-        // Create put_old dir inside rootfs, then pivot_root
-        let put_old = rootfs.join(".put_old");
-        if std::fs::create_dir_all(&put_old).is_err() {
-            eprintln!("lightr-engine ns: cannot create .put_old");
-            return 1;
-        }
-
-        let put_old_c = match CString::new(put_old.as_os_str().as_encoded_bytes()) {
-            Ok(c) => c,
-            Err(_) => {
-                eprintln!("lightr-engine ns: bad put_old path");
-                return 1;
-            }
-        };
-
-        let r =
-            unsafe { libc::syscall(libc::SYS_pivot_root, rootfs_c.as_ptr(), put_old_c.as_ptr()) };
-        if r != 0 {
-            eprintln!(
-                "lightr-engine ns: pivot_root failed: {}",
-                std::io::Error::last_os_error()
-            );
-            return 1;
-        }
-
-        // chdir to new root
-        if unsafe { libc::chdir(c"/".as_ptr()) } != 0 {
-            eprintln!("lightr-engine ns: chdir / failed");
-            return 1;
-        }
-
-        // #91: give the container a minimal /dev. The CAS-materialized rootfs has
-        // an EMPTY /dev (snapshot carries file content, not device nodes), so
-        // programs that need /dev/null (e.g. any shell job-control `cmd &`),
-        // /dev/zero, /dev/urandom, … fail. Rootless cannot `mknod` (no CAP_MKNOD in
-        // the init userns), so we BIND-mount the host's device nodes — still
-        // reachable at /.put_old/dev/* until put_old is unmounted just below. A
-        // tmpfs at /dev gives a clean, writable surface for the bind targets
-        // without mutating the rootfs. Best-effort: a device we can't wire is
-        // skipped (a missing optional node must not fail an otherwise-good run;
-        // pre-#91 there was no /dev at all).
-        setup_minimal_dev();
-
-        // #92: mount a tmpfs at /dev/shm (Docker's POSIX shared-memory mount). The
-        // CAS-materialized rootfs has none, so programs that need /dev/shm (e.g.
-        // Python multiprocessing, many DB clients) otherwise fail. /dev is the
-        // tmpfs from setup_minimal_dev, so the /dev/shm dir is created there. A
-        // default 64 MiB mount (Docker's default) is best-effort; an EXPLICIT
-        // `--shm-size` that cannot be applied is fail-closed (return 1) — a
-        // requested size silently dropped would be a parity lie.
-        let shm_bytes = shm_size.unwrap_or(64 * 1024 * 1024);
-        if let Err(e) = setup_shm(shm_bytes, shm_size.is_some()) {
-            eprintln!("lightr-engine ns: /dev/shm mount failed: {e}");
-            return 1;
-        }
-
-        // Unmount put_old (AFTER /dev binds are established from /.put_old/dev/*;
-        // MNT_DETACH is lazy so the already-bound device mounts survive).
-        let inner_put_old = CString::new("/.put_old").unwrap();
-        let _ = unsafe { libc::umount2(inner_put_old.as_ptr(), libc::MNT_DETACH) };
-
-        // #92: `--read-only` ⇒ remount the rootfs READ-ONLY. Done LAST — after the
-        // /dev + /dev/shm tmpfses are mounted — and NON-recursively, so only the
-        // `/` mount (the rootfs bind) flips to RO; the /dev + /dev/shm tmpfs
-        // SUBMOUNTS are independent mount points and keep their RW flags. Net
-        // effect: rootfs immutable, /dev + /dev/shm writable (the key correctness
-        // point — a container with a RO root still needs writable shared memory).
-        // Fail-closed: if the remount fails we return 1 rather than exec a writable
-        // root the user asked to be read-only.
-        if read_only {
-            if let Err(e) = remount_root_readonly() {
-                eprintln!("lightr-engine ns: read-only remount failed: {e}");
-                return 1;
-            }
-        }
-
-        // chdir to cwd-within-rootfs, or fallback to /
-        let cwd_in = if cwd.is_empty() { "/" } else { cwd };
-        let cwd_c = match CString::new(cwd_in.as_bytes()) {
-            Ok(c) => c,
-            Err(_) => CString::new("/").unwrap(),
-        };
-        unsafe {
-            libc::chdir(cwd_c.as_ptr());
-        }
-
-        // WP-#94/#95: COMPUTE the desired capability set now (pure parse; fail-closed
+        // WP-#94/#95/#96: COMPUTE the desired capability set now (pure parse; fail-closed
         // on an unknown name), but DEFER applying it until the process that actually
         // execs the workload — capping THIS setup process would not cap the workload
         // (it execs in a forked descendant; see the pid-ns fork below). When neither
         // `--cap-*` flag is set we keep `None` ⇒ the full userns set is preserved
-        // (ordinary runs are byte-identical to before this WP). This parse runs AFTER
-        // pivot_root + all mounts so it can never break the sandbox setup.
+        // (ordinary runs are byte-identical to before this WP). This pure parse runs in
+        // the SETUP process before the PID-1 fork; the resulting set is copied into PID
+        // 1 across the fork and applied there, right before exec.
         let desired_caps_vec: Option<Vec<u32>> = if !cap_drop.is_empty() || !cap_add.is_empty() {
             match desired_caps(cap_drop, cap_add) {
                 Ok(d) => Some(d),
@@ -473,11 +351,156 @@ mod ns_impl {
         }
         if workload_pid == 0 {
             // ── grandchild: PID 1 in the NEW pid namespace ───────────────────────
-            // Mount /proc HERE (not in the setup process): a `proc` mount reflects
-            // the MOUNTER's pid namespace, and only PID 1 is in the new ns — mounting
-            // it earlier would expose the host pids. This is what makes
-            // `cat /proc/self/status` report the in-ns pid.
-            mount_proc();
+            // WP-#96: PID 1 does ALL rootfs setup (relocated here from the setup
+            // process). The crux: the fresh procfs is mounted (step 3) BEFORE
+            // pivot_root + the put_old MNT_DETACH, while the host `/proc` inherited via
+            // CLONE_NEWNS is still fully-visible — so the kernel
+            // (`mount_too_revealing`/`fs_fully_visible`) permits a rootless fresh
+            // procfs mount; and PID 1 is in the new pid ns, so that proc reflects the
+            // new ns (`cat /proc/self/status` ⇒ `Pid: 1`). Post-pivot there would be
+            // no fully-visible proc left → EPERM (the bug #96 fixes).
+            // We are POST-fork here, so every failure MUST `libc::_exit(1)` (NOT
+            // `return 1`, which was correct only in the setup process).
+
+            // Build the rootfs CString (rebuilt here; the setup-process copy is gone).
+            let rootfs_c = match CString::new(rootfs.as_os_str().as_encoded_bytes()) {
+                Ok(c) => c,
+                Err(_) => {
+                    eprintln!("lightr-engine ns: bad rootfs path");
+                    unsafe { libc::_exit(1) }
+                }
+            };
+            let none = CString::new("none").unwrap();
+            let empty = CString::new("").unwrap();
+
+            // 1. Make root mount private
+            let r = unsafe {
+                libc::mount(
+                    none.as_ptr(),
+                    c"/".as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_REC | libc::MS_PRIVATE,
+                    std::ptr::null(),
+                )
+            };
+            if r != 0 {
+                eprintln!(
+                    "lightr-engine ns: MS_PRIVATE on / failed: {}",
+                    std::io::Error::last_os_error()
+                );
+                unsafe { libc::_exit(1) };
+            }
+
+            // 2. Bind-mount rootfs onto itself so it becomes a mountpoint for pivot_root
+            let r = unsafe {
+                libc::mount(
+                    rootfs_c.as_ptr(),
+                    rootfs_c.as_ptr(),
+                    empty.as_ptr(),
+                    libc::MS_BIND | libc::MS_REC,
+                    std::ptr::null(),
+                )
+            };
+            if r != 0 {
+                eprintln!(
+                    "lightr-engine ns: bind-mount rootfs failed: {}",
+                    std::io::Error::last_os_error()
+                );
+                unsafe { libc::_exit(1) };
+            }
+
+            // 3. WP-#96: mount a FRESH procfs at <rootfs>/proc — BEFORE pivot_root,
+            // while the host /proc is still fully-visible (the crux of the fix) and PID
+            // 1 is in the new pid ns. Best-effort (log + continue), but it should now
+            // succeed; the CI hard-requires it.
+            mount_proc(&rootfs.join("proc"));
+
+            // 4. Create put_old dir inside rootfs, then pivot_root
+            let put_old = rootfs.join(".put_old");
+            if std::fs::create_dir_all(&put_old).is_err() {
+                eprintln!("lightr-engine ns: cannot create .put_old");
+                unsafe { libc::_exit(1) };
+            }
+
+            let put_old_c = match CString::new(put_old.as_os_str().as_encoded_bytes()) {
+                Ok(c) => c,
+                Err(_) => {
+                    eprintln!("lightr-engine ns: bad put_old path");
+                    unsafe { libc::_exit(1) }
+                }
+            };
+
+            let r = unsafe {
+                libc::syscall(libc::SYS_pivot_root, rootfs_c.as_ptr(), put_old_c.as_ptr())
+            };
+            if r != 0 {
+                eprintln!(
+                    "lightr-engine ns: pivot_root failed: {}",
+                    std::io::Error::last_os_error()
+                );
+                unsafe { libc::_exit(1) };
+            }
+
+            // chdir to new root
+            if unsafe { libc::chdir(c"/".as_ptr()) } != 0 {
+                eprintln!("lightr-engine ns: chdir / failed");
+                unsafe { libc::_exit(1) };
+            }
+
+            // #91: give the container a minimal /dev. The CAS-materialized rootfs has
+            // an EMPTY /dev (snapshot carries file content, not device nodes), so
+            // programs that need /dev/null (e.g. any shell job-control `cmd &`),
+            // /dev/zero, /dev/urandom, … fail. Rootless cannot `mknod` (no CAP_MKNOD in
+            // the init userns), so we BIND-mount the host's device nodes — still
+            // reachable at /.put_old/dev/* until put_old is unmounted just below. A
+            // tmpfs at /dev gives a clean, writable surface for the bind targets
+            // without mutating the rootfs. Best-effort: a device we can't wire is
+            // skipped (a missing optional node must not fail an otherwise-good run;
+            // pre-#91 there was no /dev at all).
+            setup_minimal_dev();
+
+            // #92: mount a tmpfs at /dev/shm (Docker's POSIX shared-memory mount). The
+            // CAS-materialized rootfs has none, so programs that need /dev/shm (e.g.
+            // Python multiprocessing, many DB clients) otherwise fail. /dev is the
+            // tmpfs from setup_minimal_dev, so the /dev/shm dir is created there. A
+            // default 64 MiB mount (Docker's default) is best-effort; an EXPLICIT
+            // `--shm-size` that cannot be applied is fail-closed (`_exit(1)`) — a
+            // requested size silently dropped would be a parity lie.
+            let shm_bytes = shm_size.unwrap_or(64 * 1024 * 1024);
+            if let Err(e) = setup_shm(shm_bytes, shm_size.is_some()) {
+                eprintln!("lightr-engine ns: /dev/shm mount failed: {e}");
+                unsafe { libc::_exit(1) };
+            }
+
+            // Unmount put_old (AFTER /dev binds + the proc mount are established;
+            // MNT_DETACH is lazy so the already-bound mounts — including /proc — survive).
+            let inner_put_old = CString::new("/.put_old").unwrap();
+            let _ = unsafe { libc::umount2(inner_put_old.as_ptr(), libc::MNT_DETACH) };
+
+            // #92: `--read-only` ⇒ remount the rootfs READ-ONLY. Done LAST — after the
+            // /proc + /dev + /dev/shm mounts — and NON-recursively, so only the `/`
+            // mount (the rootfs bind) flips to RO; the /proc + /dev + /dev/shm
+            // SUBMOUNTS are independent mount points and keep their flags. Net effect:
+            // rootfs immutable, /proc + /dev + /dev/shm intact (the key correctness
+            // point — a container with a RO root still needs a live /proc + writable
+            // shared memory). Fail-closed: if the remount fails we `_exit(1)` rather
+            // than exec a writable root the user asked to be read-only.
+            if read_only {
+                if let Err(e) = remount_root_readonly() {
+                    eprintln!("lightr-engine ns: read-only remount failed: {e}");
+                    unsafe { libc::_exit(1) };
+                }
+            }
+
+            // chdir to cwd-within-rootfs, or fallback to /
+            let cwd_in = if cwd.is_empty() { "/" } else { cwd };
+            let cwd_c = match CString::new(cwd_in.as_bytes()) {
+                Ok(c) => c,
+                Err(_) => CString::new("/").unwrap(),
+            };
+            unsafe {
+                libc::chdir(cwd_c.as_ptr());
+            }
 
             if init {
                 // `--init`: PID 1 is a minimal reaper; the workload is its child (so
@@ -546,25 +569,24 @@ mod ns_impl {
         }
     }
 
-    /// WP-#95: mount a fresh `proc` at `/proc` INSIDE the new pid namespace. MUST be
-    /// called from PID 1 — a `proc` mount reflects the MOUNTER's pid namespace, and
-    /// only PID 1 is in the new ns, so mounting it here yields a `/proc` that shows
-    /// the in-ns pids (making `cat /proc/self/status` report `Pid: 1`). Best-effort:
-    /// `/proc` may be absent/empty in the CAS-materialized rootfs, so mkdir it first;
-    /// if the mount fails we log + continue (many workloads need no /proc, and pre-#95
-    /// there was none — but we DO try). `MS_NOSUID|MS_NODEV|MS_NOEXEC` matches the
-    /// runc/youki hardening for a container `/proc`.
-    fn mount_proc() {
+    /// WP-#96: mount a fresh `proc` at `target` (`<rootfs>/proc`) from PID 1, BEFORE
+    /// pivot_root. Two conditions make a rootless fresh procfs mount legal and correct,
+    /// and BOTH hold only at this call site. First, the host `/proc` (inherited via
+    /// CLONE_NEWNS) is STILL fully-visible, so the kernel's
+    /// `mount_too_revealing`/`fs_fully_visible` check passes (post-pivot it would be
+    /// gone → EPERM, the #95 bug this WP fixes). Second, the caller is PID 1 in the NEW
+    /// pid namespace, so the mounted proc reflects that ns (`cat /proc/self/status` ⇒
+    /// `Pid: 1`). Best-effort: mkdir the target first (the CAS rootfs may lack `/proc`);
+    /// if the mount fails we log + continue (it should now succeed; CI hard-requires
+    /// it). `MS_NOSUID|MS_NODEV|MS_NOEXEC` matches the runc/youki hardening for `/proc`.
+    fn mount_proc(target: &std::path::Path) {
         use std::ffi::CString;
-        let _ = std::fs::create_dir_all("/proc");
-        let (src, tgt, fstype) = match (
-            CString::new("proc"),
-            CString::new("/proc"),
-            CString::new("proc"),
-        ) {
-            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
-            _ => return,
+        let _ = std::fs::create_dir_all(target);
+        let tgt = match CString::new(target.as_os_str().as_encoded_bytes()) {
+            Ok(c) => c,
+            Err(_) => return,
         };
+        let (src, fstype) = (CString::new("proc").unwrap(), CString::new("proc").unwrap());
         let r = unsafe {
             libc::mount(
                 src.as_ptr(),

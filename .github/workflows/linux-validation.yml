@@ -89,18 +89,19 @@ jobs:
           "$BIN" run --engine ns --rootfs alpine -- /bin/busybox test -d /root
           ROOTDIR_EXIT=$?; echo "rootdir_exit=$ROOTDIR_EXIT"
           if [ "$ROOTDIR_EXIT" = 0 ]; then echo "NS_FIDELITY=PASS (/root survived snapshot)"; else echo "NS_FIDELITY=FAIL (/root dropped by snapshot)"; exit 1; fi  # gate for real
-      - name: Verify the PID namespace is ENTERED (#95)
+      - name: PID namespace entered + /proc mounted (#95/#96)
         run: |
           set +e
           BIN="$PWD/target/release/lightr"
           # Pre-#95 the ns engine unshared CLONE_NEWPID but NEVER forked a child into
           # the new pid namespace, so the workload ran in the HOST pid namespace
-          # (false isolation). #95 forks PID 1 into the new ns. We probe with the
-          # shell's `$$` (getpid(2)), NOT /proc — getpid reflects the kernel pid
-          # namespace directly, so it proves pid-ns ENTRY independently of whether
-          # /proc is mounted (rootless /proc mount is a separate harder problem,
-          # tracked #96; it best-effort-fails here without breaking the run). The ns
-          # engine execs ABSOLUTE paths ⇒ /bin/busybox.
+          # (false isolation). #95 forks PID 1 into the new ns. Checks 1–4 probe with
+          # the shell's `$$` (getpid(2)), which reflects the kernel pid namespace
+          # directly — proving pid-ns ENTRY independently of /proc. #96 then makes PID
+          # 1 mount a FRESH procfs at <rootfs>/proc BEFORE pivot_root (while the host
+          # /proc is still fully-visible), fixing the rootless-EPERM that made the old
+          # mount_proc no-op; checks 5–6 re-enable the /proc-based assertions #95 had
+          # to drop. The ns engine execs ABSOLUTE paths ⇒ /bin/busybox.
 
           # ── 1) no --init: the workload IS PID 1 in the new pid ns ──
           "$BIN" run --engine ns --rootfs alpine -- /bin/busybox sh -c 'echo pid=$$' >/tmp/pid1.txt 2>&1
@@ -133,6 +134,26 @@ jobs:
           TC=$?; echo "plain_true_exit=$TC"
           if [ "$TC" != "0" ]; then echo "NS_TRUE=FAIL (got $TC, expected 0)"; exit 1; fi
           echo "NS_TRUE=PASS"
+
+          # ── 5) #96: /proc is mounted AND reflects the new pid ns ──
+          # The fresh procfs PID 1 mounts (before pivot_root) makes /proc/self/status
+          # report Pid: 1 (the in-ns pid). Pre-#96 the rootless /proc mount EPERM'd
+          # and no-op'd, so /proc was absent and this read would fail.
+          "$BIN" run --engine ns --rootfs alpine -- /bin/busybox sh -c 'cat /proc/self/status | grep ^Pid:' >/tmp/procpid.txt 2>&1
+          echo "--- /proc/self/status Pid: (no --init) ---"; cat /tmp/procpid.txt
+          PP=$(awk '/^Pid:/{print $2; exit}' /tmp/procpid.txt)
+          if [ "$PP" != "1" ]; then
+            echo "NS_PROC_PID=FAIL (/proc/self/status Pid='$PP', expected 1 — /proc absent or not reflecting the new pid ns)"; exit 1
+          fi
+          echo "NS_PROC_PID=PASS"
+
+          # ── 6) #96: /proc is POPULATED (per-process dirs present) ──
+          "$BIN" run --engine ns --rootfs alpine -- /bin/busybox sh -c 'ls /proc/1 >/dev/null && echo PROC_OK' >/tmp/procls.txt 2>&1
+          PO=$?; echo "--- ls /proc/1 ---"; cat /tmp/procls.txt
+          if [ "$PO" != "0" ] || ! grep -q "PROC_OK" /tmp/procls.txt; then
+            echo "NS_PROC_POP=FAIL (proc not populated; exit=$PO)"; exit 1
+          fi
+          echo "NS_PROC_POP=PASS"
           echo "NS_PIDNS=PASS"
 
   cri-linux:
