@@ -397,27 +397,28 @@ jobs:
       - name: Prove --cap-drop/--cap-add capability enforcement (ns engine)
         run: |
           # WP-#94: prove the `ns` engine ACTUALLY drops/adds Linux capabilities
-          # (not a silent no-op). CAP_CHOWN is the cleanly-testable rootless cap:
-          # mapped-root holds it, and chowning a file to another uid needs it. The
-          # probe file is written at the rootfs ROOT (/capf) — always present, unlike
-          # /root,/tmp (alpine ships them empty + lightr's snapshot drops empties).
-          # The ns engine execs ABSOLUTE paths only ⇒ every probe invokes /bin/busybox.
+          # (not a silent no-op). CAP_DAC_OVERRIDE is the robust rootless test cap:
+          # owner-reading a self-owned mode-000 file needs it, and it involves NO
+          # uid mapping / host-superblock ownership (unlike CAP_CHOWN, where chown
+          # to an unmapped uid / a host-owned sb can fail even with caps held). The
+          # probe file is at the rootfs ROOT (/capf) — always present. The ns engine
+          # execs ABSOLUTE paths only ⇒ every probe invokes /bin/busybox.
           set +e
           BIN="$PWD/target/release/lightr"
+          # write content, chmod 000 (owner ops need no cap), then read it back —
+          # reading a self-owned 000 file requires CAP_DAC_OVERRIDE.
+          PROBE='echo data > /capf && chmod 000 /capf && cat /capf'
 
-          echo "=== control: caps held → chown succeeds (expect exit 0) ==="
-          "$BIN" run --engine ns --rootfs alpine -- \
-            /bin/busybox sh -c 'touch /capf && chown 1 /capf' >/tmp/cc.txt 2>&1
+          echo "=== control: caps held → read 000 file succeeds (expect exit 0) ==="
+          "$BIN" run --engine ns --rootfs alpine -- /bin/busybox sh -c "$PROBE" >/tmp/cc.txt 2>&1
           CC_EXIT=$?; echo "cc_exit=$CC_EXIT"; tail -3 /tmp/cc.txt
 
-          echo "=== dropped: --cap-drop ALL → chown must FAIL (EPERM, non-zero) ==="
-          "$BIN" run --engine ns --cap-drop ALL --rootfs alpine -- \
-            /bin/busybox sh -c 'touch /capf && chown 1 /capf' >/tmp/cd.txt 2>&1
+          echo "=== dropped: --cap-drop ALL → read must FAIL (EACCES, non-zero) ==="
+          "$BIN" run --engine ns --cap-drop ALL --rootfs alpine -- /bin/busybox sh -c "$PROBE" >/tmp/cd.txt 2>&1
           CD_EXIT=$?; echo "cd_exit=$CD_EXIT"; tail -3 /tmp/cd.txt
 
-          echo "=== add-back: --cap-drop ALL --cap-add CHOWN → chown succeeds (exit 0) ==="
-          "$BIN" run --engine ns --cap-drop ALL --cap-add CHOWN --rootfs alpine -- \
-            /bin/busybox sh -c 'touch /capf && chown 1 /capf' >/tmp/ca.txt 2>&1
+          echo "=== add-back: --cap-drop ALL --cap-add DAC_OVERRIDE → read succeeds (exit 0) ==="
+          "$BIN" run --engine ns --cap-drop ALL --cap-add DAC_OVERRIDE --rootfs alpine -- /bin/busybox sh -c "$PROBE" >/tmp/ca.txt 2>&1
           CA_EXIT=$?; echo "ca_exit=$CA_EXIT"; tail -3 /tmp/ca.txt
 
           echo "=== unknown cap name: --cap-drop BOGUS_CAP → fail-closed (non-zero) ==="
@@ -426,8 +427,8 @@ jobs:
 
           # ── GATE (assert via exit codes; no false-green) ─────────────────────────
           FAIL=0
-          [ "$CC_EXIT" = 0 ]  || { echo "FAIL: control chown (caps held) failed (exit $CC_EXIT) — cap baseline wrong"; FAIL=1; }
-          [ "$CD_EXIT" != 0 ] || { echo "FAIL: --cap-drop ALL did NOT block chown (CAP_CHOWN not enforced — FALSE SECURITY)"; FAIL=1; }
-          [ "$CA_EXIT" = 0 ]  || { echo "FAIL: --cap-add CHOWN did not restore chown (exit $CA_EXIT)"; FAIL=1; }
+          [ "$CC_EXIT" = 0 ]  || { echo "FAIL: control read of 000 file (caps held) failed (exit $CC_EXIT) — cap baseline wrong"; FAIL=1; }
+          [ "$CD_EXIT" != 0 ] || { echo "FAIL: --cap-drop ALL did NOT block the read (CAP_DAC_OVERRIDE not enforced — FALSE SECURITY)"; FAIL=1; }
+          [ "$CA_EXIT" = 0 ]  || { echo "FAIL: --cap-add DAC_OVERRIDE did not restore the read (exit $CA_EXIT)"; FAIL=1; }
           [ "$CU_EXIT" != 0 ] || { echo "FAIL: unknown cap name silently accepted (not fail-closed on a typo'd flag)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "CAPENFORCE=PASS"; else echo "CAPENFORCE=FAIL"; exit 1; fi  # gate for real
