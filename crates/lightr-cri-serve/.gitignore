@@ -1,0 +1,8 @@
+# This crate is OPT-IN and built only via its own manifest for LOCAL validation
+# against a sibling working copy (path deps). Its Cargo.lock is therefore an
+# environment-specific artifact (it pins whatever sibling versions the local
+# validation used) and is intentionally NOT committed — CI integration will use
+# git deps + a lead-resolved version scheme (see the WP-#97 report / ADR-0017
+# follow-up). Regenerate locally with:
+#   cargo build --manifest-path crates/lightr-cri-serve/Cargo.toml
+/Cargo.lock
