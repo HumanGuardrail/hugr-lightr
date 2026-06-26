@@ -77,9 +77,21 @@ impl LightrBackend {
         for (k, v) in &rec.config.envs {
             command.env(k, v);
         }
-        // netns/mnt/uts join is WP-CRI-SANDBOX's cfg(linux) concern (mirrors the
-        // fake's open_exec); the MVP exec runs in the container's cwd+env on the
-        // host process tree, exactly like container.rs's start path.
+
+        // WP-#100 (exec slice 1): for an `ns` container, the NON-tty (pipe) exec
+        // must ENTER the container via the `__ns-exec` re-exec shim (setns into
+        // PID-1's namespaces) — same nsenter model as `exec_sync`. Fail-closed: a
+        // PID-1 resolution error returns, never a host exec.
+        //
+        // tty exec into an `ns` container is DEFERRED (slice 1): the pty grandchild
+        // needs setsid/TIOCSCTTY inside the container, which is a later slice — so
+        // tty falls through to today's host-process pty path here (NOT half-wired).
+        // Non-`ns` containers (host_network) and every non-linux build keep today's
+        // exact host-process behavior.
+        #[cfg(target_os = "linux")]
+        if rec.engine == "ns" && !tty {
+            command = self.ns_exec_command(&rec, cmd)?;
+        }
 
         if tty {
             open_exec_tty(command)

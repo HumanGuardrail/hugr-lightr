@@ -14,6 +14,7 @@
 
 mod adapter;
 mod convert;
+mod ns_exec_shim;
 mod ns_shim;
 
 use std::path::PathBuf;
@@ -63,6 +64,13 @@ fn main() {
     // MUST precede `parse_args` (which rejects unknown args).
     if std::env::args().nth(1).as_deref() == Some("__ns-run") {
         ns_shim::main();
+    }
+    // WP-#100 (CRI exec slice 1): hidden `__ns-exec` re-exec dispatch (mirrors
+    // `__ns-run`). The backend spawns `<current_exe> __ns-exec` with an
+    // `ExecDescriptor` in `LIGHTR_NSEXEC_DESC` to ENTER a running ns container
+    // (setns into PID-1's namespaces). Also MUST precede `parse_args`.
+    if std::env::args().nth(1).as_deref() == Some("__ns-exec") {
+        ns_exec_shim::main();
     }
 
     let (socket_path, state_arg) = match parse_args() {

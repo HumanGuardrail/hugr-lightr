@@ -650,3 +650,74 @@ impl LightrBackend {
         Ok(())
     }
 }
+
+// ── WP-#100 (CRI exec slice 1): resolve the container's in-pidns PID 1 ────────
+//
+// The recorded `rec.pid` is the `__ns-run` SHIM, which lives in the HOST
+// namespaces and is NOT in the container cgroup — so it is the wrong target for
+// `setns`. The container's real PID 1 (in the user+mnt+pid+net namespaces) is a
+// DIFFERENT host pid the engine hides. We recover it WITHOUT extending the engine
+// seam: read the container cgroup's `cgroup.procs` (which holds only the setup
+// process + PID 1 + descendants — never the shim) and pick the member whose
+// INNERMOST NSpid field is `1` (it is PID 1 in its own pid namespace).
+#[cfg(target_os = "linux")]
+impl LightrBackend {
+    /// Resolve the host pid of the container's in-pidns PID 1 from its cgroup-v2
+    /// leaf. Reads `/sys/fs/cgroup/<cgroup_name>/cgroup.procs` and returns the
+    /// member whose `/proc/<pid>/status` `NSpid:` line ends in `1` (PID 1 of the
+    /// container's own pid namespace). The setup process has a single NSpid field
+    /// (host pidns only); workload descendants end in `>1`. Retried briefly: right
+    /// after start, `cgroup.procs` can momentarily hold only the setup process
+    /// before PID 1 forks. Fail-closed (retryable `FailedPrecondition`) if no
+    /// innermost-NSpid==1 member appears — NEVER falls back to a host exec (that
+    /// would run OUTSIDE the container = a false result).
+    pub(crate) fn container_pid1(&self, cgroup_name: &str) -> Result<u32> {
+        if cgroup_name.is_empty() {
+            return Err(BackendError::FailedPrecondition(
+                "container_pid1: empty cgroup_name (not an ns container?)".to_string(),
+            ));
+        }
+        let procs_path = std::path::Path::new("/sys/fs/cgroup")
+            .join(cgroup_name)
+            .join("cgroup.procs");
+
+        for _ in 0..20 {
+            if let Ok(procs) = fs::read_to_string(&procs_path) {
+                for line in procs.lines() {
+                    let pid: u32 = match line.trim().parse() {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    if pid_is_container_init(pid) {
+                        return Ok(pid);
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Err(BackendError::FailedPrecondition(format!(
+            "container_pid1: no PID-1 (innermost NSpid==1) in {} after retries",
+            procs_path.display()
+        )))
+    }
+}
+
+/// True iff host `pid`'s `/proc/<pid>/status` `NSpid:` line has innermost (last)
+/// field == 1 — i.e. it is PID 1 inside its own pid namespace (the container init).
+#[cfg(target_os = "linux")]
+fn pid_is_container_init(pid: u32) -> bool {
+    let status = match fs::read_to_string(format!("/proc/{pid}/status")) {
+        Ok(s) => s,
+        Err(_) => return false, // raced away — not it
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("NSpid:") {
+            // Fields are tab/space separated host→innermost; the LAST is the pid
+            // in the deepest pid namespace. Setup has a single field (host only).
+            if let Some(innermost) = rest.split_whitespace().next_back() {
+                return innermost == "1";
+            }
+        }
+    }
+    false
+}

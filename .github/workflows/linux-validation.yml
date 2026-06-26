@@ -787,6 +787,53 @@ jobs:
           fi
           echo "KPI3_REAL=PASS (container is PID 1 in its own netns/pidns, rooted at the ALPINE rootfs — real ns container, not a host process)"
 
+          # ── WP-#100 EXEC GATE: `crictl exec` must ENTER the running ns container
+          # (nsenter/setns model), NOT spawn a host process. `CR exec` is synchronous
+          # ⇒ the backend's exec_sync path. We prove the exec ran INSIDE the container
+          # three independent ways: (1) it sees the ALPINE rootfs (the ubuntu runner
+          # has none — already established above, so unambiguous); (2) it has a SMALL
+          # pid (in the container pid ns, not a host pid); (3) its mnt-ns inode equals
+          # the container PID 1's mnt-ns inode (same mount namespace) — same
+          # inode-equality style as the netns-join proof. ──────────────────────────────
+          # Resolve the container's in-pidns PID 1 the SAME way the backend does:
+          # cgroup.procs members + the innermost-NSpid==1 rule.
+          PID1=""
+          for p in $(sudo cat "/sys/fs/cgroup/lightr-cri-$CTR_ID/cgroup.procs" 2>/dev/null); do
+            NSP=$(sudo grep -m1 '^NSpid:' "/proc/$p/status" 2>/dev/null | awk '{print $NF}')
+            if [ "$NSP" = "1" ]; then PID1="$p"; break; fi
+          done
+          if [ -z "$PID1" ]; then
+            echo "KPI3_EXEC=FAIL (could not resolve container PID 1 via cgroup.procs + NSpid==1)"
+            sudo cat /tmp/serve.log; CR stop "$CTR_ID" >/dev/null 2>&1; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve; exit 1
+          fi
+          PID1_MNT=$(sudo stat -L -c %i "/proc/$PID1/ns/mnt")
+          echo "container PID 1 host-pid=$PID1, mnt-ns inode=$PID1_MNT"
+
+          EXEC_OUT=$(CR exec "$CTR_ID" /bin/sh -c 'cat /etc/alpine-release; echo PID=$$; stat -L -c %i /proc/self/ns/mnt; stat -L -c %i /proc/self/ns/pid' 2>/tmp/exec.log)
+          EXEC_RC=$?
+          echo "=== crictl exec output (rc=$EXEC_RC) ==="; echo "$EXEC_OUT"; echo "=== exec stderr ==="; cat /tmp/exec.log
+          EFAIL=0
+          [ "$EXEC_RC" = 0 ] || { echo "EXEC_FAIL: crictl exec exit code $EXEC_RC != 0"; EFAIL=1; }
+          # (1) ALPINE rootfs: /etc/alpine-release is a dotted version (e.g. 3.21.3).
+          echo "$EXEC_OUT" | grep -qE '[0-9]+\.[0-9]+' || { echo "EXEC_FAIL: /etc/alpine-release not seen ⇒ exec is NOT in the container rootfs (host-process fallback?)"; EFAIL=1; }
+          # (2) container pid ns: $$ is a SMALL pid (substring grep, not ^-anchored sed).
+          EXEC_PID=$(echo "$EXEC_OUT" | grep -oE 'PID=[0-9]+' | head -1 | cut -d= -f2)
+          if [ -z "$EXEC_PID" ] || [ "$EXEC_PID" -ge 1000 ]; then
+            echo "EXEC_FAIL: exec pid '$EXEC_PID' is not a small in-container pid (running in the HOST pid ns?)"; EFAIL=1
+          fi
+          # (3) same mount namespace as the container PID 1. The two bare-integer
+          # lines are the mnt then pid ns inodes; take the first (mnt).
+          EXEC_MNT=$(echo "$EXEC_OUT" | grep -xE '[0-9]+' | head -1)
+          if [ -z "$EXEC_MNT" ] || [ "$EXEC_MNT" != "$PID1_MNT" ]; then
+            echo "EXEC_FAIL: exec mnt-ns inode '$EXEC_MNT' != container PID1 mnt-ns inode '$PID1_MNT' (exec is NOT in the container mount ns)"; EFAIL=1
+          fi
+          if [ "$EFAIL" != 0 ]; then
+            echo "KPI3_EXEC=FAIL (crictl exec did not enter the ns container)"
+            echo "=== serve.log ==="; sudo cat /tmp/serve.log
+            CR stop "$CTR_ID" >/dev/null 2>&1; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve; exit 1
+          fi
+          echo "KPI3_EXEC=PASS (crictl exec ENTERED the ns container: ALPINE rootfs visible, in-container pid=$EXEC_PID, mnt-ns inode $EXEC_MNT == PID1 mnt-ns $PID1_MNT)"
+
           # ── WP-#99 STOP GATE: crictl stop must cgroup.kill the whole subtree. The
           # cgroup leaf is `lightr-cri-<CTR_ID>`; after stop its cgroup.procs must be
           # empty (PID 1 + descendants gone). ──────────────────────────────────────────
