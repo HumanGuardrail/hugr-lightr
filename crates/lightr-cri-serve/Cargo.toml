@@ -1,0 +1,42 @@
+[package]
+name = "lightr-cri-serve"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "OPT-IN composition root: wires the real LightrBackend (this workspace) into the kubelet-facing lightr-cri server shell (sibling repo) via a thin type-adapter over the frozen CriBackend seam."
+
+# OWN, ISOLATED WORKSPACE — decoupled from the hugr-lightr root workspace ON
+# PURPOSE. The root Cargo.toml ALSO lists this crate in `[workspace] exclude`,
+# so a normal `cargo build` / `cargo build --workspace` at the repo root NEVER
+# builds this crate and NEVER pulls the sibling `lightr-cri` repo. This is the
+# only crate in hugr-lightr that depends on the CRI shell (tonic/tokio/gRPC),
+# which the dependency firewall (ADR-0017 decision 5) keeps OUT of the default
+# build. Validate it explicitly:
+#   cargo build --manifest-path crates/lightr-cri-serve/Cargo.toml
+[workspace]
+
+[[bin]]
+name = "lightr-cri-serve"
+path = "src/main.rs"
+
+[dependencies]
+# The REAL backend (this workspace): LightrBackend + ITS transcribed vocab.
+lightr-cri-backend = { path = "../lightr-cri-backend" }
+
+# The CANONICAL seam trait + vocab (sibling lightr-cri repo), RENAMED to dodge
+# the crate-name collision (both crates are literally named `lightr-cri-backend`).
+# `lightr-cri-server` binds THIS crate's `CriBackend`, so the Adapter must impl
+# THIS one.
+#
+# PATH DEP = LOCAL VALIDATION ONLY. CI cannot reach a sibling working copy:
+# integration there needs a git dep on lightr-cri + cross-repo auth (owner-gated,
+# tracked as follow-up — out of scope for this WP). The relative path is correct
+# for the canonical repo location (hugr-lightr/crates/lightr-cri-serve); in a git
+# worktree it is satisfied by a `.claude/worktrees/lightr-cri` symlink (untracked).
+cri-canon = { package = "lightr-cri-backend", path = "../../../lightr-cri/crates/lightr-cri-backend" }
+
+# The backend-agnostic server composition root (sibling). `default-features =
+# false` drops the in-repo fake backend + its `lightr-cri` conformance bin —
+# we only need the generic `run_blocking`/`serve` lib entry.
+lightr-cri-server = { path = "../../../lightr-cri/crates/lightr-cri-server", default-features = false }
