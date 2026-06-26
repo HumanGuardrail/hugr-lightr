@@ -70,6 +70,10 @@ pub(super) fn run_engine(
     // WP-NET-ISO: `--net=none` ⇒ true: the ns engine creates a netns
     // (CLONE_NEWNET, loopback only). native ignores it; vz isolates via its VM.
     net_isolate: bool,
+    // WP-#92: `--read-only` ⇒ the ns engine remounts the rootfs RO (fail-closed).
+    read_only: bool,
+    // WP-#92: `--shm-size` bytes ⇒ the ns engine sizes /dev/shm. `None` ⇒ 64 MiB.
+    shm_size: Option<u64>,
 ) -> i32 {
     // Hydrate rootfs ref into a temp dir if provided
     let rootfs_tmp: Option<tempfile::TempDir>;
@@ -143,6 +147,11 @@ pub(super) fn run_engine(
         add_host: &[],
         dns: &[],
         mesh_ip: None,
+        // WP-#92: `--read-only` / `--shm-size` reach the ns engine here (the only
+        // engine that enforces them). native ignores them (no rootfs to remount);
+        // vz is its own VM. RUNTIME-ONLY — never part of the memo key.
+        read_only,
+        shm_size,
     };
 
     let code = match engine.run(&spec) {

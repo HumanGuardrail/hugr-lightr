@@ -11,6 +11,9 @@ name: linux-validation
 #   resource-limits   — WP-#90: prove F-203 cgroup v2 enforcement on real Linux AS
 #                       ROOT — memory.max OOM-kill, cpu.max limited run, and the new
 #                       pids.max fork-cap (the parity-honesty gap this WP closed).
+#   security-flags    — WP-#92: prove `ns`-engine --read-only (rootfs EROFS, /dev/shm
+#                       still writable) + --shm-size enforcement, and that
+#                       --privileged/--cap-add/--cap-drop honest-error (exit 2).
 # Manual only (workflow_dispatch).
 on:
   workflow_dispatch:
@@ -290,3 +293,80 @@ jobs:
           fi
           [ "$VZ_EXIT" = 2 ]   || { echo "FAIL: vz+--pids-limit did not honest-error with exit 2 (exit $VZ_EXIT)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "RESLIMITS=PASS"; else echo "RESLIMITS=FAIL"; exit 1; fi  # gate for real
+
+  security-flags:
+    # WP-#92: prove the security/runtime flags on the `ns` engine are ACTUALLY
+    # enforced (read-only rootfs, sized /dev/shm) — not silently recorded — and
+    # that the unenforceable ones (--privileged / --cap-add / --cap-drop) HONEST-
+    # ERROR (exit 2) before running rather than give false security. Rootless ns
+    # (no sudo): the read-only remount + /dev/shm tmpfs work in the user namespace.
+    # The ns engine execs ABSOLUTE paths only, so every probe invokes /bin/busybox.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --no-self-update && rustup default 1.96.0
+      - name: Build lightr (release) — also proves cfg(linux) ns.rs compiles
+        run: cargo build -p lightr-cli --release -j2
+      - name: Prepare alpine rootfs
+        run: |
+          set -e -x
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+          BIN="$PWD/target/release/lightr"
+          cid=$(docker create alpine:latest); docker export "$cid" -o /tmp/al.tar; docker rm "$cid"
+          mkdir -p /tmp/alroot && sudo tar -xf /tmp/al.tar -C /tmp/alroot
+          "$BIN" snapshot --dir /tmp/alroot --name alpine
+      - name: Prove --read-only / --shm-size enforcement + honest-errors
+        run: |
+          set +e
+          BIN="$PWD/target/release/lightr"
+
+          # ── READ-ONLY: a write to the rootfs must FAIL (EROFS) under --read-only,
+          # and SUCCEED without it (control) — proving the remount actually bit. ────
+          echo "=== read-only: write /root/f under --read-only → expect FAIL (EROFS) ==="
+          "$BIN" run --engine ns --read-only --rootfs alpine -- \
+            /bin/busybox sh -c 'echo x > /root/f && echo WROTE_RO' >/tmp/ro.txt 2>&1
+          RO_EXIT=$?; echo "ro_exit=$RO_EXIT"; tail -3 /tmp/ro.txt
+          echo "=== control: write /root/f WITHOUT --read-only → expect OK ==="
+          "$BIN" run --engine ns --rootfs alpine -- \
+            /bin/busybox sh -c 'echo x > /root/f && echo WROTE_RW' >/tmp/rw.txt 2>&1
+          RW_EXIT=$?; echo "rw_exit=$RW_EXIT"; tail -3 /tmp/rw.txt
+
+          # ── /dev/shm WRITABLE under --read-only (the key correctness point: a RO
+          # root must still have writable shared memory). ──────────────────────────
+          echo "=== read-only: write /dev/shm/x under --read-only → expect OK ==="
+          "$BIN" run --engine ns --read-only --rootfs alpine -- \
+            /bin/busybox sh -c 'echo x > /dev/shm/x && echo SHM_WRITABLE' >/tmp/shmw.txt 2>&1
+          SHMW_EXIT=$?; echo "shmw_exit=$SHMW_EXIT"; tail -3 /tmp/shmw.txt
+
+          # ── SHM-SIZE: a 16m /dev/shm must REJECT a 20m write and ACCEPT an 8m one
+          # (busybox dd to a file on the tmpfs; over-size write fails "No space"). ──
+          echo "=== shm-size 16m: write 20m to /dev/shm → expect FAIL (No space) ==="
+          "$BIN" run --engine ns --shm-size 16m --rootfs alpine -- \
+            /bin/busybox sh -c 'dd if=/dev/zero of=/dev/shm/big bs=1M count=20 && echo SHM_20M_OK' >/tmp/s20.txt 2>&1
+          S20_EXIT=$?; echo "s20_exit=$S20_EXIT"; tail -3 /tmp/s20.txt
+          echo "=== shm-size 16m: write 8m to /dev/shm → expect OK ==="
+          "$BIN" run --engine ns --shm-size 16m --rootfs alpine -- \
+            /bin/busybox sh -c 'dd if=/dev/zero of=/dev/shm/small bs=1M count=8 && echo SHM_8M_OK' >/tmp/s8.txt 2>&1
+          S8_EXIT=$?; echo "s8_exit=$S8_EXIT"; tail -3 /tmp/s8.txt
+
+          # ── HONEST-ERRORS: --privileged / --cap-drop must exit 2 BEFORE running. ──
+          echo "=== --privileged → honest exit 2 ==="
+          "$BIN" run --engine ns --privileged --rootfs alpine -- /bin/true >/tmp/priv.txt 2>&1
+          PRIV_EXIT=$?; echo "priv_exit=$PRIV_EXIT"; tail -2 /tmp/priv.txt
+          echo "=== --cap-drop ALL → honest exit 2 ==="
+          "$BIN" run --engine ns --cap-drop ALL --rootfs alpine -- /bin/true >/tmp/cap.txt 2>&1
+          CAP_EXIT=$?; echo "cap_exit=$CAP_EXIT"; tail -2 /tmp/cap.txt
+
+          # ── GATE (no false-green: every proof must hold or the job fails) ─────────
+          FAIL=0
+          [ "$RO_EXIT" != 0 ]   || { echo "FAIL: --read-only did NOT block the rootfs write (exit $RO_EXIT)"; FAIL=1; }
+          grep -qiE "read-only|EROFS" /tmp/ro.txt || { echo "FAIL: --read-only write did not report a read-only fs"; FAIL=1; }
+          [ "$RW_EXIT" = 0 ]    || { echo "FAIL: control write WITHOUT --read-only failed (exit $RW_EXIT)"; FAIL=1; }
+          [ "$SHMW_EXIT" = 0 ]  || { echo "FAIL: /dev/shm NOT writable under --read-only (exit $SHMW_EXIT)"; FAIL=1; }
+          grep -q SHM_WRITABLE /tmp/shmw.txt || { echo "FAIL: /dev/shm write under --read-only produced no proof"; FAIL=1; }
+          [ "$S20_EXIT" != 0 ]  || { echo "FAIL: 20m write to a 16m /dev/shm succeeded (size not enforced)"; FAIL=1; }
+          [ "$S8_EXIT" = 0 ]    || { echo "FAIL: 8m write to a 16m /dev/shm failed (exit $S8_EXIT)"; FAIL=1; }
+          [ "$PRIV_EXIT" = 2 ]  || { echo "FAIL: --privileged did not honest-error with exit 2 (exit $PRIV_EXIT)"; FAIL=1; }
+          [ "$CAP_EXIT" = 2 ]   || { echo "FAIL: --cap-drop did not honest-error with exit 2 (exit $CAP_EXIT)"; FAIL=1; }
+          if [ "$FAIL" = 0 ]; then echo "SECFLAGS=PASS"; else echo "SECFLAGS=FAIL"; exit 1; fi  # gate for real

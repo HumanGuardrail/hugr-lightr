@@ -83,6 +83,10 @@ pub(crate) fn run_vz_memo(
             add_host: &[],
             dns: &[],
             mesh_ip: None,
+            // WP-#92: the vz-memo path does not enforce these (vz is its own VM);
+            // the ns engine is where --read-only/--shm-size gain teeth.
+            read_only: false,
+            shm_size: None,
         };
         // Suppress the guest CONSOLE (boot log + exit marker) from the host's
         // stdout on a memo MISS: real stdout/stderr come from the capture files
