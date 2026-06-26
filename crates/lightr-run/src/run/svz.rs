@@ -185,6 +185,8 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         init: false,
                         join_netns: None,
                         cgroup_name: None,
+                        // WP-#102: vz supervisor is a microVM; no exec-readiness pipe.
+                        exec_ready_fd: None,
                     };
                     engine.run(&spec).unwrap_or(255)
                 }

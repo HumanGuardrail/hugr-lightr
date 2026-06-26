@@ -49,6 +49,15 @@ pub struct RunDescriptor {
     pub cap_add: Vec<String>,
     /// Capabilities to DROP. Becomes `ExecSpec.cap_drop`.
     pub cap_drop: Vec<String>,
+    /// WP-#102: the raw fd NUMBER of the exec-readiness pipe's WRITE end. The backend
+    /// creates the pipe and spawns this shim WITHOUT `O_CLOEXEC` on the write end, so
+    /// the fd is INHERITED across the re-exec and is open at the SAME number in the
+    /// shim — only its number travels here (over JSON), not the fd itself. Becomes
+    /// `ExecSpec.exec_ready_fd`; the ns engine sets it CLOEXEC right before the
+    /// container's `execv` so a successful exec auto-closes it (the backend's reader
+    /// sees EOF ⇒ persist Running). `None` ⇒ no readiness signalling (host path).
+    #[serde(default)]
+    pub exec_ready_fd: Option<i32>,
 }
 
 /// Entry point for the `__ns-run` re-exec shim: read a [`RunDescriptor`] (JSON)
@@ -114,6 +123,9 @@ pub fn run_shim() -> ! {
         // WP-#99: the crux — join the pod netns, pin the killable cgroup leaf.
         join_netns: netns_path.as_deref(),
         cgroup_name: Some(desc.cgroup_name.as_str()),
+        // WP-#102: the inherited write end of the backend's exec-readiness pipe; the
+        // ns engine threads it to PID 1 (CLOEXEC-before-execv). `None` on the host path.
+        exec_ready_fd: desc.exec_ready_fd,
     };
 
     match engine.run(&spec) {

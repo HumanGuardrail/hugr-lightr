@@ -129,6 +129,8 @@ fn boot_vm(
         init: false,
         join_netns: None,
         cgroup_name: None,
+        // WP-#102: vz example; no exec-readiness pipe. None.
+        exec_ready_fd: None,
     };
     let code = engine
         .run(&spec)

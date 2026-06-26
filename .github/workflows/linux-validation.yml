@@ -729,6 +729,13 @@ jobs:
           echo "CTR_ID=$CTR_ID"
           CR start "$CTR_ID" >/tmp/start.log 2>&1
           echo "start exit=$?"; cat /tmp/start.log
+          # WP-#102: `start` now returns only AFTER the workload `execv`'d (the backend
+          # blocks on the exec-readiness pipe and persists Running on EOF). So the
+          # container should ALREADY be Running the instant start returns — capture it
+          # (informational; the polling gate below remains the hard requirement, robust
+          # to gRPC read-after-write timing).
+          IMMEDIATE_STATE=$(CR inspect "$CTR_ID" 2>/dev/null | jq -r '.status.state' 2>/dev/null)
+          echo "KPI3_IMMEDIATE_STATE=$IMMEDIATE_STATE (expected CONTAINER_RUNNING — #102 start is execv-aligned)"
 
           # ── Step 4: GATE — the container MUST reach Running (poll up to ~30s). ──────
           RUNNING=0
@@ -856,6 +863,51 @@ jobs:
             sudo cat /tmp/serve.log; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve; exit 1
           fi
           echo "KPI3_STOP=PASS (crictl stop cgroup.kill'd the whole subtree — container cgroup empty)"
+
+          # ── WP-#102 NEGATIVE GATE (the important one): a container whose command is
+          # a NON-EXISTENT binary must FAIL to start — `crictl start` returns an error —
+          # and the container must NEVER be observed CONTAINER_RUNNING. The ns engine's
+          # PID 1 `execv` fails, writes the error down the exec-readiness pipe, and the
+          # backend reads BYTES ⇒ persists Exited/exec-failed and returns Err (it never
+          # persists a false Running). This proves #102 (no Running before execv) AND
+          # strengthens #99 fail-closed. Same pod (still alive), ns path (pod has netns).
+          cat >/tmp/ctr-bad.json <<'JSON'
+          {
+            "metadata": { "name": "kpi3-badimg", "attempt": 1 },
+            "image": { "image": "alpine:latest" },
+            "command": ["/nonexistent-binary-xyz"],
+            "log_path": "kpi3-badimg.log",
+            "linux": {}
+          }
+          JSON
+          BAD_ID=$(CR create "$POD_ID" /tmp/ctr-bad.json /tmp/pod.json 2>/tmp/bad-create.log)
+          if [ -z "$BAD_ID" ]; then
+            echo "KPI3_NEG=FAIL (create of bad-command container returned no id)"; cat /tmp/bad-create.log
+            sudo cat /tmp/serve.log; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve; exit 1
+          fi
+          echo "BAD_ID=$BAD_ID"
+          CR start "$BAD_ID" >/tmp/bad-start.log 2>&1
+          BAD_START_RC=$?
+          echo "bad start exit=$BAD_START_RC"; cat /tmp/bad-start.log
+          if [ "$BAD_START_RC" = 0 ]; then
+            echo "KPI3_NEG=FAIL (crictl start of a non-existent binary returned SUCCESS — #102 false-Running / #99 fail-open)"
+            CR inspect "$BAD_ID" 2>&1 | head -40
+            sudo cat /tmp/serve.log; CR rm -f "$BAD_ID" >/dev/null 2>&1; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve; exit 1
+          fi
+          # And it must NEVER be RUNNING — poll briefly; ANY RUNNING observation fails.
+          BAD_STATE=""
+          for i in $(seq 1 6); do
+            S=$(CR inspect "$BAD_ID" 2>/dev/null | jq -r '.status.state' 2>/dev/null)
+            echo "neg poll $i: state=$S"
+            BAD_STATE="$S"
+            if [ "$S" = "CONTAINER_RUNNING" ]; then
+              echo "KPI3_NEG=FAIL (bad-command container reported CONTAINER_RUNNING — a false Running before execv)"
+              sudo cat /tmp/serve.log; CR rm -f "$BAD_ID" >/dev/null 2>&1; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve; exit 1
+            fi
+            sleep 0.5
+          done
+          echo "KPI3_NEG=PASS (non-existent binary: start FAILED rc=$BAD_START_RC and the container was NEVER CONTAINER_RUNNING — final state=$BAD_STATE)"
+          CR rm -f "$BAD_ID" >/dev/null 2>&1
 
           # ── Deliverable B — lightr cold-start (REAL, reuses this serve). ───────────
           echo "=== B: lightr cold-start (create+start → Running), N iterations, same pod ==="

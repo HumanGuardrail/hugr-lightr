@@ -96,6 +96,8 @@ pub(crate) fn run_vz_memo(
             // nor names a cgroup leaf (it is its own VM). Defaults.
             join_netns: None,
             cgroup_name: None,
+            // WP-#102: vz-memo path is its own VM; no exec-readiness pipe. None.
+            exec_ready_fd: None,
         };
         // Suppress the guest CONSOLE (boot log + exit marker) from the host's
         // stdout on a memo MISS: real stdout/stderr come from the capture files

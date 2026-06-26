@@ -175,6 +175,9 @@ pub(super) fn run_engine(
         // The CLI run path never sets them — defaults preserve today's behaviour.
         join_netns: None,
         cgroup_name: None,
+        // WP-#102: exec-readiness signalling is a CRI-backend concern; the CLI run
+        // path is synchronous (run() blocks) and never wires a pipe. Default None.
+        exec_ready_fd: None,
     };
 
     let code = match engine.run(&spec) {
