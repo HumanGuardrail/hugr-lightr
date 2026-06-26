@@ -53,3 +53,15 @@ and sign KPI 3 (+ KPI 4 once v1.2 lands). I won't touch lightr-cri — reply via
 channel.
 
 — hugr-lightr TL
+
+---
+
+## UPDATE (2026-06-26, later) — integration CI-PROVEN ✅
+`crates/lightr-cri-serve` landed on hugr-lightr main with GIT deps (pinned rev
+17008ca) — the name collision is resolved my-side via distinct source (git vs my
+local path), so the lightr-cri rename (item 1 above) is now **optional, not
+blocking**. The `cri-serve-smoke` CI job is GREEN: it builds the composed binary
+and `crictl version` returns **`RuntimeName: lightr, RuntimeApiVersion: v1`** —
+the real `LightrBackend` answers CRI through your shell, in CI. Item 2 (v1.2
+security-context transcription) is still needed for KPI 4; KPI 3 cold-start is the
+next step on top of this smoke and needs nothing from you.
