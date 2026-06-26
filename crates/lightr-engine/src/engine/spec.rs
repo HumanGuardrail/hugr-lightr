@@ -148,4 +148,25 @@ pub struct ExecSpec<'a> {
     /// them `--init` is a recorded-only carry-slot. NOT part of any memo key
     /// (runtime, like `read_only`/`limits`). Default false.
     pub init: bool,
+
+    /// WP-#99 (CRI slice 1): JOIN an EXISTING network namespace instead of
+    /// creating one. When `Some(path)`, the `ns` engine opens the pinned netns
+    /// (a CNI-created bind-mount, e.g. `/run/netns/<id>`) and `setns(CLONE_NEWNET)`
+    /// into it — BEFORE `unshare(CLONE_NEWUSER)`, while still real root in the
+    /// host init userns (a child userns has no caps over the host-owned netns, so
+    /// joining after the userns unshare EPERMs — THE ordering rule). It then
+    /// unshares WITHOUT `CLONE_NEWNET` and SKIPS the `net_isolate` loopback path.
+    /// `join_netns` and `net_isolate` are mutually exclusive (join wins). This is
+    /// how a CRI container shares its pod's netns. Other engines ignore it (native
+    /// has no netns; vz is its own VM). RUNTIME-ONLY — NOT part of any memo key
+    /// (like `net_isolate`). Default None.
+    pub join_netns: Option<&'a std::path::Path>,
+    /// WP-#99 (CRI slice 1): an EXPLICIT cgroup-v2 leaf name. When `Some(name)`,
+    /// the `ns` engine creates `/sys/fs/cgroup/<name>` (even when limits are
+    /// unlimited, so the container is always in a known, killable cgroup) and
+    /// joins it. `None` ⇒ today's behavior (a transient `lightr.<pid>` leaf,
+    /// created only when a limit is set). The CRI backend supplies a deterministic
+    /// name so `stop` can `cgroup.kill` the whole subtree (PID 1 + descendants).
+    /// Other engines ignore it. RUNTIME-ONLY — NOT part of any memo key. Default None.
+    pub cgroup_name: Option<&'a str>,
 }

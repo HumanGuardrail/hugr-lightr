@@ -14,6 +14,7 @@
 
 mod adapter;
 mod convert;
+mod ns_shim;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,6 +57,14 @@ fn resolve_state(state: Option<PathBuf>) -> PathBuf {
 }
 
 fn main() {
+    // WP-#99 (CRI slice 1): hidden `__ns-run` re-exec dispatch (mirrors the CLI's
+    // `__supervise` shape). The backend spawns `<current_exe> __ns-run` with a
+    // `RunDescriptor` piped on stdin to run a container under the `ns` engine. This
+    // MUST precede `parse_args` (which rejects unknown args).
+    if std::env::args().nth(1).as_deref() == Some("__ns-run") {
+        ns_shim::main();
+    }
+
     let (socket_path, state_arg) = match parse_args() {
         Some(v) => v,
         None => {

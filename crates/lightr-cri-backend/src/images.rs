@@ -39,8 +39,9 @@ struct CriImageRecord {
 
 /// Sanitize a CRI image_ref into a valid lightr ref name (ADR-0004 grammar):
 /// `:`/`/` → `-`, lowercased. Deterministic so the same ref maps to the same
-/// store name across calls.
-fn sanitize_ref(image_ref: &str) -> String {
+/// store name across calls. `pub(crate)` so the container plane (WP-#99 hydrate)
+/// maps an image_ref to the SAME store name the pull tagged the bytes under.
+pub(crate) fn sanitize_ref(image_ref: &str) -> String {
     image_ref
         .chars()
         .map(|c| match c {

@@ -131,11 +131,119 @@ impl LightrBackend {
             reason: String::new(),
             message: String::new(),
             pid: 0,
+            engine: String::new(),
+            cgroup_name: String::new(),
         };
         // Crash-only: persist BEFORE inserting into the cache and returning.
         self.persist(&rec)?;
         self.cache().containers.insert(id.0.clone(), rec);
         Ok(id)
+    }
+
+    // ── WP-#99: NS-path planning + rootfs hydrate (linux only) ────────────────
+
+    /// Decide whether THIS container can run under the `ns` engine (real image
+    /// rootfs + pod netns) and, if so, build the `RunDescriptor` for the
+    /// `__ns-run` shim. Returns `None` — falling back to the host-process path —
+    /// when any precondition is missing: no pinned pod netns (host_network / no
+    /// CNI), the ns engine is unavailable (not root / no kernel support), or the
+    /// image fails to hydrate. Every `None` is a behavior-preserving fallback.
+    #[cfg(target_os = "linux")]
+    fn try_build_ns_plan(
+        &self,
+        rec: &ContainerRecord,
+        argv: &[String],
+    ) -> Option<crate::ns_run::RunDescriptor> {
+        // The pod must have a pinned netns to join (CNI set it). host_network pods
+        // and the no-CNI/unprivileged fallback have None ⇒ host path.
+        let netns_path = self
+            .cache()
+            .sandboxes
+            .get(&rec.sandbox.0)
+            .and_then(|s| s.netns_path.clone())?;
+
+        // The ns engine must actually be available here (root + Linux + kernel
+        // support). probe() failing ⇒ host path (honest, no false isolation).
+        if lightr_engine::engine_for(lightr_engine::EngineKind::Ns).is_err() {
+            return None;
+        }
+
+        // Materialize the image rootfs from the CAS; a miss ⇒ host fallback.
+        let rootfs = match self.hydrate_rootfs(&rec.id, &rec.config.image_ref) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "lightr-cri: hydrate rootfs for container {} (image {:?}) failed: {e}; \
+                     falling back to host-process path",
+                    rec.id.0, rec.config.image_ref
+                );
+                return None;
+            }
+        };
+
+        // Capabilities from the v1.2 security context, when present (CRI style).
+        let (cap_add, cap_drop) = match rec
+            .config
+            .security
+            .as_ref()
+            .and_then(|s| s.capabilities.as_ref())
+        {
+            Some(c) => (c.add.clone(), c.drop.clone()),
+            None => (Vec::new(), Vec::new()),
+        };
+
+        Some(crate::ns_run::RunDescriptor {
+            rootfs,
+            argv: argv.to_vec(),
+            cwd: rec.config.working_dir.clone(),
+            env: rec.config.envs.clone(),
+            netns_path: Some(netns_path),
+            // Deterministic, flat leaf so `stop` can rebuild the path and
+            // `cgroup.kill` it (the record also persists this name).
+            cgroup_name: format!("lightr-cri-{}", rec.id.0),
+            // The frozen seam carries no read-only / shm-size / init for a
+            // container; defaults (the ns engine still gives a default 64 MiB
+            // /dev/shm). read_only/shm/init become reachable when the seam grows them.
+            read_only: false,
+            shm_size: None,
+            init: false,
+            cap_add,
+            cap_drop,
+        })
+    }
+
+    /// Materialize the image rootfs for `cid` from the CAS store into a persistent
+    /// per-container dir (`<home>/cri/containers/<cid>/rootfs`) via
+    /// `lightr_index::hydrate`. The store name is the SAME `sanitize_ref` the image
+    /// pull tagged the bytes under. Idempotent: a non-empty existing rootfs (a
+    /// restart) is reused. Honest `Err` (mapped) when the ref is absent from the
+    /// store or hydration fails — the caller treats that as a host-path fallback.
+    #[cfg(target_os = "linux")]
+    fn hydrate_rootfs(
+        &self,
+        cid: &ContainerId,
+        image_ref: &str,
+    ) -> Result<std::path::PathBuf> {
+        let store = lightr_store::Store::open(self.home().join("store"))
+            .map_err(crate::util::map_lightr_err)?;
+        let store_name = crate::images::sanitize_ref(image_ref);
+        let rootfs = self
+            .containers_dir()
+            .join(&cid.0)
+            .join("rootfs");
+
+        // Reuse an already-hydrated rootfs (restart of the same container).
+        if rootfs.exists() {
+            let nonempty = fs::read_dir(&rootfs)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false);
+            if nonempty {
+                return Ok(rootfs);
+            }
+        }
+        fs::create_dir_all(&rootfs).map_err(BackendError::Io)?;
+        lightr_index::hydrate(&rootfs, &store, &store_name).map_err(crate::util::map_lightr_err)?;
+        Ok(rootfs)
     }
 
     // ── start ────────────────────────────────────────────────────────────────
@@ -184,26 +292,58 @@ impl LightrBackend {
             .cloned()
             .ok_or_else(|| BackendError::InvalidArgument("empty command".to_string()))?;
 
-        let mut cmd = std::process::Command::new(&program);
-        cmd.args(&argv[1..]);
-        if !rec.config.working_dir.is_empty() {
-            cmd.current_dir(&rec.config.working_dir);
-        }
-        for (k, v) in &rec.config.envs {
-            cmd.env(k, v);
-        }
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        // stdin piped when requested (attach feeds the live process — WP-CRI-STREAM), else null.
-        cmd.stdin(if rec.config.stdin {
-            std::process::Stdio::piped()
-        } else {
-            std::process::Stdio::null()
-        });
-
-        // §D: on linux, join the MAIN process into the sandbox netns (sandbox.rs).
+        // WP-#99 (CRI slice 1): decide the execution path. The NS path runs the
+        // REAL image rootfs under the `ns` engine, joined into the pod's netns,
+        // by re-exec'ing THIS binary as `__ns-run` with a `RunDescriptor` piped on
+        // stdin. It is taken ONLY when (linux + the pod has a pinned netns + the
+        // ns engine is available + the image hydrates). EVERY other case falls
+        // back to today's host-process path (behavior-preserving) — `ns_descriptor`
+        // is `None` there, including on non-linux (so the macOS gate is untouched).
         #[cfg(target_os = "linux")]
-        self.join_container_netns(&mut cmd, &rec.sandbox)?;
+        let ns_descriptor: Option<crate::ns_run::RunDescriptor> =
+            self.try_build_ns_plan(&rec, &argv);
+        #[cfg(not(target_os = "linux"))]
+        let ns_descriptor: Option<crate::ns_run::RunDescriptor> = None;
+
+        let mut cmd = if ns_descriptor.is_some() {
+            // ── NS path: re-exec `<current_exe> __ns-run`; descriptor on stdin. ──
+            // current_exe is required to re-exec; if it somehow fails we cannot take
+            // the ns path — but `try_build_ns_plan` already hydrated, so prefer an
+            // honest spawn error over a silent rootfs-less host run.
+            let exe = std::env::current_exe().map_err(|e| {
+                BackendError::Internal(format!("current_exe for __ns-run: {e}"))
+            })?;
+            let mut c = std::process::Command::new(exe);
+            c.arg("__ns-run");
+            // stdin carries the descriptor (we write it post-spawn, then close);
+            // stdout/stderr are the container's, teed to the CRI log.
+            c.stdin(std::process::Stdio::piped());
+            c.stdout(std::process::Stdio::piped());
+            c.stderr(std::process::Stdio::piped());
+            c
+        } else {
+            // ── HOST path: today's exact behavior (unchanged). ──
+            let mut c = std::process::Command::new(&program);
+            c.args(&argv[1..]);
+            if !rec.config.working_dir.is_empty() {
+                c.current_dir(&rec.config.working_dir);
+            }
+            for (k, v) in &rec.config.envs {
+                c.env(k, v);
+            }
+            c.stdout(std::process::Stdio::piped());
+            c.stderr(std::process::Stdio::piped());
+            // stdin piped when requested (attach feeds the live process — WP-CRI-STREAM), else null.
+            c.stdin(if rec.config.stdin {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            });
+            // §D: on linux, join the MAIN process into the sandbox netns (sandbox.rs).
+            #[cfg(target_os = "linux")]
+            self.join_container_netns(&mut c, &rec.sandbox)?;
+            c
+        };
 
         // Persist start-intent (Running, pid 0) BEFORE spawning (crash-only).
         let started_at = now_nanos();
@@ -245,12 +385,35 @@ impl LightrBackend {
 
         let child_pid = child.id();
 
+        // WP-#99 (NS path): hand the `RunDescriptor` to the `__ns-run` shim over
+        // its stdin, then CLOSE stdin (drop) so the shim's `read_to_end` returns
+        // and it proceeds to run the ns engine. Done BEFORE `register_io_and_tee`
+        // so the tee never tries to adopt this stdin as an attach sink (it takes
+        // `child.stdin`, now already gone — so ns containers have no attach-stdin
+        // in slice 1, acceptable). A write failure here means the shim will EOF on
+        // empty stdin and fail closed (exit 1), which the reaper records honestly.
+        if let Some(desc) = &ns_descriptor {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                match serde_json::to_vec(desc) {
+                    Ok(bytes) => {
+                        let _ = stdin.write_all(&bytes);
+                    }
+                    Err(e) => eprintln!("lightr-cri: serialize ns descriptor: {e}"),
+                }
+                // `stdin` drops here → EOF for the shim.
+            }
+        }
+
         // Tee stdout/stderr to the CRI log and (on unix) register the live stdio
         // in the io-table for `open_attach` (WP-CRI-STREAM) — the SAME single
         // reader fans raw bytes to attachers, no second reader racing the log.
         self.register_io_and_tee(id, &mut child, &log_shared);
 
-        // Persist the real pid (crash-only).
+        // Persist the real pid (crash-only). For the NS path also persist the
+        // engine marker + the cgroup leaf so `stop` knows to `cgroup.kill` (the
+        // shim pid alone is NOT the in-pidns PID 1; killing it would orphan the
+        // container).
         {
             let mut cache = self.cache();
             let entry = cache
@@ -259,6 +422,10 @@ impl LightrBackend {
                 .ok_or_else(|| BackendError::NotFound(format!("container {}", id.0)))?;
             entry.pid = child_pid;
             entry.reason = String::new();
+            if let Some(desc) = &ns_descriptor {
+                entry.engine = "ns".to_string();
+                entry.cgroup_name = desc.cgroup_name.clone();
+            }
             let snap = entry.clone();
             drop(cache);
             self.persist(&snap)?;
@@ -296,6 +463,46 @@ impl LightrBackend {
         Ok(())
     }
 
+    // ── WP-#99: cgroup-based stop for the NS path (linux only) ────────────────
+
+    /// Stop an `ns`-path container by acting on its cgroup-v2 leaf
+    /// (`/sys/fs/cgroup/<cgroup_name>`). `grace > 0` first SIGTERMs every process
+    /// in the cgroup (a chance for a clean shutdown — the workload PID 1 only acts
+    /// on it if it installed a handler, exactly like Docker), waits up to the grace
+    /// period for the reaper to record the exit, then unconditionally writes
+    /// `cgroup.kill` (atomic SIGKILL of the whole subtree — idempotent and a no-op
+    /// on an already-empty cgroup, so it guarantees nothing lingers). `grace == 0`
+    /// goes straight to `cgroup.kill`. The detached reaper records the real exit
+    /// code; we only deliver the kill + wait for it to land (synchronous `stop`).
+    #[cfg(target_os = "linux")]
+    fn cgroup_stop(&self, rec: &ContainerRecord, id: &ContainerId, grace_seconds: i64) {
+        let leaf = std::path::Path::new("/sys/fs/cgroup").join(&rec.cgroup_name);
+        let kill_file = leaf.join("cgroup.kill");
+
+        if grace_seconds > 0 {
+            // SIGTERM every process currently in the cgroup.
+            if let Ok(procs) = fs::read_to_string(leaf.join("cgroup.procs")) {
+                for line in procs.lines() {
+                    if let Ok(pid) = line.trim().parse::<i32>() {
+                        #[cfg(unix)]
+                        unsafe {
+                            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                        }
+                    }
+                }
+            }
+            let grace = std::time::Duration::from_secs(grace_seconds as u64);
+            self.wait_until_exited(id, grace);
+            // Always finish with cgroup.kill: guarantees the in-pidns PID 1 + all
+            // descendants are gone even if SIGTERM was ignored (idempotent).
+            let _ = fs::write(&kill_file, b"1");
+            self.wait_until_exited(id, std::time::Duration::from_secs(5));
+        } else {
+            let _ = fs::write(&kill_file, b"1");
+            self.wait_until_exited(id, std::time::Duration::from_secs(5));
+        }
+    }
+
     // ── stop (SIGTERM→SIGKILL grace) ─────────────────────────────────────────
 
     pub(crate) fn stop_container_impl(&self, id: &ContainerId, grace_seconds: i64) -> Result<()> {
@@ -308,6 +515,18 @@ impl LightrBackend {
                 return Ok(())
             }
             ContainerState::Running => {}
+        }
+
+        // WP-#99 (NS path): kill via the cgroup, not the shim pid. The recorded
+        // `rec.pid` is the `__ns-run` SHIM — an ancestor of the container's PID 1
+        // (which lives in a child pid namespace). `kill(shim)` would NOT take down
+        // the in-pidns PID 1 + its descendants; `cgroup.kill` atomically SIGKILLs
+        // the WHOLE subtree (the setup process + PID 1 + every descendant). The
+        // reaper still records the terminal exit. Linux-only.
+        #[cfg(target_os = "linux")]
+        if rec.engine == "ns" && !rec.cgroup_name.is_empty() {
+            self.cgroup_stop(&rec, id, grace_seconds);
+            return Ok(());
         }
 
         // grace > 0 → SIGTERM, wait up to grace, then SIGKILL. grace == 0 →
@@ -367,6 +586,11 @@ impl LightrBackend {
         self.cache().containers.remove(&id.0);
         let path = self.containers_dir().join(format!("{}.json", id.0));
         let _ = fs::remove_file(path);
+        // WP-#99: also drop the per-container dir (the hydrated rootfs lives at
+        // `<containers>/<cid>/rootfs`). Best-effort — a leftover dir must not fail
+        // an otherwise-idempotent remove; the record sidecar above is the gate.
+        let dir = self.containers_dir().join(&id.0);
+        let _ = fs::remove_dir_all(dir);
         Ok(())
     }
 }

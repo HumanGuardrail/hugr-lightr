@@ -127,6 +127,8 @@ fn boot_vm(
         cap_drop: &[],
         cap_add: &[],
         init: false,
+        join_netns: None,
+        cgroup_name: None,
     };
     let code = engine
         .run(&spec)

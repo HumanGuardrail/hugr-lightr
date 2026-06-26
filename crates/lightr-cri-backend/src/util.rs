@@ -45,6 +45,16 @@ pub struct ContainerRecord {
     /// PID of the spawned process; 0 = not started / exited.
     #[serde(default)]
     pub pid: u32,
+    /// WP-#99: which execution path backs this container. `"ns"` ⇒ the ns engine
+    /// (real image rootfs + pod netns); empty ⇒ today's host-process fallback.
+    /// Drives `stop`: ns ⇒ `cgroup.kill` (kills the in-pidns PID 1 + all
+    /// descendants), host ⇒ `kill(rec.pid)`. `serde(default)` ⇒ old records load.
+    #[serde(default)]
+    pub engine: String,
+    /// WP-#99: the cgroup-v2 leaf this ns container lives in (`lightr-cri-<cid>`);
+    /// empty for the host path. `stop` writes `<root>/<cgroup_name>/cgroup.kill`.
+    #[serde(default)]
+    pub cgroup_name: String,
 }
 
 // ── Time + id ────────────────────────────────────────────────────────────────

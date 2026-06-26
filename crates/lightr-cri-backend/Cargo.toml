@@ -28,6 +28,10 @@ lightr-store = { workspace = true }
 lightr-oci = { workspace = true }
 lightr-engine = { workspace = true }
 lightr-run = { workspace = true }
+# WP-#99 (CRI slice 1): materialize the image rootfs from the CAS store into a
+# per-container dir (`lightr_index::hydrate`) so the ns engine pivots into the
+# REAL image fs instead of running a bare host process.
+lightr-index = { workspace = true }
 # Image plane: deterministic ref-name hash for synthetic CAS records when a
 # ref has no store entry (transcribed from the fake's BLAKE3-over-ref, the
 # conformance reference).

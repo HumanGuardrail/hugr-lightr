@@ -559,8 +559,12 @@ jobs:
     # via crates/lightr-cri-serve) — kubelet→gRPC→LightrBackend→host-process. The
     # server runs AS ROOT so the pod sandbox (host_network:false) does netns + CNI
     # ADD (the path validated in #83) and the container joins the pod netns at
-    # spawn. Deliverable A (HARD GATE): crictl runp/create/start → container
-    # RUNNING, then clean teardown. Deliverable B: a lightr cold-start datum (N
+    # spawn. WP-#99: the container now runs the REAL image rootfs under the `ns`
+    # engine (hydrated from the CAS, pivoted, joined into the pod netns) — proven by
+    # the real-container gate (PID 1 + alpine-release in its own root) and the
+    # cgroup.kill stop gate. Deliverable A (HARD GATE): crictl runp/create/start →
+    # container RUNNING, real-container proof, cgroup.kill stop, clean teardown.
+    # Deliverable B: a lightr cold-start datum (N
     # iterations) + serve idle-RSS, REAL+measured on this runner; the containerd
     # A/B is a clearly-marked, NON-FATAL best-effort (flaky on network AND
     # apples-to-oranges — containerd runs the alpine ROOTFS, this backend runs a
@@ -623,30 +627,32 @@ jobs:
           CR version >/tmp/ver.txt 2>&1 || { echo "KPI3=FAIL (Version RPC failed)"; cat /tmp/ver.txt; sudo cat /tmp/serve.log; exit 1; }
           echo "=== serve answers crictl ==="; cat /tmp/ver.txt
 
-          # ── Step 2: make a small image available. PRIMARY = CRI pull path (crictl
+          # ── Step 2: make the alpine image available. PRIMARY = CRI pull path (crictl
           # pull → LightrBackend.pull_image → lightr_oci::pull). FALLBACK = pre-seed
-          # the SAME state store via the `lightr` bin (LIGHTR_HOME=$STATE → $STATE/store,
-          # the backend store root). NOTE: this backend's container plane runs the
-          # container COMMAND as a host process (PATH-resolved) joined into the pod
-          # netns — it does NOT hydrate the image rootfs — so the image is recorded but
-          # its content is not the container fs. Image availability is logged, not gated.
+          # the SAME state store via the `lightr` bin (LIGHTR_HOME=$STATE → $STATE/store).
+          # WP-#99: the container plane now HYDRATES this image's rootfs from the CAS and
+          # runs the command under the `ns` engine (real alpine root + pod netns), so the
+          # image content IS the container fs — the real-container gate below proves it.
+          # The store name MUST match `sanitize_ref("alpine:latest")` = "alpine-latest"
+          # so the hydrate lookup hits (the pre-seed name is set accordingly).
           if CR pull alpine:latest >/tmp/pull.log 2>&1; then
             echo "KPI3_IMAGE_PATH=crictl-pull"
           else
             echo "crictl pull failed — falling back to pre-seed:"; cat /tmp/pull.log
-            if sudo -E env LIGHTR_HOME="$STATE" "$LIGHTR" oci pull alpine:latest --name alpine >/tmp/seed.log 2>&1; then
+            if sudo -E env LIGHTR_HOME="$STATE" "$LIGHTR" oci pull alpine:latest --name alpine-latest >/tmp/seed.log 2>&1; then
               echo "KPI3_IMAGE_PATH=pre-seed"
             else
-              echo "KPI3_IMAGE_PATH=none (pull+pre-seed both failed — lifecycle proceeds; cmd is host-resolved)"; cat /tmp/seed.log
+              echo "KPI3=FAIL (alpine image unavailable — the real-container gate needs the rootfs)"; cat /tmp/seed.log; sudo pkill -f lightr-cri-serve; exit 1
             fi
           fi
           CR images 2>/dev/null || true
 
           # ── Step 3: pod-sandbox + container config (crictl JSON). host_network
           # defaults to false → the backend creates+pins a netns and runs CNI ADD. The
-          # container command is /bin/sh -c 'sleep 600' — host-resolvable (this backend
-          # execs the command as a host process in the pod netns), long-lived so it
-          # stays Running. ────────────────────────────────────────────────────────────
+          # container command (WP-#99) PROVES the real-container path: it prints its own
+          # PID (PID 1 ⇒ its own pid namespace), the alpine release file (only present in
+          # the ALPINE rootfs — NOT on the ubuntu runner), and `ls /` — all to its CRI
+          # log, then sleeps so it stays Running for the gate + a clean cgroup.kill stop.
           cat >/tmp/pod.json <<'JSON'
           {
             "metadata": { "name": "kpi3-pod", "uid": "kpi3-pod-uid", "namespace": "default", "attempt": 1 },
@@ -658,7 +664,7 @@ jobs:
           {
             "metadata": { "name": "kpi3-ctr", "attempt": 1 },
             "image": { "image": "alpine:latest" },
-            "command": ["/bin/sh", "-c", "sleep 600"],
+            "command": ["/bin/sh", "-c", "echo PID=$$; echo ALPINE_RELEASE=$(cat /etc/alpine-release); echo ROOTLS=$(ls / | tr '\\n' ',' ); sleep 600"],
             "log_path": "kpi3-ctr.log",
             "linux": {}
           }
@@ -689,7 +695,57 @@ jobs:
             CR stop "$CTR_ID" >/dev/null 2>&1; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve
             exit 1
           fi
-          echo "KPI3_LIFECYCLE=PASS (real container RUNNING through the composed CRI server: kubelet→gRPC→LightrBackend→host-process-in-pod-netns)"
+          echo "KPI3_LIFECYCLE=PASS (real container RUNNING through the composed CRI server: kubelet→gRPC→LightrBackend→ns-engine-in-pod-netns)"
+
+          # ── WP-#99 REAL-CONTAINER GATE: prove the container is the ALPINE rootfs
+          # under ns isolation (NOT a host process). The container wrote its proof to
+          # its CRI log; read it and assert. ───────────────────────────────────────────
+          sleep 2  # let the stdout→tee→CRI-log flush settle (the echoes are the container's first act)
+          CLOG="$LOGDIR/kpi3-ctr.log"
+          echo "=== container CRI log ($CLOG) ==="; sudo cat "$CLOG" 2>/dev/null || echo "(no log)"
+          # The runner (ubuntu) must NOT have /etc/alpine-release — so its presence in
+          # the container log can ONLY come from the alpine rootfs the container pivoted.
+          if [ -f /etc/alpine-release ]; then
+            echo "KPI3_REAL=SKIP-UNEXPECTED (runner unexpectedly has /etc/alpine-release — proof would be ambiguous)"; HOST_HAS_ALPINE=1
+          else
+            HOST_HAS_ALPINE=0
+          fi
+          LOGTXT="$(sudo cat "$CLOG" 2>/dev/null)"
+          FAIL=0
+          echo "$LOGTXT" | grep -q "PID=1"            || { echo "REAL_FAIL: container is not PID 1 (no own pid namespace)"; FAIL=1; }
+          echo "$LOGTXT" | grep -qE "ALPINE_RELEASE=[0-9]" || { echo "REAL_FAIL: /etc/alpine-release absent ⇒ container root is NOT the alpine rootfs (host-process fallback?)"; FAIL=1; }
+          [ "$HOST_HAS_ALPINE" = 0 ] || { echo "REAL_FAIL: runner has /etc/alpine-release — cannot attribute the proof to the container root"; FAIL=1; }
+          if [ "$FAIL" != 0 ]; then
+            echo "KPI3_REAL=FAIL (container is not the real alpine rootfs under ns isolation)"
+            echo "=== inspect ==="; CR inspect "$CTR_ID" 2>&1 | head -60
+            echo "=== serve.log ==="; sudo cat /tmp/serve.log
+            CR stop "$CTR_ID" >/dev/null 2>&1; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve
+            exit 1
+          fi
+          echo "KPI3_REAL=PASS (container is PID 1 in its own netns/pidns, rooted at the ALPINE rootfs — real ns container, not a host process)"
+
+          # ── WP-#99 STOP GATE: crictl stop must cgroup.kill the whole subtree. The
+          # cgroup leaf is `lightr-cri-<CTR_ID>`; after stop its cgroup.procs must be
+          # empty (PID 1 + descendants gone). ──────────────────────────────────────────
+          CGROUP="/sys/fs/cgroup/lightr-cri-$CTR_ID"
+          echo "=== cgroup.procs BEFORE stop ($CGROUP) ==="; sudo cat "$CGROUP/cgroup.procs" 2>/dev/null || echo "(cgroup absent — ns path not taken?)"
+          if [ ! -f "$CGROUP/cgroup.procs" ]; then
+            echo "KPI3_STOP=FAIL (no container cgroup at $CGROUP — the ns path was not taken)"; sudo cat /tmp/serve.log; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve; exit 1
+          fi
+          CR stop "$CTR_ID" >/tmp/stop.log 2>&1; echo "stop exit=$?"; cat /tmp/stop.log
+          # Poll the cgroup until empty (cgroup.kill is async-ish; give it a moment).
+          PROCS_LEFT="?"
+          for i in $(seq 1 20); do
+            PROCS_LEFT="$(sudo cat "$CGROUP/cgroup.procs" 2>/dev/null | tr -d ' \n')"
+            [ -z "$PROCS_LEFT" ] && break
+            sleep 0.5
+          done
+          echo "=== cgroup.procs AFTER stop ==="; sudo cat "$CGROUP/cgroup.procs" 2>/dev/null | head || echo "(empty/gone)"
+          if [ -n "$PROCS_LEFT" ]; then
+            echo "KPI3_STOP=FAIL (cgroup still has processes after stop: [$PROCS_LEFT] — cgroup.kill did not take down the subtree)"
+            sudo cat /tmp/serve.log; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve; exit 1
+          fi
+          echo "KPI3_STOP=PASS (crictl stop cgroup.kill'd the whole subtree — container cgroup empty)"
 
           # ── Deliverable B — lightr cold-start (REAL, reuses this serve). ───────────
           echo "=== B: lightr cold-start (create+start → Running), N iterations, same pod ==="

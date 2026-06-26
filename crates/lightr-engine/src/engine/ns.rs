@@ -157,6 +157,11 @@ mod ns_impl {
             // WP-#95: `--init` ⇒ run a minimal PID-1 reaper inside the new pid ns
             // (the workload becomes PID 2); false ⇒ the workload is PID 1 directly.
             let init = spec.init;
+            // WP-#99: JOIN an existing (CNI-pinned) netns instead of creating one,
+            // and an EXPLICIT cgroup leaf name. Captured (owned) before the fork so
+            // the child owns its copy, exactly like `command`/`cap_*`.
+            let join_netns: Option<std::path::PathBuf> = spec.join_netns.map(|p| p.to_owned());
+            let cgroup_name: Option<String> = spec.cgroup_name.map(|s| s.to_owned());
 
             // WP-#95: fork the SETUP process. NOTE (corrected from a wrong pre-#95
             // comment): this child does NOT become PID 1 — `unshare(CLONE_NEWPID)`
@@ -184,6 +189,8 @@ mod ns_impl {
                         &cap_drop,
                         &cap_add,
                         init,
+                        join_netns.as_deref(),
+                        cgroup_name.as_deref(),
                     );
                     std::process::exit(rc);
                 }
@@ -222,7 +229,24 @@ mod ns_impl {
         cap_drop: &[String],
         cap_add: &[String],
         init: bool,
+        join_netns: Option<&std::path::Path>,
+        cgroup_name: Option<&str>,
     ) -> i32 {
+        // WP-#99: JOIN the pod's existing netns BEFORE `unshare(CLONE_NEWUSER)`.
+        // THE ordering rule: we must `setns(CLONE_NEWNET)` while still real root in
+        // the HOST init userns — the pinned netns is owned by the host userns, and a
+        // CHILD userns (post-unshare) holds NO capabilities over it, so a join after
+        // the userns unshare EPERMs. So this is the very first thing we do. Joining a
+        // netns and creating one (`net_isolate`) are mutually exclusive — join wins.
+        // Fail-closed: any failure returns 1 (the setup process, pre-fork, so a
+        // `return` is correct here — we are NOT yet PID 1).
+        if let Some(ns_path) = join_netns {
+            if let Err(e) = setns_netns(ns_path) {
+                eprintln!("lightr-engine ns: join netns {ns_path:?} failed: {e}");
+                return 1;
+            }
+        }
+
         // Capture the REAL outer uid/gid BEFORE unsharing the user namespace.
         // After unshare(CLONE_NEWUSER) and before a map is written, the process
         // has no mapping, so getuid()/getgid() return the overflow id (65534);
@@ -238,7 +262,9 @@ mod ns_impl {
         // ports are invisible. When net_isolate=false the flags are byte-identical
         // to before (share host network — zero regression).
         let mut flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
-        if net_isolate {
+        // WP-#99: when JOINING a netns we already `setns`'d into it above and must
+        // NOT also create a fresh one — `join_netns` wins over `net_isolate`.
+        if net_isolate && join_netns.is_none() {
             flags |= libc::CLONE_NEWNET;
         }
         if unsafe { libc::unshare(flags) } != 0 {
@@ -267,7 +293,10 @@ mod ns_impl {
         // (the Linux-CI resource-limits job exposed this — the caps never actually
         // applied). cgroup membership survives the later mount-ns pivot, and exec
         // inherits it. Fail closed: any error returns 1.
-        if let Err(e) = crate::limits::apply_cgroup(limits) {
+        // WP-#99: `cgroup_name`, when set, pins the leaf so the CRI backend's
+        // `stop` can `cgroup.kill` the whole subtree; it also forces leaf creation
+        // even when limits are unlimited (so the container is always killable).
+        if let Err(e) = crate::limits::apply_cgroup(limits, cgroup_name) {
             eprintln!("lightr-engine ns: apply_cgroup failed: {e}");
             return 1;
         }
@@ -276,8 +305,11 @@ mod ns_impl {
         // even loopback traffic fails. Bring `lo` up here — we hold CAP_NET_ADMIN
         // in the new userns, so this works rootless. MUST run AFTER the uid/gid
         // map is written (the cap is only effective once the map exists) and
-        // BEFORE pivot_root/exec. Fail closed: any error returns 1.
-        if net_isolate {
+        // BEFORE pivot_root/exec. Fail closed: any error returns 1. WP-#99: SKIP
+        // when joining an existing netns (the pod's `lo` is already configured by
+        // CNI; we hold no NET_ADMIN over the host-owned netns from our child userns
+        // anyway — `join_netns` wins over the `net_isolate` loopback path).
+        if net_isolate && join_netns.is_none() {
             if let Err(e) = bring_up_loopback() {
                 eprintln!("lightr-engine ns: bring up loopback failed: {e}");
                 return 1;
@@ -645,6 +677,20 @@ mod ns_impl {
 
     fn write_map(path: &str, content: &str) -> std::io::Result<()> {
         std::fs::write(path, content.as_bytes())
+    }
+
+    /// WP-#99: open the pinned netns at `path` `O_RDONLY` and `setns` into it
+    /// (CLONE_NEWNET). MUST be called while still real root in the HOST init userns
+    /// (BEFORE `unshare(CLONE_NEWUSER)`) — see the call-site ordering note. Returns
+    /// an honest `io::Error` on open/setns failure so the caller fails closed.
+    fn setns_netns(path: &std::path::Path) -> std::io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+        let f = std::fs::OpenOptions::new().read(true).open(path)?;
+        let rc = unsafe { libc::setns(f.as_raw_fd(), libc::CLONE_NEWNET) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(()) // `f` drops here, closing the fd after the successful setns.
     }
 
     /// WP-#94: enforce the `desired` capability set (numbers, sorted) via raw libc.

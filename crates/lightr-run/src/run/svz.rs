@@ -183,6 +183,8 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         cap_drop: &[],
                         cap_add: &[],
                         init: false,
+                        join_netns: None,
+                        cgroup_name: None,
                     };
                     engine.run(&spec).unwrap_or(255)
                 }

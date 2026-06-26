@@ -171,6 +171,10 @@ pub(super) fn run_engine(
         // real PID-1 reaper; native/vz treat it as a recorded-only carry-slot).
         // RUNTIME-ONLY — never part of the memo key.
         init,
+        // WP-#99: CRI-only carry-slots (join a pod netns / explicit cgroup leaf).
+        // The CLI run path never sets them — defaults preserve today's behaviour.
+        join_netns: None,
+        cgroup_name: None,
     };
 
     let code = match engine.run(&spec) {
