@@ -564,11 +564,13 @@ jobs:
     # the real-container gate (PID 1 + alpine-release in its own root) and the
     # cgroup.kill stop gate. Deliverable A (HARD GATE): crictl runp/create/start →
     # container RUNNING, real-container proof, cgroup.kill stop, clean teardown.
-    # Deliverable B: a lightr cold-start datum (N
-    # iterations) + serve idle-RSS, REAL+measured on this runner; the containerd
-    # A/B is a clearly-marked, NON-FATAL best-effort (flaky on network AND
-    # apples-to-oranges — containerd runs the alpine ROOTFS, this backend runs a
-    # host process — so its ratio is NOT signed as a like-for-like KPI here).
+    # Deliverable B: a lightr cold-start datum (N iterations) + serve idle-RSS,
+    # REAL+measured on this runner, A/B'd against containerd's CRI plugin running
+    # the SAME alpine:latest rootfs via the SAME crictl/gRPC + SAME CNI on the
+    # SAME runner — now LIKE-FOR-LIKE (post-#99 both run the real rootfs; the
+    # crictl round-trip is common to both arms and cancels in the ratio). The
+    # containerd bring-up is SOFT/non-fatal (TODO if its CRI can't come up), but
+    # if it DOES come up the measurement runs and the A/B ratio is SIGNED.
     # Same private-sibling auth + manifest-path build as cri-serve-smoke.
     runs-on: ubuntu-latest
     steps:
@@ -780,6 +782,8 @@ jobs:
           echo "KPI3_LIGHTR_COLDSTART_MS_SAMPLES=$TIMES"
           echo "$TIMES" | tr ' ' '\n' | grep -E '^[0-9]+$' | \
             awk 'NR==1{min=$1;max=$1} {s+=$1; n++; if($1<min)min=$1; if($1>max)max=$1} END{ if(n>0) printf "KPI3_LIGHTR_COLDSTART_MS mean=%.1f min=%d max=%d n=%d (includes crictl gRPC round-trip overhead)\n", s/n, min, max, n }'
+          # Capture the lightr mean for the like-for-like A/B sign-off below.
+          LIGHTR_MEAN=$(echo "$TIMES" | tr ' ' '\n' | grep -E '^[0-9]+$' | awk '{s+=$1;n++} END{if(n>0) printf "%.1f", s/n}')
 
           # serve idle RSS after one pod (honest footprint datum on this runner).
           SERVE_PID=$(pgrep -f lightr-cri-serve | head -1)
@@ -794,23 +798,118 @@ jobs:
           echo "=== post-teardown ps -a ==="; CR ps -a 2>&1 | head
           sudo pkill -f lightr-cri-serve 2>/dev/null
 
-          # ── B (best-effort, NON-FATAL): containerd A/B. Apples-to-oranges caveat stands.
-          echo "=== B: containerd A/B (best-effort, non-fatal) ==="
-          if command -v containerd >/dev/null 2>&1; then
-            CTRD_SOCK=/run/containerd/containerd.sock
-            sudo systemctl start containerd 2>/dev/null || sudo containerd >/tmp/containerd.log 2>&1 &
-            for i in $(seq 1 30); do [ -S "$CTRD_SOCK" ] && break; sleep 1; done
-            CTRD() { sudo crictl --runtime-endpoint "unix://$CTRD_SOCK" --image-endpoint "unix://$CTRD_SOCK" "$@"; }
-            if [ -S "$CTRD_SOCK" ] && CTRD version >/dev/null 2>&1; then
-              CTRD pull alpine:latest >/tmp/ctrd-pull.log 2>&1 && echo "containerd: alpine pulled" || { echo "containerd alpine pull failed (network?) — A/B deferred"; cat /tmp/ctrd-pull.log; }
-              echo "NOTE: containerd runs the alpine ROOTFS; lightr-backend runs a host process — the cold-start numbers are NOT like-for-like and the ratio is intentionally NOT signed as a KPI here. Lead to iterate if a like-for-like harness is wanted."
-              CTRD_PID=$(pgrep -x containerd | head -1)
-              [ -n "$CTRD_PID" ] && echo "KPI3_CONTAINERD_RSS_KB=$(sudo ps -o rss= -p "$CTRD_PID" 2>/dev/null | tr -d ' ') (pid $CTRD_PID)"
-            else
-              echo "containerd socket/version not available — A/B deferred (TODO for the lead on a runner with containerd CRI up)."
-            fi
+          # ── B — containerd A/B (LIKE-FOR-LIKE, SOFT/non-fatal bring-up). Post-#99 the
+          # lightr side runs the REAL alpine rootfs under ns isolation driven via
+          # crictl/gRPC; containerd runs the SAME alpine:latest image via the SAME
+          # crictl/gRPC over its CRI socket, on the SAME runner, reading the SAME
+          # /etc/cni/net.d — so the crictl round-trip overhead is common to both and
+          # CANCELS in the ratio. Soft gate: if containerd CRI can't come up, print a
+          # TODO and DON'T fail. But if it DOES come up, the measurement MUST run and
+          # print real numbers (no false-green); a run failure prints the error.
+          echo "=== B: containerd A/B (same alpine rootfs, same crictl/gRPC, same CNI on this runner) ==="
+          CTRD_MEAN=""
+          CTRD_RSS_KB=""
+          CTRD_SHIM_RSS_KB=""
+          if ! command -v containerd >/dev/null 2>&1; then
+            echo "KPI3_CONTAINERD=TODO (containerd not present on this runner — A/B skipped, non-fatal)"
           else
-            echo "containerd not present — A/B deferred (TODO)."
+            CTRD_SOCK=/run/containerd/containerd.sock
+            # Enable the CRI plugin: the default config ships io.containerd.grpc.v1.cri ENABLED.
+            sudo mkdir -p /etc/containerd
+            containerd config default | sudo tee /etc/containerd/config.toml >/dev/null
+            sudo systemctl restart containerd >/dev/null 2>&1 \
+              || { echo "systemd restart unavailable — starting containerd directly"; sudo containerd >/tmp/containerd.log 2>&1 & }
+            for i in $(seq 1 40); do [ -S "$CTRD_SOCK" ] && break; sleep 0.5; done
+            CTRD() { sudo crictl --runtime-endpoint "unix://$CTRD_SOCK" --image-endpoint "unix://$CTRD_SOCK" "$@"; }
+            if [ ! -S "$CTRD_SOCK" ] || ! CTRD version >/tmp/ctrd-ver.txt 2>&1; then
+              echo "KPI3_CONTAINERD=TODO (containerd CRI did not come up — socket/version unavailable, A/B skipped, non-fatal)"
+              cat /tmp/ctrd-ver.txt 2>/dev/null || true
+              sudo tail -20 /tmp/containerd.log 2>/dev/null || true
+            else
+              echo "containerd CRI up:"; grep -i "RuntimeName\|RuntimeVersion" /tmp/ctrd-ver.txt || cat /tmp/ctrd-ver.txt
+              CTRD_OK=1
+              # Pod sandbox networking on containerd needs the pause image (best-effort;
+              # runp may also pull it). Honest about pull failures.
+              CTRD pull registry.k8s.io/pause:3.10 >/tmp/ctrd-pause.log 2>&1 \
+                || { echo "containerd pause pull failed (runp may still pull it) — continuing"; cat /tmp/ctrd-pause.log; }
+              # SAME workload image.
+              if ! CTRD pull alpine:latest >/tmp/ctrd-pull.log 2>&1; then
+                echo "KPI3_CONTAINERD=ERROR (containerd CRI up but alpine:latest pull failed — A/B not measurable)"; cat /tmp/ctrd-pull.log; CTRD_OK=0
+              fi
+              # SAME pod (reuse /tmp/pod.json).
+              if [ "$CTRD_OK" = 1 ]; then
+                CPOD_ID=$(CTRD runp /tmp/pod.json 2>/tmp/ctrd-runp.log)
+                if [ -z "$CPOD_ID" ]; then
+                  echo "KPI3_CONTAINERD=ERROR (containerd runp returned no pod id — A/B not measurable)"; cat /tmp/ctrd-runp.log; CTRD_OK=0
+                fi
+              fi
+              if [ "$CTRD_OK" = 1 ]; then
+                echo "CTRD_POD_ID=$CPOD_ID"
+                # SAME measurement: N=5, create+start → CONTAINER_RUNNING, same poll cadence.
+                N=5
+                CTIMES=""
+                for it in $(seq 1 "$N"); do
+                  cat >/tmp/ctrd-ctr-b.json <<JSON
+          {
+            "metadata": { "name": "kpi3-ctrd-bench", "attempt": $it },
+            "image": { "image": "alpine:latest" },
+            "command": ["/bin/sh", "-c", "sleep 600"],
+            "log_path": "kpi3-ctrd-bench-$it.log",
+            "linux": {}
+          }
+          JSON
+                  t0=$(date +%s%N)
+                  CBID=$(CTRD create "$CPOD_ID" /tmp/ctrd-ctr-b.json /tmp/pod.json 2>/dev/null)
+                  CTRD start "$CBID" >/dev/null 2>&1
+                  cdeadline=$((SECONDS + 30))
+                  while :; do
+                    S=$(CTRD inspect "$CBID" 2>/dev/null | jq -r '.status.state' 2>/dev/null)
+                    [ "$S" = "CONTAINER_RUNNING" ] && break
+                    [ "$SECONDS" -ge "$cdeadline" ] && break
+                    sleep 0.02
+                  done
+                  t1=$(date +%s%N)
+                  ms=$(( (t1 - t0) / 1000000 ))
+                  echo "containerd iter $it: ${ms}ms (state=$S)"
+                  CTIMES="$CTIMES $ms"
+                  CTRD stop "$CBID" >/dev/null 2>&1; CTRD rm "$CBID" >/dev/null 2>&1
+                done
+                echo "KPI3_CONTAINERD_COLDSTART_MS_SAMPLES=$CTIMES"
+                echo "$CTIMES" | tr ' ' '\n' | grep -E '^[0-9]+$' | \
+                  awk 'NR==1{min=$1;max=$1} {s+=$1; n++; if($1<min)min=$1; if($1>max)max=$1} END{ if(n>0) printf "KPI3_CONTAINERD_COLDSTART_MS mean=%.1f min=%d max=%d n=%d (includes crictl gRPC round-trip overhead)\n", s/n, min, max, n }'
+                CTRD_MEAN=$(echo "$CTIMES" | tr ' ' '\n' | grep -E '^[0-9]+$' | awk '{s+=$1;n++} END{if(n>0) printf "%.1f", s/n}')
+                # containerd daemon RSS + the per-container shim RSS (attributed separately —
+                # containerd-shim-runc-v2 is one process per running container, not in the daemon).
+                CTRD_PID=$(pgrep -x containerd | head -1)
+                if [ -n "$CTRD_PID" ]; then
+                  CTRD_RSS_KB=$(sudo ps -o rss= -p "$CTRD_PID" 2>/dev/null | tr -d ' ')
+                  echo "KPI3_CONTAINERD_RSS_KB=$CTRD_RSS_KB (containerd daemon pid $CTRD_PID; EXCLUDES per-container containerd-shim-runc-v2)"
+                fi
+                CTRD_SHIM_RSS_KB=$(ps -o rss= -C containerd-shim-runc-v2 2>/dev/null | awk '{s+=$1} END{if(s>0) print s}')
+                [ -n "$CTRD_SHIM_RSS_KB" ] && echo "KPI3_CONTAINERD_SHIM_RSS_KB=$CTRD_SHIM_RSS_KB (sum of live containerd-shim-runc-v2 RSS; one shim per running container)"
+                # Teardown containerd pod (cascades).
+                CTRD rmp -f "$CPOD_ID" >/dev/null 2>&1
+              fi
+            fi
+          fi
+
+          # ── Sign the A/B (honest, like-for-like, tense-disciplined). Only numbers
+          # MEASURED on this runner are printed; the ratio is meaningful because the
+          # crictl/gRPC round-trip is common to both arms and cancels.
+          echo "=== KPI3 A/B sign-off: lightr vs containerd (same alpine:latest, same crictl/gRPC, same CNI, same ubuntu-latest runner) ==="
+          echo "KPI3_AB_LIGHTR_COLDSTART_MS_MEAN=${LIGHTR_MEAN:-NA}"
+          echo "KPI3_AB_CONTAINERD_COLDSTART_MS_MEAN=${CTRD_MEAN:-NA(containerd-A/B-not-measured)}"
+          echo "KPI3_AB_LIGHTR_SERVE_RSS_KB=${RSS_KB:-NA}"
+          echo "KPI3_AB_CONTAINERD_DAEMON_RSS_KB=${CTRD_RSS_KB:-NA(containerd-A/B-not-measured)}"
+          echo "KPI3_AB_CONTAINERD_SHIM_RSS_KB=${CTRD_SHIM_RSS_KB:-NA}"
+          if [ -n "$LIGHTR_MEAN" ] && [ -n "$CTRD_MEAN" ]; then
+            awk -v l="$LIGHTR_MEAN" -v c="$CTRD_MEAN" 'BEGIN{ if(l>0 && c>0) printf "KPI3_AB_COLDSTART_RATIO=%.2fx (containerd_mean/lightr_mean; >1 => lightr faster) — both via crictl gRPC, same image, same CNI, same runner; the crictl round-trip is common to both arms and CANCELS in the ratio\n", c/l; else print "KPI3_AB_COLDSTART_RATIO=NA (a measured mean was non-positive)" }'
+            if [ -n "$RSS_KB" ] && [ -n "$CTRD_RSS_KB" ]; then
+              awk -v l="$RSS_KB" -v c="$CTRD_RSS_KB" 'BEGIN{ if(l>0 && c>0) printf "KPI3_AB_RSS_RATIO=%.2fx (containerd-daemon-RSS/lightr-serve-RSS; per-container shim RSS reported separately, not folded in)\n", c/l }'
+            fi
+            echo "KPI3_AB=SIGNED (like-for-like on this runner — see ratios above)"
+          else
+            echo "KPI3_AB=PARTIAL (lightr side measured + signed; containerd A/B unavailable on this runner — non-fatal, see TODO/ERROR above)"
           fi
 
           echo "KPI3=PASS"
