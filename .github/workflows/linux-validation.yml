@@ -136,22 +136,26 @@ jobs:
           echo "NS_TRUE=PASS"
 
           # ── 5) #96: /proc is mounted AND reflects the new pid ns ──
-          # The fresh procfs PID 1 mounts (before pivot_root) makes /proc/self/status
-          # report Pid: 1 (the in-ns pid). Pre-#96 the rootless /proc mount EPERM'd
-          # and no-op'd, so /proc was absent and this read would fail.
-          "$BIN" run --engine ns --rootfs alpine -- /bin/busybox sh -c 'cat /proc/self/status | grep ^Pid:' >/tmp/procpid.txt 2>&1
-          echo "--- /proc/self/status Pid: (no --init) ---"; cat /tmp/procpid.txt
-          PP=$(awk '/^Pid:/{print $2; exit}' /tmp/procpid.txt)
-          if [ "$PP" != "1" ]; then
-            echo "NS_PROC_PID=FAIL (/proc/self/status Pid='$PP', expected 1 — /proc absent or not reflecting the new pid ns)"; exit 1
+          # The fresh procfs PID 1 mounts (before pivot_root). NOTE: don't read
+          # /proc/self in a PIPELINE — `cat /proc/.. | grep` makes `cat` a CHILD of
+          # the PID-1 shell, so /proc/self is the child's (pid 2), which is correct
+          # but not 1. Instead prove /proc reflects the ISOLATED ns by the per-process
+          # dir COUNT: a host /proc has hundreds of numeric dirs; the new ns has only
+          # a couple. Pre-#96 the rootless /proc mount EPERM'd + no-op'd → /proc absent
+          # → ls finds 0 numeric dirs → also fails this (count -ge 1 required).
+          "$BIN" run --engine ns --rootfs alpine -- /bin/busybox sh -c 'ls -1 /proc | grep -c "^[0-9][0-9]*$"' >/tmp/proccount.txt 2>&1
+          echo "--- numeric /proc dirs (no --init) ---"; cat /tmp/proccount.txt
+          PC=$(tail -1 /tmp/proccount.txt | tr -dc '0-9')
+          if [ -z "$PC" ] || [ "$PC" -lt 1 ] || [ "$PC" -gt 10 ]; then
+            echo "NS_PROC_NS=FAIL (numeric /proc dirs='$PC'; expected 1..10 — /proc absent or showing HOST pids)"; exit 1
           fi
-          echo "NS_PROC_PID=PASS"
+          echo "NS_PROC_NS=PASS (/proc shows $PC pid dir(s) — isolated ns, not the host)"
 
-          # ── 6) #96: /proc is POPULATED (per-process dirs present) ──
-          "$BIN" run --engine ns --rootfs alpine -- /bin/busybox sh -c 'ls /proc/1 >/dev/null && echo PROC_OK' >/tmp/procls.txt 2>&1
-          PO=$?; echo "--- ls /proc/1 ---"; cat /tmp/procls.txt
+          # ── 6) #96: PID 1's own /proc entry is present + readable ──
+          "$BIN" run --engine ns --rootfs alpine -- /bin/busybox sh -c 'test -r /proc/1/status && echo PROC_OK' >/tmp/procls.txt 2>&1
+          PO=$?; echo "--- /proc/1/status readable ---"; cat /tmp/procls.txt
           if [ "$PO" != "0" ] || ! grep -q "PROC_OK" /tmp/procls.txt; then
-            echo "NS_PROC_POP=FAIL (proc not populated; exit=$PO)"; exit 1
+            echo "NS_PROC_POP=FAIL (/proc/1 not present/readable; exit=$PO)"; exit 1
           fi
           echo "NS_PROC_POP=PASS"
           echo "NS_PIDNS=PASS"
