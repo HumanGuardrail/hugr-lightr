@@ -109,7 +109,14 @@ fn cow_reflink(src: &Path, dst: &Path) -> std::io::Result<()> {
         .truncate(true)
         .open(dst)?;
     const FICLONE: libc::c_ulong = 0x40049409;
-    let ret = unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd()) };
+    // `libc::ioctl`'s request arg is `c_ulong` on glibc but `c_int` on musl, so
+    // pass FICLONE through `try_into` (identity on glibc; checked u64→i32 on musl —
+    // 0x40049409 fits in i32, so it never fails). Without this the musl target
+    // fails to compile (a real pre-existing break; glibc CI was unaffected).
+    let request = FICLONE
+        .try_into()
+        .expect("FICLONE constant fits the platform ioctl request type");
+    let ret = unsafe { libc::ioctl(dst_file.as_raw_fd(), request, src_file.as_raw_fd()) };
     if ret == 0 {
         Ok(())
     } else {
