@@ -142,44 +142,50 @@ impl LightrBackend {
 
     // ── WP-#99: NS-path planning + rootfs hydrate (linux only) ────────────────
 
-    /// Decide whether THIS container can run under the `ns` engine (real image
-    /// rootfs + pod netns) and, if so, build the `RunDescriptor` for the
-    /// `__ns-run` shim. Returns `None` — falling back to the host-process path —
-    /// when any precondition is missing: no pinned pod netns (host_network / no
-    /// CNI), the ns engine is unavailable (not root / no kernel support), or the
-    /// image fails to hydrate. Every `None` is a behavior-preserving fallback.
+    /// Build the `ns`-engine `RunDescriptor` (real image rootfs + pod netns) for an
+    /// **isolation-expecting** pod — the caller has already confirmed the sandbox
+    /// has a pinned netns. Returns `Err` (FAILING the container start) when the ns
+    /// engine is unavailable or the image cannot hydrate.
+    ///
+    /// AUDIT FIX (#99): the previous `Option` contract silently fell back to an
+    /// unisolated HOST process when hydrate/engine failed — for a pod that has an
+    /// isolated netns, that is FALSE ISOLATION the kubelet cannot detect (the
+    /// container is still reported `Running`). Fail-closed instead. host_network /
+    /// no-CNI pods (no pinned netns) legitimately use the host path; the caller
+    /// gates on that and never calls this.
     #[cfg(target_os = "linux")]
-    fn try_build_ns_plan(
+    fn build_ns_plan(
         &self,
         rec: &ContainerRecord,
         argv: &[String],
-    ) -> Option<crate::ns_run::RunDescriptor> {
-        // The pod must have a pinned netns to join (CNI set it). host_network pods
-        // and the no-CNI/unprivileged fallback have None ⇒ host path.
+    ) -> Result<crate::ns_run::RunDescriptor> {
         let netns_path = self
             .cache()
             .sandboxes
             .get(&rec.sandbox.0)
-            .and_then(|s| s.netns_path.clone())?;
+            .and_then(|s| s.netns_path.clone())
+            .ok_or_else(|| {
+                BackendError::Internal("build_ns_plan called without a pod netns".to_string())
+            })?;
 
-        // The ns engine must actually be available here (root + Linux + kernel
-        // support). probe() failing ⇒ host path (honest, no false isolation).
-        if lightr_engine::engine_for(lightr_engine::EngineKind::Ns).is_err() {
-            return None;
-        }
+        // The ns engine must be available (root + Linux). For an isolation-expecting
+        // pod this is REQUIRED — an unavailable engine is a hard error, not a silent
+        // host downgrade.
+        lightr_engine::engine_for(lightr_engine::EngineKind::Ns).map_err(|e| {
+            BackendError::Internal(format!(
+                "ns engine unavailable for an isolation-expecting pod (container {}): {e}",
+                rec.id.0
+            ))
+        })?;
 
-        // Materialize the image rootfs from the CAS; a miss ⇒ host fallback.
-        let rootfs = match self.hydrate_rootfs(&rec.id, &rec.config.image_ref) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!(
-                    "lightr-cri: hydrate rootfs for container {} (image {:?}) failed: {e}; \
-                     falling back to host-process path",
-                    rec.id.0, rec.config.image_ref
-                );
-                return None;
-            }
-        };
+        // Materialize the image rootfs from the CAS; a miss is a hard error (cannot
+        // run the real container ⇒ refuse rather than run an unisolated host process).
+        let rootfs = self.hydrate_rootfs(&rec.id, &rec.config.image_ref).map_err(|e| {
+            BackendError::Internal(format!(
+                "hydrate rootfs for container {} (image {:?}) failed: {e}",
+                rec.id.0, rec.config.image_ref
+            ))
+        })?;
 
         // Capabilities from the v1.2 security context, when present (CRI style).
         let (cap_add, cap_drop) = match rec
@@ -192,7 +198,7 @@ impl LightrBackend {
             None => (Vec::new(), Vec::new()),
         };
 
-        Some(crate::ns_run::RunDescriptor {
+        Ok(crate::ns_run::RunDescriptor {
             rootfs,
             argv: argv.to_vec(),
             cwd: rec.config.working_dir.clone(),
@@ -299,9 +305,25 @@ impl LightrBackend {
         // ns engine is available + the image hydrates). EVERY other case falls
         // back to today's host-process path (behavior-preserving) — `ns_descriptor`
         // is `None` there, including on non-linux (so the macOS gate is untouched).
+        // AUDIT FIX (#99): gate on whether the POD expects isolation (has a pinned
+        // netns from CNI). If it does, the ns plan MUST succeed — a hydrate/engine
+        // failure FAILS the start (`?`) rather than silently degrading to an
+        // unisolated host process (false isolation the kubelet can't see). Only
+        // host_network / no-CNI pods (no netns) — and non-linux — take the host path.
         #[cfg(target_os = "linux")]
-        let ns_descriptor: Option<crate::ns_run::RunDescriptor> =
-            self.try_build_ns_plan(&rec, &argv);
+        let ns_descriptor: Option<crate::ns_run::RunDescriptor> = {
+            let pod_has_netns = self
+                .cache()
+                .sandboxes
+                .get(&rec.sandbox.0)
+                .and_then(|s| s.netns_path.clone())
+                .is_some();
+            if pod_has_netns {
+                Some(self.build_ns_plan(&rec, &argv)?)
+            } else {
+                None
+            }
+        };
         #[cfg(not(target_os = "linux"))]
         let ns_descriptor: Option<crate::ns_run::RunDescriptor> = None;
 
@@ -495,13 +517,47 @@ impl LightrBackend {
             self.wait_until_exited(id, grace);
             // Always finish with cgroup.kill: guarantees the in-pidns PID 1 + all
             // descendants are gone even if SIGTERM was ignored (idempotent).
-            let _ = fs::write(&kill_file, b"1");
+            Self::cgroup_force_kill(&leaf, &kill_file);
             self.wait_until_exited(id, std::time::Duration::from_secs(5));
         } else {
-            let _ = fs::write(&kill_file, b"1");
+            Self::cgroup_force_kill(&leaf, &kill_file);
             self.wait_until_exited(id, std::time::Duration::from_secs(5));
         }
     }
+
+    /// Kill every process in the container cgroup. AUDIT FIX (#99): `cgroup.kill`
+    /// (cgroup v2, kernel ≥5.14) is the atomic primitive, but it does NOT exist on
+    /// older kernels — the previous `let _ = fs::write(cgroup.kill, "1")` SWALLOWED
+    /// that error, so `stop` silently no-op'd and the container leaked while
+    /// returning `Ok`. Now: try `cgroup.kill`; if the write fails (missing file /
+    /// error), FALL BACK to SIGKILL'ing every pid in `cgroup.procs` so the
+    /// container is actually torn down rather than silently surviving.
+    #[cfg(unix)]
+    fn cgroup_force_kill(leaf: &std::path::Path, kill_file: &std::path::Path) {
+        if fs::write(kill_file, b"1").is_ok() {
+            return;
+        }
+        // cgroup.kill unavailable/failed → SIGKILL the cgroup's members directly.
+        match fs::read_to_string(leaf.join("cgroup.procs")) {
+            Ok(procs) => {
+                eprintln!(
+                    "lightr-cri: cgroup.kill unavailable at {} — falling back to SIGKILL of cgroup.procs",
+                    kill_file.display()
+                );
+                for line in procs.lines() {
+                    if let Ok(pid) = line.trim().parse::<i32>() {
+                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                    }
+                }
+            }
+            Err(e) => eprintln!(
+                "lightr-cri: stop could not cgroup.kill NOR read cgroup.procs at {}: {e} — container may leak",
+                leaf.display()
+            ),
+        }
+    }
+    #[cfg(not(unix))]
+    fn cgroup_force_kill(_leaf: &std::path::Path, _kill_file: &std::path::Path) {}
 
     // ── stop (SIGTERM→SIGKILL grace) ─────────────────────────────────────────
 

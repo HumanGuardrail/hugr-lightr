@@ -34,7 +34,8 @@ pub struct RunDescriptor {
     /// `ExecSpec.join_netns`. `None` would fall back to host networking — the
     /// backend only takes the ns path when this is `Some`.
     pub netns_path: Option<String>,
-    /// The explicit cgroup-v2 leaf name (e.g. `lightr-cri/<cid>`). Becomes
+    /// The explicit cgroup-v2 leaf name (`lightr-cri-<cid>`, a flat leaf — dash
+    /// not slash, so `stop` rebuilds the same path). Becomes
     /// `ExecSpec.cgroup_name`; the backend's `stop` writes its `cgroup.kill`.
     pub cgroup_name: String,
     /// `--read-only`: remount the rootfs RO. Becomes `ExecSpec.read_only`.
