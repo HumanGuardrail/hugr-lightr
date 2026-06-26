@@ -28,6 +28,12 @@ pub mod vocab;
 // `lightr-cri-serve` (consumer). One type, no drift.
 pub mod ns_run;
 
+// WP-#100 (CRI exec slice 1): the `__ns-exec` re-exec shim — the nsenter model
+// for `crictl exec` into a running `ns` container (setns into PID-1's
+// namespaces). Shared `ExecDescriptor` type + `run_exec_shim`; `lightr-cri-serve`
+// only forwards `__ns-exec` here (same pattern as `ns_run`).
+pub mod ns_exec;
+
 // WP-CRI-MVP planes (split by concern, each <400 LOC). The trait impl below
 // delegates to the inherent `_impl` methods defined in these modules. Streaming
 // stays fail-closed here (WP-CRI-STREAM); the sandbox/pod plane is now wired
