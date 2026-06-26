@@ -154,9 +154,18 @@ mod ns_impl {
             // Captured (cloned) before fork, like `command`, so the child owns them.
             let cap_drop: Vec<String> = spec.cap_drop.to_vec();
             let cap_add: Vec<String> = spec.cap_add.to_vec();
+            // WP-#95: `--init` ⇒ run a minimal PID-1 reaper inside the new pid ns
+            // (the workload becomes PID 2); false ⇒ the workload is PID 1 directly.
+            let init = spec.init;
 
-            // Fork so the child becomes PID 1 in the new PID namespace.
-            // Safety: standard fork+exec pattern; we exec immediately in child.
+            // WP-#95: fork the SETUP process. NOTE (corrected from a wrong pre-#95
+            // comment): this child does NOT become PID 1 — `unshare(CLONE_NEWPID)`
+            // only places the unsharer's FIRST CHILD into the new pid namespace, and
+            // this child is the unsharer, not its child. It is the *external* parent
+            // of PID 1; it performs all sandbox setup (userns map, cgroup, mounts,
+            // pivot_root, caps logic) while holding CAP_SYS_ADMIN in the new userns,
+            // then forks AGAIN inside `run_in_namespaces` so the grandchild is PID 1.
+            // Safety: standard fork pattern; the child runs setup then forks+execs.
             let pid = unsafe { libc::fork() };
             match pid {
                 -1 => Err(LightrError::Io(std::io::Error::last_os_error())),
@@ -172,6 +181,7 @@ mod ns_impl {
                         shm_size,
                         &cap_drop,
                         &cap_add,
+                        init,
                     );
                     std::process::exit(rc);
                 }
@@ -209,6 +219,7 @@ mod ns_impl {
         shm_size: Option<u64>,
         cap_drop: &[String],
         cap_add: &[String],
+        init: bool,
     ) -> i32 {
         // Capture the REAL outer uid/gid BEFORE unsharing the user namespace.
         // After unshare(CLONE_NEWUSER) and before a map is written, the process
@@ -404,34 +415,32 @@ mod ns_impl {
             libc::chdir(cwd_c.as_ptr());
         }
 
-        // WP-#94: enforce `--cap-drop`/`--cap-add` as the LAST step before exec.
-        // CRITICAL placement: this runs AFTER pivot_root + every mount + the
-        // read-only remount — all of which need CAP_SYS_ADMIN — so dropping caps
-        // here can never break the sandbox setup. When neither flag is set we skip
-        // entirely (the desired set would be the full userns set anyway), keeping
-        // ordinary runs byte-identical to before this WP. Fail-closed: an unknown
-        // cap name or a capset failure returns 1 rather than exec with the WRONG
-        // capability set (false security is worse than an error).
-        if !cap_drop.is_empty() || !cap_add.is_empty() {
-            let desired = match desired_caps(cap_drop, cap_add) {
-                Ok(d) => d,
+        // WP-#94/#95: COMPUTE the desired capability set now (pure parse; fail-closed
+        // on an unknown name), but DEFER applying it until the process that actually
+        // execs the workload — capping THIS setup process would not cap the workload
+        // (it execs in a forked descendant; see the pid-ns fork below). When neither
+        // `--cap-*` flag is set we keep `None` ⇒ the full userns set is preserved
+        // (ordinary runs are byte-identical to before this WP). This parse runs AFTER
+        // pivot_root + all mounts so it can never break the sandbox setup.
+        let desired_caps_vec: Option<Vec<u32>> = if !cap_drop.is_empty() || !cap_add.is_empty() {
+            match desired_caps(cap_drop, cap_add) {
+                Ok(d) => Some(d),
                 Err(e) => {
                     eprintln!("lightr-engine ns: {e}");
                     return 1;
                 }
-            };
-            if let Err(e) = apply_caps(&desired) {
-                eprintln!("lightr-engine ns: capability enforcement failed: {e}");
-                return 1;
             }
-        }
+        } else {
+            None
+        };
 
-        // exec command
+        // Validate + prepare the exec argv BEFORE the pid-ns fork (so both the parent
+        // error path and the forked children share the prepared CStrings; `fork`
+        // copies the address space, so the child owns its copy).
         if command.is_empty() {
             eprintln!("lightr-engine ns: empty command");
             return 1;
         }
-
         let prog_c = match CString::new(command[0].as_bytes()) {
             Ok(c) => c,
             Err(_) => {
@@ -446,15 +455,170 @@ mod ns_impl {
         let mut argv_ptrs: Vec<*const libc::c_char> = argv_c.iter().map(|c| c.as_ptr()).collect();
         argv_ptrs.push(std::ptr::null());
 
-        unsafe {
-            libc::execv(prog_c.as_ptr(), argv_ptrs.as_ptr());
+        // WP-#95: the REAL pid-namespace fix. `unshare(CLONE_NEWPID)` above does NOT
+        // move this (setup) process into the new pid namespace — per `man 2 unshare`,
+        // only the unsharer's FIRST CHILD becomes PID 1 there. So we MUST fork here:
+        // the grandchild is PID 1 in the new ns and execs (or, with `--init`, forks)
+        // the workload. Pre-#95 the code exec'd WITHOUT this fork, leaving the
+        // workload in the HOST pid namespace (false isolation — the confirmed bug).
+        // This setup process stays the EXTERNAL parent of PID 1: it waitpids it and
+        // propagates the exit code up to `run()`'s waitpid (3 levels total).
+        let workload_pid = unsafe { libc::fork() };
+        if workload_pid < 0 {
+            eprintln!(
+                "lightr-engine ns: pid-ns fork failed: {}",
+                std::io::Error::last_os_error()
+            );
+            return 1;
+        }
+        if workload_pid == 0 {
+            // ── grandchild: PID 1 in the NEW pid namespace ───────────────────────
+            // Mount /proc HERE (not in the setup process): a `proc` mount reflects
+            // the MOUNTER's pid namespace, and only PID 1 is in the new ns — mounting
+            // it earlier would expose the host pids. This is what makes
+            // `cat /proc/self/status` report the in-ns pid.
+            mount_proc();
+
+            if init {
+                // `--init`: PID 1 is a minimal reaper; the workload is its child (so
+                // the workload is PID 2). PID 1 reaps orphaned zombies and propagates
+                // the workload's exit code.
+                let child = unsafe { libc::fork() };
+                if child < 0 {
+                    eprintln!(
+                        "lightr-engine ns: init workload fork failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    unsafe { libc::_exit(1) };
+                }
+                if child == 0 {
+                    // ── great-grandchild: the workload (PID 2) ──
+                    // Caps applied LAST, in the execing process (fail-closed: a capset
+                    // failure `_exit`s rather than exec with the WRONG set).
+                    apply_caps_if_any(desired_caps_vec.as_deref());
+                    unsafe { libc::execv(prog_c.as_ptr(), argv_ptrs.as_ptr()) };
+                    eprintln!(
+                        "lightr-engine ns: exec failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    unsafe { libc::_exit(127) };
+                }
+                // PID 1 reaper loop — never returns (always `_exit`s).
+                reaper_loop(child);
+            } else {
+                // No `--init`: the workload itself is PID 1. Caps LAST, in the execing
+                // process (fail-closed via `_exit`).
+                apply_caps_if_any(desired_caps_vec.as_deref());
+                unsafe { libc::execv(prog_c.as_ptr(), argv_ptrs.as_ptr()) };
+                eprintln!(
+                    "lightr-engine ns: exec failed: {}",
+                    std::io::Error::last_os_error()
+                );
+                unsafe { libc::_exit(127) };
+            }
         }
 
-        eprintln!(
-            "lightr-engine ns: exec failed: {}",
-            std::io::Error::last_os_error()
-        );
-        1
+        // ── setup process (NOT in the new pid ns; external parent of PID 1) ──────
+        // Wait for PID 1 (the grandchild) and propagate its code to `run()`'s parent.
+        let mut wstatus: libc::c_int = 0;
+        let r = unsafe { libc::waitpid(workload_pid, &mut wstatus, 0) };
+        if r == -1 {
+            eprintln!(
+                "lightr-engine ns: waitpid(pid1) failed: {}",
+                std::io::Error::last_os_error()
+            );
+            return 1;
+        }
+        wait_to_exit_code(wstatus)
+    }
+
+    /// WP-#95: apply the (already-parsed) capability set in the EXECing process,
+    /// right before `execv`. `None` ⇒ neither `--cap-*` flag was set ⇒ keep the full
+    /// userns set (no-op). Called post-fork/pre-exec, so a capset failure must
+    /// `_exit` (fail-closed) rather than return — exec'ing with the WRONG capability
+    /// set would be false security (worse than an error).
+    fn apply_caps_if_any(desired: Option<&[u32]>) {
+        if let Some(d) = desired {
+            if let Err(e) = apply_caps(d) {
+                eprintln!("lightr-engine ns: capability enforcement failed: {e}");
+                unsafe { libc::_exit(1) };
+            }
+        }
+    }
+
+    /// WP-#95: mount a fresh `proc` at `/proc` INSIDE the new pid namespace. MUST be
+    /// called from PID 1 — a `proc` mount reflects the MOUNTER's pid namespace, and
+    /// only PID 1 is in the new ns, so mounting it here yields a `/proc` that shows
+    /// the in-ns pids (making `cat /proc/self/status` report `Pid: 1`). Best-effort:
+    /// `/proc` may be absent/empty in the CAS-materialized rootfs, so mkdir it first;
+    /// if the mount fails we log + continue (many workloads need no /proc, and pre-#95
+    /// there was none — but we DO try). `MS_NOSUID|MS_NODEV|MS_NOEXEC` matches the
+    /// runc/youki hardening for a container `/proc`.
+    fn mount_proc() {
+        use std::ffi::CString;
+        let _ = std::fs::create_dir_all("/proc");
+        let (src, tgt, fstype) = match (
+            CString::new("proc"),
+            CString::new("/proc"),
+            CString::new("proc"),
+        ) {
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+            _ => return,
+        };
+        let r = unsafe {
+            libc::mount(
+                src.as_ptr(),
+                tgt.as_ptr(),
+                fstype.as_ptr(),
+                libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                std::ptr::null(),
+            )
+        };
+        if r != 0 {
+            eprintln!(
+                "lightr-engine ns: /proc mount failed (continuing): {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
+    /// WP-#95 (`--init`): the minimal PID-1 reaper loop. Blocks in `waitpid(-1)`,
+    /// reaping every child (orphaned grandchildren re-parent to PID 1). When the
+    /// tracked `workload_child` exits we record its code, drain any already-exited
+    /// remaining children (non-blocking — we don't wait on long-lived orphans), then
+    /// `_exit` with the workload's code so the run's exit status is the workload's.
+    /// `ECHILD` (no children left) also exits. `EINTR`/other transient errors retry.
+    /// Raw libc only (post-fork, pre-`_exit`): no allocation in the loop body.
+    fn reaper_loop(workload_child: libc::pid_t) -> ! {
+        let mut workload_code: i32 = 0;
+        let mut have_code = false;
+        loop {
+            let mut status: libc::c_int = 0;
+            let r = unsafe { libc::waitpid(-1, &mut status, 0) };
+            if r == -1 {
+                let e = std::io::Error::last_os_error();
+                if e.raw_os_error() == Some(libc::ECHILD) {
+                    unsafe { libc::_exit(if have_code { workload_code } else { 0 }) };
+                }
+                // EINTR or other transient error: retry the wait.
+                continue;
+            }
+            if r == workload_child {
+                workload_code = wait_to_exit_code(status);
+                have_code = true;
+                // Drain any remaining already-exited children (non-blocking), then
+                // exit with the workload's code.
+                loop {
+                    let mut st: libc::c_int = 0;
+                    let w = unsafe { libc::waitpid(-1, &mut st, libc::WNOHANG) };
+                    if w <= 0 {
+                        break;
+                    }
+                }
+                unsafe { libc::_exit(workload_code) };
+            }
+            // Some other orphan was reaped — keep looping.
+        }
     }
 
     fn write_map(path: &str, content: &str) -> std::io::Result<()> {

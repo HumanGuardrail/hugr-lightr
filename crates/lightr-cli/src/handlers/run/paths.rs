@@ -79,6 +79,10 @@ pub(super) fn run_engine(
     // honest-errored at the handler, so these arrive empty there.
     cap_drop: &[String],
     cap_add: &[String],
+    // WP-#95: `--init` ⇒ the ns engine runs a minimal PID-1 reaper inside the new
+    // pid namespace (the workload becomes PID 2). native/vz ignore it (recorded-only
+    // carry-slot). RUNTIME-ONLY; never part of the memo key.
+    init: bool,
 ) -> i32 {
     // Hydrate rootfs ref into a temp dir if provided
     let rootfs_tmp: Option<tempfile::TempDir>;
@@ -163,6 +167,10 @@ pub(super) fn run_engine(
         // part of the memo key.
         cap_drop,
         cap_add,
+        // WP-#95: `--init` reaches the ns engine here (the only engine that runs a
+        // real PID-1 reaper; native/vz treat it as a recorded-only carry-slot).
+        // RUNTIME-ONLY — never part of the memo key.
+        init,
     };
 
     let code = match engine.run(&spec) {

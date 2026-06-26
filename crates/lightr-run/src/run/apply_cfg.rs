@@ -41,12 +41,12 @@
 //!     full capset management is a separate tracked WP, so the handler refuses
 //!     rather than give false security. These appliers are pure no-ops.
 //!
-//! HONEST-STAGED (recorded, documented, NOT silently claimed — WP-#92):
-//!   * `init` (PID 1 zombie reaper) — a real pid1 init is entangled with the ns
-//!     pid-namespace handling and is NOT yet applied; the handler emits an honest
-//!     stderr note when `--init` is set. `apply_init` is a documented no-op.
-//!
 //! RECORDED-ONLY here, ENFORCED on the `ns` engine:
+//!   * `init` (PID 1 zombie reaper, WP-#95) — enforced on the `ns` engine via
+//!     `ExecSpec.init`: PID 1 in the new pid namespace forks the workload (→ PID 2)
+//!     and reaps orphaned zombies, propagating the workload's exit code. On
+//!     native/vz it is a recorded-only carry-slot (no pid namespace to reap in;
+//!     vz reaps via its own guest PID 1). `apply_init` here stays a no-op.
 //!   * `pids_limit` (cgroup `pids.max`, WP-#90) — the native engine honest-ERRORS
 //!     on a pids request (`limits::check_native_support`); the real cap is the `ns`
 //!     engine's `ResourceLimits.pids_max` → `apply_cgroup`.
@@ -163,11 +163,10 @@ fn apply_tty(tty: bool, cmd: &mut Command) {
     let _ = (tty, cmd);
 }
 
-/// `--init`. HONEST-STAGED (WP-#92): recorded only — a pid1 init reaper is
-/// entangled with the ns engine's pid-namespace handling and is NOT yet applied on
-/// ANY engine. The run handler emits an honest stderr note when `--init` is set so
-/// the flag is never a silent false claim; this applier stays a documented no-op
-/// until the pid1 reaper lands. `false` ⇒ no-op.
+/// `--init`. ENFORCED on the `ns` engine via `ExecSpec.init` (WP-#95): PID 1 in the
+/// new pid namespace forks the workload and reaps orphaned zombies. This native/vz
+/// applier is a recorded-only carry-slot (no pid namespace to reap in; vz reaps via
+/// its own guest PID 1) — a documented no-op. `false` ⇒ no-op.
 #[cfg(unix)]
 fn apply_init(init: bool, cmd: &mut Command) {
     let _ = (init, cmd);

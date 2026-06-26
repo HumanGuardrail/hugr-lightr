@@ -182,6 +182,7 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         // ns-engine concern. Defaults (no cap changes).
                         cap_drop: &[],
                         cap_add: &[],
+                        init: false,
                     };
                     engine.run(&spec).unwrap_or(255)
                 }
