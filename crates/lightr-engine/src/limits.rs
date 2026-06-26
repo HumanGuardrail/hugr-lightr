@@ -156,7 +156,8 @@ mod cgroup_v2 {
     /// (no v2 mount, not delegated, write denied).
     ///
     /// WP-#99: `cgroup_name`, when `Some`, names the leaf EXPLICITLY (the CRI
-    /// backend pins `lightr-cri/<cid>` so its `stop` can `cgroup.kill` the whole
+    /// backend pins `lightr-cri-<cid>` (a flat leaf, dash not slash) so its `stop`
+    /// can rebuild the path and `cgroup.kill` the whole
     /// subtree). `None` keeps the transient `lightr.<pid>` leaf (unique per
     /// process so concurrent runs don't collide).
     pub fn apply(
@@ -187,6 +188,19 @@ mod cgroup_v2 {
 
         if let Some(bytes) = limits.memory_bytes {
             write_ctl(&leaf, "memory.max", &bytes.to_string())?;
+            // AUDIT FIX (#90): `memory.max` alone does NOT bind — cgroup v2 defaults
+            // `memory.swap.max` to `max`, so a workload over the cap just spills to
+            // swap unbounded (the audit caught a 64m run thrashing ~66s to host-swap
+            // exhaustion then exiting 1, NOT an OOM-kill). Disable swap for the cgroup
+            // so `memory.max` is a HARD RAM cap that actually OOM-kills (137) — the
+            // container-runtime default (Docker `--memory` without `--memory-swap`
+            // similarly bounds swap). Best-effort: a kernel without the swap
+            // controller (no `memory.swap.max`) leaves the RAM cap in force; don't
+            // fail the run over a missing swap-cap file.
+            let swap = leaf.join("memory.swap.max");
+            if swap.exists() {
+                write_ctl(&leaf, "memory.swap.max", "0")?;
+            }
         }
         if let Some(millis) = limits.cpu_millis {
             // cpu.max = "<quota> <period>"; quota = millis * 100 over a 100000µs
