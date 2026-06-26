@@ -356,14 +356,15 @@ jobs:
           # under a generous --memory 512m — proving the cap binds at its VALUE, not
           # just "an unbounded bomb eventually dies". memory.swap.max=0 makes
           # memory.max a HARD RAM cap (the 2026-06-26 audit saw it spill to swap +
-          # exit 1 gracefully without it). 2^25 doubling ⇒ ~33MB final, ~100MB peak.
-          MEMBOMB='BEGIN{s="x";for(i=0;i<25;i++)s=s s;print length(s)}'
-          echo "=== MEMORY capped: --memory 64m ~100MB alloc → expect OOM-kill (signal >=128) ==="
+          # exit 1 gracefully without it). 2^28 doubling ⇒ ~268MB final, ~400MB peak
+          # — clearly over 64m (killed) and under the 1g control (completes).
+          MEMBOMB='BEGIN{s="x";for(i=0;i<28;i++)s=s s;print length(s)}'
+          echo "=== MEMORY capped: --memory 64m ~400MB-peak alloc → expect OOM-kill (signal >=128) ==="
           RUN run --engine ns --memory 64m --rootfs alpine -- \
             /bin/busybox awk "$MEMBOMB" >/tmp/memcap.txt 2>&1
           MEM_CAP_EXIT=$?; echo "RESLIMITS_MEM_CAP_EXIT=$MEM_CAP_EXIT"; tail -2 /tmp/memcap.txt
-          echo "=== MEMORY control: --memory 512m same alloc → expect completion (0) ==="
-          RUN run --engine ns --memory 512m --rootfs alpine -- \
+          echo "=== MEMORY control: --memory 1g same alloc → expect completion (0) ==="
+          RUN run --engine ns --memory 1g --rootfs alpine -- \
             /bin/busybox awk "$MEMBOMB" >/tmp/memfree.txt 2>&1
           MEM_FREE_EXIT=$?; echo "RESLIMITS_MEM_FREE_EXIT=$MEM_FREE_EXIT"; tail -2 /tmp/memfree.txt
 
