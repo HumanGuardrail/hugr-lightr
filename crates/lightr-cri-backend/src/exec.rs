@@ -56,7 +56,8 @@ impl LightrBackend {
         // host_network sandboxes, the conformance/vector tests, the macOS gate).
         #[cfg(target_os = "linux")]
         let mut command = if rec.engine == "ns" {
-            self.ns_exec_command(&rec, cmd)?
+            // exec_sync is non-interactive (captured stdout/stderr); never a tty.
+            self.ns_exec_command(&rec, cmd, false)?
         } else {
             host_exec_command(&rec, cmd)
         };
@@ -181,13 +182,16 @@ impl LightrBackend {
     /// in-pidns PID 1 from its cgroup, serializes an [`ExecDescriptor`], and
     /// hands it to the shim via `LIGHTR_NSEXEC_DESC`. The shim execve's with the
     /// descriptor's env, so `LIGHTR_NSEXEC_DESC` + the serve's env never leak
-    /// inside. Shared with `open_exec_impl` (the pipe path). Linux-only — the ns
-    /// path is only ever taken on linux.
+    /// inside. Shared with `open_exec_impl` (pipe AND tty paths). `tty` rides the
+    /// descriptor so the workload grandchild does `setsid`/`TIOCSCTTY` on its pty
+    /// slave (WP-#103); the backend is responsible for actually wiring a pty as
+    /// this Command's stdio. Linux-only — the ns path is only ever taken on linux.
     #[cfg(target_os = "linux")]
     pub(crate) fn ns_exec_command(
         &self,
         rec: &ContainerRecord,
         cmd: &[String],
+        tty: bool,
     ) -> Result<std::process::Command> {
         use crate::ns_exec::ExecDescriptor;
         let pid1 = self.container_pid1(&rec.cgroup_name)?;
@@ -196,7 +200,7 @@ impl LightrBackend {
             argv: cmd.to_vec(),
             cwd: rec.config.working_dir.clone(),
             env: rec.config.envs.clone(),
-            tty: false,
+            tty,
         };
         let json = serde_json::to_string(&desc)
             .map_err(|e| BackendError::Internal(format!("serialize exec descriptor: {e}")))?;

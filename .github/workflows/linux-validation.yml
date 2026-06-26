@@ -841,6 +841,43 @@ jobs:
           fi
           echo "KPI3_EXEC=PASS (crictl exec ENTERED the ns container: ALPINE rootfs visible, in-container pid=$EXEC_PID, mnt-ns inode $EXEC_MNT == PID1 mnt-ns $PID1_MNT)"
 
+          # ── WP-#103 EXEC-TTY GATE: `crictl exec -it` must open an INTERACTIVE,
+          # pty-backed exec INSIDE the ns container — a real pty (job control / line
+          # editing), not the non-tty pipe path and not a host process. `crictl -t`
+          # sets tty=true on the gRPC ExecRequest; the backend's open_exec tty
+          # ns-branch wires a pty to the `__ns-exec` shim, whose grandchild does
+          # setsid + TIOCSCTTY on the pty slave so it becomes its controlling
+          # terminal inside the container. Headless CI has no terminal on crictl's
+          # client side, so we give crictl a pty with util-linux `script` (-e
+          # propagates the child's exit code). We prove it FOUR ways: (1) `tty`
+          # inside prints a /dev/pts/* path ⇒ a real pty was allocated for the
+          # in-container exec; (2) `test -t 0` is true inside ⇒ fd 0 IS a tty; (3)
+          # /etc/alpine-release is visible ⇒ the ALPINE container rootfs (the ubuntu
+          # runner has none — already established); (4) exit 0. Substring grep
+          # parsing (the pty injects CRLFs). ──────────────────────────────────────────
+          if ! command -v script >/dev/null 2>&1; then
+            echo "KPI3_EXEC_TTY=FAIL (util-linux \`script\` absent — cannot drive a headless tty exec)"
+            sudo cat /tmp/serve.log; CR stop "$CTR_ID" >/dev/null 2>&1; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve; exit 1
+          fi
+          TTY_CMD="sudo crictl --runtime-endpoint unix://$SOCK --image-endpoint unix://$SOCK exec -it $CTR_ID /bin/sh -c 'tty; cat /etc/alpine-release; echo TTYPID=\$\$; test -t 0 && echo IS_TTY'"
+          TTY_OUT=$(script -qec "$TTY_CMD" /dev/null 2>/tmp/exec-tty.log)
+          TTY_RC=$?
+          echo "=== crictl exec -it output (rc=$TTY_RC) ==="; echo "$TTY_OUT"; echo "=== exec-tty stderr ==="; cat /tmp/exec-tty.log
+          TFAIL=0
+          [ "$TTY_RC" = 0 ] || { echo "EXEC_TTY_FAIL: crictl exec -it exit code $TTY_RC != 0"; TFAIL=1; }
+          # (1) a real pty was allocated for the in-container exec.
+          echo "$TTY_OUT" | grep -q '/dev/pts/' || { echo "EXEC_TTY_FAIL: \`tty\` did not print /dev/pts/* ⇒ no pty allocated inside the container (pipe path / no TIOCSCTTY?)"; TFAIL=1; }
+          # (2) fd 0 is a tty inside the container.
+          echo "$TTY_OUT" | grep -q 'IS_TTY' || { echo "EXEC_TTY_FAIL: \`test -t 0\` false inside ⇒ stdin is not a tty (tty code path not taken)"; TFAIL=1; }
+          # (3) ALPINE container rootfs (dotted version), not the host.
+          echo "$TTY_OUT" | grep -qE '[0-9]+\.[0-9]+' || { echo "EXEC_TTY_FAIL: /etc/alpine-release not seen ⇒ tty exec is NOT in the container rootfs (host-process fallback?)"; TFAIL=1; }
+          if [ "$TFAIL" != 0 ]; then
+            echo "KPI3_EXEC_TTY=FAIL (crictl exec -it did not open a pty-backed exec inside the ns container)"
+            echo "=== serve.log ==="; sudo cat /tmp/serve.log
+            CR stop "$CTR_ID" >/dev/null 2>&1; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve; exit 1
+          fi
+          echo "KPI3_EXEC_TTY=PASS (crictl exec -it opened a pty-backed interactive exec INSIDE the ns container: /dev/pts/* allocated, fd0 is a tty, ALPINE rootfs visible, exit 0)"
+
           # ── WP-#99 STOP GATE: crictl stop must cgroup.kill the whole subtree. The
           # cgroup leaf is `lightr-cri-<CTR_ID>`; after stop its cgroup.procs must be
           # empty (PID 1 + descendants gone). ──────────────────────────────────────────

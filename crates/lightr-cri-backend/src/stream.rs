@@ -78,19 +78,20 @@ impl LightrBackend {
             command.env(k, v);
         }
 
-        // WP-#100 (exec slice 1): for an `ns` container, the NON-tty (pipe) exec
-        // must ENTER the container via the `__ns-exec` re-exec shim (setns into
-        // PID-1's namespaces) — same nsenter model as `exec_sync`. Fail-closed: a
-        // PID-1 resolution error returns, never a host exec.
-        //
-        // tty exec into an `ns` container is DEFERRED (slice 1): the pty grandchild
-        // needs setsid/TIOCSCTTY inside the container, which is a later slice — so
-        // tty falls through to today's host-process pty path here (NOT half-wired).
-        // Non-`ns` containers (host_network) and every non-linux build keep today's
-        // exact host-process behavior.
+        // WP-#100 (slice 1) + WP-#103 (slice 2): for an `ns` container, exec must
+        // ENTER the container via the `__ns-exec` re-exec shim (setns into PID-1's
+        // namespaces) — same nsenter model as `exec_sync`. This now covers BOTH the
+        // non-tty (pipe) path AND the tty path: `ns_exec_command(.., tty)` carries
+        // `tty` in the descriptor so the workload grandchild does setsid/TIOCSCTTY
+        // on its pty slave inside the container. The only difference between tty and
+        // non-tty is HOW this Command's stdio is wired below (pty vs pipes) — the
+        // Command itself is `__ns-exec` either way. Fail-closed: a PID-1 resolution
+        // error returns, never a host exec for an ns container. Non-`ns` containers
+        // (host_network) and every non-linux build keep today's exact host-process
+        // behavior (the bare command runs on the host namespaces).
         #[cfg(target_os = "linux")]
-        if rec.engine == "ns" && !tty {
-            command = self.ns_exec_command(&rec, cmd)?;
+        if rec.engine == "ns" {
+            command = self.ns_exec_command(&rec, cmd, tty)?;
         }
 
         if tty {
