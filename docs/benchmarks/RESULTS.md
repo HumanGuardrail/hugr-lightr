@@ -95,6 +95,36 @@ containerd holds **compressed** layer blobs that must still be unpacked to a
 snapshot before running. Different trade-off; reported as INFO, never gated. The
 hard, signed claim is the dedup ratio (3.97×) and the 0-byte re-pull.
 
+## KPI 3 — CRI cold-start + footprint vs containerd (CI-signed, ubuntu-latest, 2026-06-26)
+
+Both runtimes are driven through the SAME path — `crictl` → gRPC CRI →
+RunPodSandbox (shared CNI bridge) → create+start → poll `CONTAINER_RUNNING` — on
+the same `alpine:latest`, same runner, in the `cri-kpi3` job (`KPI3_AB=SIGNED`).
+lightr runs the REAL alpine rootfs under the `ns` engine joined into the pod netns
+(CI-proven: PID 1 + `/etc/alpine-release` + the container's net-ns inode == the
+pod's pinned netns); containerd runs the same image under runc.
+
+| Metric | lightr | containerd | Ratio |
+|---|---|---|---|
+| Cold-start mean (n=5, ms) | **69.0** | 97.4 | 1.41× faster † |
+| Resident RSS (KB) | **7,128** (cri-serve) | 63,824 (daemon) | **8.95× smaller** |
+| Per-container shim RSS (KB) | **0** (no shim) | 14,828 (one `containerd-shim-runc-v2` per container) | — |
+
+**The robust, signed headline is FOOTPRINT: lightr's resident process is ~9×
+smaller** (7 MB vs 62 MB) AND there is **no per-container shim** — daemonless +
+shimless. That is the structural result: containerd carries a ~62 MB always-on
+daemon plus a ~15 MB shim per running container; lightr carries a ~7 MB server and
+the container is its own supervised process tree.
+
+**† Cold-start caveat (honest, do not oversell):** the 1.41× edge is NOT strictly
+milestone-aligned. lightr persists `CONTAINER_RUNNING` right after spawning the
+`__ns-run` shim, while the in-namespace `pivot_root`/`exec` completes
+asynchronously; containerd reports Running after the task is up. So lightr's
+"Running" milestone sits slightly earlier in the lifecycle (tracked: start-
+milestone alignment, #102). Both are sub-100 ms via crictl/gRPC (the round-trip is
+common to both arms and cancels in the ratio). Read cold-start as "comparable,
+lightr no slower"; read footprint as the hard signed result.
+
 ## Honest caveats (read these)
 1. **Microbenchmark of runtime overhead.** Cold-start uses `true`; a heavy app's
    own startup is identical across runtimes, so the *percentage* win shrinks on
