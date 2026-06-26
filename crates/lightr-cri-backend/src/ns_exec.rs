@@ -15,9 +15,13 @@
 //! carries no secrets and the shim execve's with the container's OWN env so the
 //! var never leaks inside.
 //!
-//! DEFERRED (slice 1): tty (`setsid`/`TIOCSCTTY` in the grandchild), interactive
-//! `-i` stdin attach, and the open_exec tty branch (see `stream.rs`). The `tty`
-//! field is carried in the descriptor but ignored here.
+//! WP-#103 (exec slice 2): tty + interactive stdin. When `desc.tty` is set, the
+//! backend wires a pty SLAVE as the shim's stdio (fds 0/1/2), which inherits
+//! across the fork to the workload grandchild; just before `execve` the
+//! grandchild calls `setsid()` (new session) + `ioctl(TIOCSCTTY)` so the pty
+//! slave becomes its controlling terminal INSIDE the container (job control,
+//! line editing). Mirrors the host `open_exec_tty` setsid path. The non-tty
+//! (pipe) path is unchanged from slice 1.
 
 use serde::{Deserialize, Serialize};
 
@@ -40,8 +44,10 @@ pub struct ExecDescriptor {
     /// execve envp so neither `LIGHTR_NSEXEC_DESC` nor the serve's environment
     /// leak into the container.
     pub env: Vec<(String, String)>,
-    /// tty requested. DEFERRED in slice 1 (carried, ignored) — full container-tty
-    /// exec (setsid/TIOCSCTTY) is a later slice.
+    /// tty requested. When true, the workload grandchild `setsid`s and claims the
+    /// pty slave (wired as its stdio by the backend) as its controlling terminal
+    /// via `TIOCSCTTY` before `execve` (WP-#103). When false, the non-tty (pipe)
+    /// path is taken and this is a no-op in the shim.
     pub tty: bool,
 }
 
@@ -169,8 +175,24 @@ fn run_exec_shim_linux() -> ! {
         unsafe { libc::_exit(code) }
     }
 
-    // 5. Child (now in the container pid ns + user/net/mnt): chdir into the
-    //    workload cwd (fallback /), then execve with the DESCRIPTOR's env.
+    // 5. Child (now in the container pid ns + user/net/mnt). For a tty exec
+    //    (WP-#103): become a session leader and claim the pty slave — already
+    //    wired as fds 0/1/2 by the backend (inherited across the fork) — as this
+    //    workload's controlling terminal, so job control / line editing work
+    //    INSIDE the container. Mirrors the host `open_exec_tty` setsid path, plus
+    //    TIOCSCTTY (the new session leader has no ctty until it claims one). Both
+    //    are best-effort, matching the host path: setsid can only fail if we were
+    //    already a group leader (we are not — fresh fork), and TIOCSCTTY is the
+    //    standard ctty claim. The non-tty path leaves stdio (pipes) untouched.
+    if desc.tty {
+        unsafe {
+            libc::setsid();
+            libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY, 0);
+        }
+    }
+
+    // chdir into the workload cwd (fallback /), then execve with the
+    // DESCRIPTOR's env.
     let cwd = if desc.cwd.is_empty() {
         "/".to_string()
     } else {
