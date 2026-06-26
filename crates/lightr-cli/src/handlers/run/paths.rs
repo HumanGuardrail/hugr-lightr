@@ -74,6 +74,11 @@ pub(super) fn run_engine(
     read_only: bool,
     // WP-#92: `--shm-size` bytes ⇒ the ns engine sizes /dev/shm. `None` ⇒ 64 MiB.
     shm_size: Option<u64>,
+    // WP-#94: `--cap-drop`/`--cap-add` ⇒ the ns engine drops the bounding set +
+    // capsets the desired capability set (last step before exec). native/vz are
+    // honest-errored at the handler, so these arrive empty there.
+    cap_drop: &[String],
+    cap_add: &[String],
 ) -> i32 {
     // Hydrate rootfs ref into a temp dir if provided
     let rootfs_tmp: Option<tempfile::TempDir>;
@@ -152,6 +157,12 @@ pub(super) fn run_engine(
         // vz is its own VM. RUNTIME-ONLY — never part of the memo key.
         read_only,
         shm_size,
+        // WP-#94: `--cap-drop`/`--cap-add` reach the ns engine here (the only engine
+        // that enforces them; native/vz are honest-errored at the handler). The ns
+        // engine applies them as the LAST step before exec. RUNTIME-ONLY — never
+        // part of the memo key.
+        cap_drop,
+        cap_add,
     };
 
     let code = match engine.run(&spec) {
