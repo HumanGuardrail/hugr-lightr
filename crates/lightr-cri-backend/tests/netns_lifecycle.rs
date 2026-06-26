@@ -41,10 +41,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 use lightr_cri_backend::{
-    ContainerConfig, ContainerState, CriBackend, LightrBackend, SandboxConfig,
+    ContainerConfig, CriBackend, LightrBackend, SandboxConfig,
 };
 
 /// Conflist subnet the CI installs (10-lightr-bridge.conflist): 10.88.0.0/16,
@@ -248,54 +247,25 @@ fn netns_cni_full_lifecycle_no_leak() {
         );
     }
 
-    // ── 4. the container JOINS the sandbox netns (proves the setns pre_exec) ──
-    // STRONG form: the container writes its own net-ns inode; we assert it equals
-    // the sandbox netns inode. The CRI container plane runs a host process (no
-    // rootfs), so `/bin/sh`+`stat` are host binaries; `stat -L` on /proc/self/
-    // ns/net resolves the magic symlink to the nsfs inode — the SAME value
-    // `stat -L` reports for the pinned netns file (this is how netns identity is
-    // established). WEAK form (also asserted): start + clean exit ⇒ the pre_exec
-    // setns did not fail-closed.
-    let probe_file = std::env::temp_dir().join(format!("lightr-netns-probe-{}.txt", id.0));
-    let _ = std::fs::remove_file(&probe_file);
-    let probe_path = probe_file.to_string_lossy().into_owned();
-    let probe_cmd = format!("stat -L -c %i /proc/self/ns/net > {probe_path}");
+    // ── 4. AUDIT FIX (#99): a netns'd (isolation-expecting) pod whose image
+    // cannot hydrate must FAIL CLOSED. Pre-#99 the CRI plane ran a host process
+    // (no rootfs) joined to the netns via a setns pre_exec; the 2026-06-26 audit
+    // showed that silent host-process fallback is FALSE ISOLATION for a pod that
+    // owns an isolated netns. `test-image` is not in the CAS store, so the ns plan
+    // can't be built and start_container must error — never silently run an
+    // unisolated host process. The STRONG container-joins-netns proof (net-ns
+    // inode equality on a REAL hydrated container) now lives in the `cri-kpi3` CI
+    // job, which runs an actual alpine container inside the pod netns.
     let cid = b
-        .create_container(&id, container_cfg("netns-probe", vec!["/bin/sh", "-c", &probe_cmd]))
+        .create_container(&id, container_cfg("netns-probe", vec!["/bin/sh", "-c", "true"]))
         .expect("create_container on a Ready netns'd sandbox");
-    b.start_container(&cid)
-        .expect("assertion 4 (weak): start_container must succeed — the setns pre_exec must not fail-closed");
-
-    let mut exited = false;
-    for _ in 0..300 {
-        if b.container_status(&cid).unwrap().state == ContainerState::Exited {
-            exited = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(exited, "assertion 4: netns-probe container never reached Exited");
-    let cst = b.container_status(&cid).unwrap();
-    assert_eq!(
-        cst.exit_code, 0,
-        "assertion 4 (weak): netns-probe exited non-zero ({}): reason={} message={}",
-        cst.exit_code, cst.reason, cst.message
-    );
-
-    // STRONG: inode equality.
-    let container_inode = std::fs::read_to_string(&probe_file)
-        .unwrap_or_else(|e| panic!("assertion 4: probe output {probe_path} unreadable: {e}"))
-        .trim()
-        .to_string();
-    let (s_code, sandbox_inode, s_err) = run("stat", &["-L", "-c", "%i", &netns_path]);
-    assert_eq!(s_code, 0, "assertion 4: stat on netns pin failed: {s_err}");
-    let sandbox_inode = sandbox_inode.trim();
+    let start = b.start_container(&cid);
     assert!(
-        !container_inode.is_empty() && container_inode == sandbox_inode,
-        "assertion 4 (strong): container did NOT join the sandbox netns — \
-         container net-ns inode {container_inode:?} != sandbox netns inode {sandbox_inode:?}"
+        start.is_err(),
+        "assertion 4 (audit #99): start_container on a netns'd pod with a \
+         non-hydratable image must FAIL CLOSED (no silent unisolated host \
+         process), but it returned {start:?}"
     );
-    let _ = std::fs::remove_file(&probe_file);
 
     // ── 5. teardown leaves NO leak (containerd#6143 class — the heart of #83) ─
     b.stop_sandbox(&id).expect("stop_sandbox");

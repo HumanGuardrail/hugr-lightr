@@ -43,8 +43,13 @@ fn cfg(command: Vec<&str>) -> ContainerConfig {
 
 /// Create + start a container with `command` (empty ⇒ keep-alive). Returns a
 /// Running container id (or the keep-alive one). Polls until Running.
-/// Run a Ready sandbox named `name` (no CNI on macOS → ip=None) so the
-/// create-gate (WP-CRI-SANDBOX) admits containers created against it.
+/// Run a Ready **host_network** sandbox named `name` so the create-gate
+/// (WP-CRI-SANDBOX) admits containers, and — crucially — the container takes the
+/// HOST-process path, not the ns-engine path. These tests exercise the exec/stream
+/// IO plane over real short-lived host processes; they do NOT test isolation. A
+/// host_network sandbox has no pinned netns (sandbox.rs), so post-#99
+/// `start_container` legitimately runs a host process here instead of fail-closing
+/// on the non-hydratable `img` image (which it correctly would for a netns'd pod).
 fn ready_sandbox(b: &LightrBackend, name: &str) -> crate::vocab::SandboxId {
     b.run_sandbox(crate::vocab::SandboxConfig {
         name: name.into(),
@@ -55,7 +60,7 @@ fn ready_sandbox(b: &LightrBackend, name: &str) -> crate::vocab::SandboxId {
         annotations: Default::default(),
         log_directory: String::new(),
         hostname: String::new(),
-        host_network: false,
+        host_network: true,
         dns: None,
         port_mappings: Vec::new(),
     })

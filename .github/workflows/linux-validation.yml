@@ -666,7 +666,7 @@ jobs:
           {
             "metadata": { "name": "kpi3-ctr", "attempt": 1 },
             "image": { "image": "alpine:latest" },
-            "command": ["/bin/sh", "-c", "echo PID=$$; echo ALPINE_RELEASE=$(cat /etc/alpine-release); echo ROOTLS=$(ls / | tr '\\n' ',' ); sleep 600"],
+            "command": ["/bin/sh", "-c", "echo PID=$$; echo ALPINE_RELEASE=$(cat /etc/alpine-release); echo ROOTLS=$(ls / | tr '\\n' ',' ); echo NETNS_INODE=$(stat -L -c %i /proc/self/ns/net); sleep 600"],
             "log_path": "kpi3-ctr.log",
             "linux": {}
           }
@@ -717,6 +717,18 @@ jobs:
           echo "$LOGTXT" | grep -q "PID=1"            || { echo "REAL_FAIL: container is not PID 1 (no own pid namespace)"; FAIL=1; }
           echo "$LOGTXT" | grep -qE "ALPINE_RELEASE=[0-9]" || { echo "REAL_FAIL: /etc/alpine-release absent ⇒ container root is NOT the alpine rootfs (host-process fallback?)"; FAIL=1; }
           [ "$HOST_HAS_ALPINE" = 0 ] || { echo "REAL_FAIL: runner has /etc/alpine-release — cannot attribute the proof to the container root"; FAIL=1; }
+          # NETNS JOIN (strong) — ports the netns_lifecycle unit-test inode-equality
+          # proof to a REAL hydrated container: the container's net-ns inode must equal
+          # the pod's PINNED netns inode, proving the ns engine JOINED the pod netns
+          # (ExecSpec.join_netns) rather than creating a fresh/host one. One pod ⇒ one
+          # /run/netns/lightr-* pin (sandbox_net.rs NETNS_DIR).
+          CTR_NETNS=$(echo "$LOGTXT" | sed -n 's/^NETNS_INODE=//p' | tr -d '[:space:]')
+          HOST_NETNS=$(stat -L -c %i /run/netns/lightr-* 2>/dev/null | head -1 | tr -d '[:space:]')
+          if [ -n "$CTR_NETNS" ] && [ -n "$HOST_NETNS" ] && [ "$CTR_NETNS" = "$HOST_NETNS" ]; then
+            echo "KPI3_NETNS_JOIN=PASS (container net-ns inode $CTR_NETNS == pod pinned netns $HOST_NETNS)"
+          else
+            echo "REAL_FAIL: container did NOT join the pod netns — container inode '$CTR_NETNS' != pod pinned netns '$HOST_NETNS'"; FAIL=1
+          fi
           if [ "$FAIL" != 0 ]; then
             echo "KPI3_REAL=FAIL (container is not the real alpine rootfs under ns isolation)"
             echo "=== inspect ==="; CR inspect "$CTR_ID" 2>&1 | head -60
