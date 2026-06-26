@@ -323,13 +323,17 @@ jobs:
 
           # ── READ-ONLY: a write to the rootfs must FAIL (EROFS) under --read-only,
           # and SUCCEED without it (control) — proving the remount actually bit. ────
-          echo "=== read-only: write /root/f under --read-only → expect FAIL (EROFS) ==="
+          # Write at the rootfs ROOT (/lightr_ro_probe) — `/root`,`/tmp` are EMPTY
+          # dirs in alpine and lightr's snapshot drops empty dirs (rootfs-fidelity
+          # gap, tracked separately), so they're "nonexistent" in the container; the
+          # mount root `/` always exists and is what --read-only must protect.
+          echo "=== read-only: write /lightr_ro_probe under --read-only → expect FAIL (EROFS) ==="
           "$BIN" run --engine ns --read-only --rootfs alpine -- \
-            /bin/busybox sh -c 'echo x > /root/f && echo WROTE_RO' >/tmp/ro.txt 2>&1
+            /bin/busybox sh -c 'echo x > /lightr_ro_probe && echo WROTE_RO' >/tmp/ro.txt 2>&1
           RO_EXIT=$?; echo "ro_exit=$RO_EXIT"; tail -3 /tmp/ro.txt
-          echo "=== control: write /root/f WITHOUT --read-only → expect OK ==="
+          echo "=== control: write /lightr_ro_probe WITHOUT --read-only → expect OK ==="
           "$BIN" run --engine ns --rootfs alpine -- \
-            /bin/busybox sh -c 'echo x > /root/f && echo WROTE_RW' >/tmp/rw.txt 2>&1
+            /bin/busybox sh -c 'echo x > /lightr_ro_probe && echo WROTE_RW' >/tmp/rw.txt 2>&1
           RW_EXIT=$?; echo "rw_exit=$RW_EXIT"; tail -3 /tmp/rw.txt
 
           # ── /dev/shm WRITABLE under --read-only (the key correctness point: a RO
