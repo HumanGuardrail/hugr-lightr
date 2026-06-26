@@ -63,11 +63,16 @@ pub fn run_exec_shim() -> ! {
 }
 
 /// Linux implementation — raw libc, single-threaded (the whole point of the
-/// re-exec). The order matters: open ALL ns fds BEFORE any `setns` (after the
-/// mnt swap the host `/proc/<pid1>/ns/*` paths vanish), join user FIRST (as host
-/// root we hold CAP_SYS_ADMIN over the child userns; a join after the userns swap
-/// would EPERM), mnt LAST, then `fork` (setns(pid) only moves CHILDREN into the
-/// pid ns).
+/// re-exec). The order matters and mirrors the WP-#99 engine ordering: open ALL ns
+/// fds BEFORE any `setns` (after the mnt swap the host `/proc/<pid1>/ns/*` paths
+/// vanish). Join **net FIRST** — the pod netns was created by the HOST (CNI) and is
+/// owned by the host INIT user namespace, so we must `setns` into it while still
+/// host root; once we enter the container userns we no longer hold CAP_SYS_ADMIN
+/// over a host-owned netns (this is the EPERM the first CI run caught). THEN join
+/// user (host root may enter a child userns), which grants full caps in it for the
+/// remaining joins; THEN pid and mnt — both are owned by the CONTAINER userns
+/// (the engine `unshare`d them after NEWUSER). mnt LAST (its swap erases host
+/// paths), then `fork` (setns(pid) only moves CHILDREN into the pid ns).
 #[cfg(target_os = "linux")]
 fn run_exec_shim_linux() -> ! {
     use std::ffi::CString;
@@ -113,7 +118,8 @@ fn run_exec_shim_linux() -> ! {
     let pid_ns = open_ns("pid");
     let mnt_ns = open_ns("mnt");
 
-    // 3. setns ORDER: user → net → pid → mnt (mnt LAST). Fail-closed on any error.
+    // 3. setns ORDER: net → user → pid → mnt (net while host-root over the
+    //    host-owned pod netns; mnt LAST). Fail-closed on any error.
     let do_setns = |f: &std::fs::File, flag: libc::c_int, what: &str| {
         if unsafe { libc::setns(f.as_raw_fd(), flag) } != 0 {
             eprintln!(
@@ -123,10 +129,10 @@ fn run_exec_shim_linux() -> ! {
             unsafe { libc::_exit(127) }
         }
     };
-    do_setns(&user_ns, libc::CLONE_NEWUSER, "user");
-    do_setns(&net_ns, libc::CLONE_NEWNET, "net");
-    do_setns(&pid_ns, libc::CLONE_NEWPID, "pid");
-    do_setns(&mnt_ns, libc::CLONE_NEWNS, "mnt");
+    do_setns(&net_ns, libc::CLONE_NEWNET, "net"); // FIRST: host-owned pod netns; need host caps
+    do_setns(&user_ns, libc::CLONE_NEWUSER, "user"); // then enter the container userns
+    do_setns(&pid_ns, libc::CLONE_NEWPID, "pid"); // owned by the container userns
+    do_setns(&mnt_ns, libc::CLONE_NEWNS, "mnt"); // LAST (swap erases host paths)
 
     // 4. fork — setns(CLONE_NEWPID) only moves our CHILD into the pid ns; THIS
     //    process stays put. Parent waitpids the child and relays its status so the
