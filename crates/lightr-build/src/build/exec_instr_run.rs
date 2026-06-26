@@ -76,6 +76,10 @@ pub(in crate::build) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
         add_host: &[],
         dns: &[],
         mesh_ip: None,
+        // WP-#92: a build RUN step is never read-only / shm-sized (the build needs a
+        // writable rootfs); defaults preserve today's behaviour.
+        read_only: false,
+        shm_size: None,
     };
     let code = eng.run(&spec)?;
     if code != 0 {

@@ -110,6 +110,34 @@ pub fn run(
         Ok(c) => c,
         Err(code) => return code,
     };
+
+    // WP-#92: SECURITY flags the rootless `ns` engine cannot honestly enforce are
+    // HONEST-ERRORED here (exit 2) BEFORE any provisioning — never silently
+    // recorded. A silent no-op on a security flag is worse than an error: the user
+    // believes they are sandboxed and isn't. This fires for EVERY engine (native =
+    // no sandbox by design; the ns userns already BOUNDS the capability set but
+    // full capset management is a separate tracked WP; vz is tracked). Mirrors the
+    // lead's vz+pids honest-error guard below.
+    if rc.privileged {
+        eprintln!(
+            "lightr: --privileged is not supported on the rootless ns engine (no real \
+             privilege in an unprivileged user namespace); tracked for --engine vz"
+        );
+        return 2;
+    }
+    if !rc.cap_add.is_empty() || !rc.cap_drop.is_empty() {
+        eprintln!(
+            "lightr: --cap-add/--cap-drop capability enforcement is not yet wired \
+             (tracked); refusing to run rather than give false security"
+        );
+        return 2;
+    }
+    // WP-#92: `--init` is RECORDED but a pid1 reaper is staged (ns pid-namespace
+    // work), not yet enforced — say so honestly (no silent false claim), then run.
+    if rc.init {
+        eprintln!("lightr: note: --init is recorded but not yet enforced (pid1 reaper staged)");
+    }
+
     // WP-RUNFLAGS: parse `-v`/`--entrypoint` + honest-error the networking flags
     // (fail-closed: bad value / Phase-2 flag ⇒ exit 2).
     let runflags = match runflags.resolve() {
@@ -373,6 +401,10 @@ pub fn run(
             &env_explicit,
             user,
             net_isolate,
+            // WP-#92: `--read-only` / `--shm-size` reach the ns engine (enforced
+            // there via ExecSpec). RUNTIME-ONLY; never part of the memo key.
+            rc.read_only,
+            rc.shm_size,
         );
     }
 

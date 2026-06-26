@@ -122,6 +122,8 @@ fn boot_vm(
         add_host: &[],
         dns: &[],
         mesh_ip: None,
+        read_only: false,
+        shm_size: None,
     };
     let code = engine
         .run(&spec)

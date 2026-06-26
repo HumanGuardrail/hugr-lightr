@@ -29,6 +29,10 @@ mod ns_impl {
             // WP-NET-ISO: `--net=none` ⇒ create a network namespace (CLONE_NEWNET)
             // so the container gets an isolated, empty net stack (loopback only).
             let net_isolate = spec.net_isolate;
+            // WP-#92: `--read-only` ⇒ remount the pivoted rootfs RO; `--shm-size`
+            // ⇒ a sized `/dev/shm` tmpfs (None ⇒ a default 64 MiB mount).
+            let read_only = spec.read_only;
+            let shm_size = spec.shm_size;
 
             // Fork so the child becomes PID 1 in the new PID namespace.
             // Safety: standard fork+exec pattern; we exec immediately in child.
@@ -37,8 +41,15 @@ mod ns_impl {
                 -1 => Err(LightrError::Io(std::io::Error::last_os_error())),
                 0 => {
                     // ── child ──────────────────────────────────────────────
-                    let rc =
-                        run_in_namespaces(&rootfs_path, &cwd_str, &command, &limits, net_isolate);
+                    let rc = run_in_namespaces(
+                        &rootfs_path,
+                        &cwd_str,
+                        &command,
+                        &limits,
+                        net_isolate,
+                        read_only,
+                        shm_size,
+                    );
                     std::process::exit(rc);
                 }
                 child_pid => {
@@ -64,12 +75,15 @@ mod ns_impl {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_in_namespaces(
         rootfs: &std::path::Path,
         cwd: &str,
         command: &[String],
         limits: &lightr_core::ResourceLimits,
         net_isolate: bool,
+        read_only: bool,
+        shm_size: Option<u64>,
     ) -> i32 {
         // Capture the REAL outer uid/gid BEFORE unsharing the user namespace.
         // After unshare(CLONE_NEWUSER) and before a map is written, the process
@@ -222,10 +236,38 @@ mod ns_impl {
         // pre-#91 there was no /dev at all).
         setup_minimal_dev();
 
+        // #92: mount a tmpfs at /dev/shm (Docker's POSIX shared-memory mount). The
+        // CAS-materialized rootfs has none, so programs that need /dev/shm (e.g.
+        // Python multiprocessing, many DB clients) otherwise fail. /dev is the
+        // tmpfs from setup_minimal_dev, so the /dev/shm dir is created there. A
+        // default 64 MiB mount (Docker's default) is best-effort; an EXPLICIT
+        // `--shm-size` that cannot be applied is fail-closed (return 1) — a
+        // requested size silently dropped would be a parity lie.
+        let shm_bytes = shm_size.unwrap_or(64 * 1024 * 1024);
+        if let Err(e) = setup_shm(shm_bytes, shm_size.is_some()) {
+            eprintln!("lightr-engine ns: /dev/shm mount failed: {e}");
+            return 1;
+        }
+
         // Unmount put_old (AFTER /dev binds are established from /.put_old/dev/*;
         // MNT_DETACH is lazy so the already-bound device mounts survive).
         let inner_put_old = CString::new("/.put_old").unwrap();
         let _ = unsafe { libc::umount2(inner_put_old.as_ptr(), libc::MNT_DETACH) };
+
+        // #92: `--read-only` ⇒ remount the rootfs READ-ONLY. Done LAST — after the
+        // /dev + /dev/shm tmpfses are mounted — and NON-recursively, so only the
+        // `/` mount (the rootfs bind) flips to RO; the /dev + /dev/shm tmpfs
+        // SUBMOUNTS are independent mount points and keep their RW flags. Net
+        // effect: rootfs immutable, /dev + /dev/shm writable (the key correctness
+        // point — a container with a RO root still needs writable shared memory).
+        // Fail-closed: if the remount fails we return 1 rather than exec a writable
+        // root the user asked to be read-only.
+        if read_only {
+            if let Err(e) = remount_root_readonly() {
+                eprintln!("lightr-engine ns: read-only remount failed: {e}");
+                return 1;
+            }
+        }
 
         // chdir to cwd-within-rootfs, or fallback to /
         let cwd_in = if cwd.is_empty() { "/" } else { cwd };
@@ -386,6 +428,68 @@ mod ns_impl {
         let _ = std::os::unix::fs::symlink("/proc/self/fd/0", "/dev/stdin");
         let _ = std::os::unix::fs::symlink("/proc/self/fd/1", "/dev/stdout");
         let _ = std::os::unix::fs::symlink("/proc/self/fd/2", "/dev/stderr");
+    }
+
+    /// #92: mount a tmpfs at `/dev/shm` sized to `bytes` (`mode=1777`, Docker's
+    /// `/dev/shm`). `/dev` is the tmpfs from [`setup_minimal_dev`], so the dir is
+    /// created there first. `explicit` is true for a user `--shm-size`: such a
+    /// mount is fail-closed (an `Err` is returned, the run aborts) — a requested
+    /// size silently dropped is a parity lie. The default 64 MiB mount
+    /// (`explicit=false`) is best-effort: `/dev/shm` should always exist, but a
+    /// default that cannot mount must not fail an otherwise-good run.
+    fn setup_shm(bytes: u64, explicit: bool) -> std::io::Result<()> {
+        use std::ffi::CString;
+        let _ = std::fs::create_dir_all("/dev/shm");
+        let opts = format!("mode=1777,size={bytes}");
+        let (src, tgt, fstype, opts_c) = match (
+            CString::new("tmpfs"),
+            CString::new("/dev/shm"),
+            CString::new("tmpfs"),
+            CString::new(opts),
+        ) {
+            (Ok(a), Ok(b), Ok(c), Ok(d)) => (a, b, c, d),
+            _ => return Err(std::io::Error::other("bad /dev/shm mount arg")),
+        };
+        let r = unsafe {
+            libc::mount(
+                src.as_ptr(),
+                tgt.as_ptr(),
+                fstype.as_ptr(),
+                libc::MS_NOSUID | libc::MS_NODEV,
+                opts_c.as_ptr() as *const libc::c_void,
+            )
+        };
+        if r != 0 {
+            let e = std::io::Error::last_os_error();
+            if explicit {
+                return Err(e);
+            }
+            // Best-effort default: note it and continue (no /dev/shm is degraded,
+            // not fatal, for a run that did not request a specific size).
+            eprintln!("lightr-engine ns: default /dev/shm tmpfs mount failed (continuing): {e}");
+        }
+        Ok(())
+    }
+
+    /// #92: remount `/` (the pivoted rootfs bind) READ-ONLY. NON-recursive on
+    /// purpose: it flips ONLY the `/` mount, leaving the /dev + /dev/shm tmpfs
+    /// submounts (independent mount points) writable. `MS_BIND | MS_REMOUNT |
+    /// MS_RDONLY` is the canonical incantation to make a bind mount read-only; it
+    /// works rootless because we hold CAP_SYS_ADMIN in the new user+mount ns.
+    fn remount_root_readonly() -> std::io::Result<()> {
+        let r = unsafe {
+            libc::mount(
+                std::ptr::null(),
+                c"/".as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
+                std::ptr::null(),
+            )
+        };
+        if r != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 }
 

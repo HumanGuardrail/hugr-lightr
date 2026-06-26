@@ -174,6 +174,10 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         add_host: &add_host,
                         dns: &dns,
                         mesh_ip,
+                        // WP-#92: the vz supervisor path is a microVM, not the ns
+                        // engine; --read-only/--shm-size are ns-enforced. Defaults.
+                        read_only: false,
+                        shm_size: None,
                     };
                     engine.run(&spec).unwrap_or(255)
                 }

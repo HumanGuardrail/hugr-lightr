@@ -103,4 +103,21 @@ pub struct ExecSpec<'a> {
     pub dns: &'a [String],
     /// Assigned mesh IP for the dual-NIC switch (ADR-0018), if any.
     pub mesh_ip: Option<std::net::Ipv4Addr>,
+
+    /// `--read-only` (WP-#92). When true, the `ns` engine remounts the container
+    /// rootfs READ-ONLY after pivot_root + the `/dev` setup, so the rootfs is
+    /// immutable while `/dev` + `/dev/shm` stay writable (the RO remount of `/`
+    /// is NON-recursive, so the tmpfs submounts keep their RW flags). Fail-closed:
+    /// a requested read-only that cannot be applied aborts the run (the ns engine
+    /// returns non-zero rather than exec a writable root). Other engines ignore it
+    /// (native is a host process with no rootfs to remount; vz is its own VM). NOT
+    /// part of any memo key (runtime, like `limits`/`net`). Default false.
+    pub read_only: bool,
+    /// `--shm-size` in BYTES (WP-#92). The `ns` engine mounts a tmpfs at
+    /// `/dev/shm` sized to this many bytes (`mode=1777`). `None` ⇒ a default 64 MiB
+    /// `/dev/shm` (Docker's default) so the mount always exists. An EXPLICIT size
+    /// that cannot be applied is fail-closed (the run aborts); the default mount is
+    /// best-effort. Other engines ignore it. NOT part of any memo key (runtime).
+    /// Default None.
+    pub shm_size: Option<u64>,
 }
