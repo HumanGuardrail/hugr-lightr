@@ -178,6 +178,10 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         // engine; --read-only/--shm-size are ns-enforced. Defaults.
                         read_only: false,
                         shm_size: None,
+                        // WP-#94: the vz supervisor path is a microVM; caps are an
+                        // ns-engine concern. Defaults (no cap changes).
+                        cap_drop: &[],
+                        cap_add: &[],
                     };
                     engine.run(&spec).unwrap_or(255)
                 }

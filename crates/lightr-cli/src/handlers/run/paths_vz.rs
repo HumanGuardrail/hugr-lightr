@@ -87,6 +87,10 @@ pub(crate) fn run_vz_memo(
             // the ns engine is where --read-only/--shm-size gain teeth.
             read_only: false,
             shm_size: None,
+            // WP-#94: capability enforcement is the ns engine's job; the vz-memo
+            // path is its own VM. Defaults (no cap changes).
+            cap_drop: &[],
+            cap_add: &[],
         };
         // Suppress the guest CONSOLE (boot log + exit marker) from the host's
         // stdout on a memo MISS: real stdout/stderr come from the capture files

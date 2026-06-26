@@ -125,13 +125,11 @@ pub fn run(
         );
         return 2;
     }
-    if !rc.cap_add.is_empty() || !rc.cap_drop.is_empty() {
-        eprintln!(
-            "lightr: --cap-add/--cap-drop capability enforcement is not yet wired \
-             (tracked); refusing to run rather than give false security"
-        );
-        return 2;
-    }
+    // WP-#94: `--cap-add`/`--cap-drop` are REAL on the `ns` engine (it drops the
+    // bounding set + capsets the desired set as the last step before exec). The
+    // engine-aware guard fires AFTER `engine_kind` is parsed below; native/vz keep
+    // the honest exit-2 (native = no sandbox; vz caps live inside the guest, not
+    // managed by the shim).
     // WP-#92: `--init` is RECORDED but a pid1 reaper is staged (ns pid-namespace
     // work), not yet enforced — say so honestly (no silent false claim), then run.
     if rc.init {
@@ -161,6 +159,23 @@ pub fn run(
         Ok(k) => k,
         Err(e) => return die_lightr(&e),
     };
+
+    // WP-#94: capability enforcement is REAL only on the `ns` engine. For any
+    // OTHER engine, `--cap-add`/`--cap-drop` are HONEST-ERRORED (exit 2) BEFORE
+    // provisioning rather than silently recorded — native is no sandbox by design,
+    // and vz capabilities live inside the guest (not managed by this shim). The ns
+    // engine does NOT error here: it enforces the requested set in `run_engine`
+    // (the desired set = full userns set − cap_drop + cap_add, applied as the last
+    // step before exec). A silent no-op on a security flag would give false
+    // security — the exact failure WP-#92 refused.
+    if engine_kind != EngineKind::Ns && (!rc.cap_add.is_empty() || !rc.cap_drop.is_empty()) {
+        eprintln!(
+            "lightr: --cap-add/--cap-drop capability enforcement is implemented only on \
+             the rootless ns engine (--engine ns); native is no sandbox and vz caps live \
+             inside the guest — refusing to run rather than give false security"
+        );
+        return 2;
+    }
 
     // WP-NET-ISO: parse `--net` + enforce `none` has a netns (fail-closed, exit 2).
     let is_pure_native = engine_kind == EngineKind::Native && rootfs_ref.is_none();
@@ -405,6 +420,12 @@ pub fn run(
             // there via ExecSpec). RUNTIME-ONLY; never part of the memo key.
             rc.read_only,
             rc.shm_size,
+            // WP-#94: `--cap-drop` / `--cap-add` reach the ns engine (real Linux
+            // capability enforcement via ExecSpec). native/vz never get here with
+            // caps set — the engine-aware guard above honest-errors them first.
+            // RUNTIME-ONLY; never part of the memo key.
+            &rc.cap_drop,
+            &rc.cap_add,
         );
     }
 

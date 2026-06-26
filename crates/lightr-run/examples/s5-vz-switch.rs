@@ -124,6 +124,8 @@ fn boot_vm(
         mesh_ip: None,
         read_only: false,
         shm_size: None,
+        cap_drop: &[],
+        cap_add: &[],
     };
     let code = engine
         .run(&spec)

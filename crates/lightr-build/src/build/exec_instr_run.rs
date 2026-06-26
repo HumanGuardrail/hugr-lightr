@@ -80,6 +80,10 @@ pub(in crate::build) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
         // writable rootfs); defaults preserve today's behaviour.
         read_only: false,
         shm_size: None,
+        // WP-#94: a build RUN step never drops/adds caps (defaults preserve today's
+        // behaviour — the build child keeps the full userns capability set).
+        cap_drop: &[],
+        cap_add: &[],
     };
     let code = eng.run(&spec)?;
     if code != 0 {

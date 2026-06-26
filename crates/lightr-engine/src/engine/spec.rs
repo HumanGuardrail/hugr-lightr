@@ -120,4 +120,21 @@ pub struct ExecSpec<'a> {
     /// best-effort. Other engines ignore it. NOT part of any memo key (runtime).
     /// Default None.
     pub shm_size: Option<u64>,
+
+    /// `--cap-drop` (WP-#94). Linux capability names to REMOVE from the
+    /// container's set (case-insensitive, optional `CAP_` prefix; the token `ALL`
+    /// drops every capability). Only the `ns` engine enforces it: as the LAST step
+    /// before exec (after pivot_root + all mounts), it drops the bounding set +
+    /// `capset`s permitted/effective/inheritable to the desired set. native is no
+    /// sandbox (honest-errored at the handler); vz caps live inside the guest. An
+    /// unknown cap name is fail-closed (the run aborts non-zero). NOT part of any
+    /// memo key (runtime, like `limits`/`read_only`). Default `&[]`.
+    pub cap_drop: &'a [String],
+    /// `--cap-add` (WP-#94). Linux capability names to ADD back on top of the
+    /// post-`cap_drop` set (same parsing rules; `ALL` ⇒ every capability). The
+    /// desired set = (all caps held in the userns) − `cap_drop` + `cap_add`, so
+    /// `--cap-drop ALL --cap-add NET_BIND_SERVICE` ⇒ exactly that one cap. Only the
+    /// `ns` engine enforces it (see `cap_drop`). NOT part of any memo key. Default
+    /// `&[]`.
+    pub cap_add: &'a [String],
 }

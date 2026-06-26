@@ -11,9 +11,11 @@ name: linux-validation
 #   resource-limits   — WP-#90: prove F-203 cgroup v2 enforcement on real Linux AS
 #                       ROOT — memory.max OOM-kill, cpu.max limited run, and the new
 #                       pids.max fork-cap (the parity-honesty gap this WP closed).
-#   security-flags    — WP-#92: prove `ns`-engine --read-only (rootfs EROFS, /dev/shm
-#                       still writable) + --shm-size enforcement, and that
-#                       --privileged/--cap-add/--cap-drop honest-error (exit 2).
+#   security-flags    — WP-#92/#94: prove `ns`-engine --read-only (rootfs EROFS,
+#                       /dev/shm still writable) + --shm-size enforcement, REAL
+#                       --cap-drop/--cap-add enforcement (CAP_CHOWN held→dropped→
+#                       added-back, unknown-cap fail-closed), and that --privileged
+#                       (all engines) + --cap-* (non-ns engines) honest-error (exit 2).
 # Manual only (workflow_dispatch).
 on:
   workflow_dispatch:
@@ -307,12 +309,14 @@ jobs:
           if [ "$FAIL" = 0 ]; then echo "RESLIMITS=PASS"; else echo "RESLIMITS=FAIL"; exit 1; fi  # gate for real
 
   security-flags:
-    # WP-#92: prove the security/runtime flags on the `ns` engine are ACTUALLY
-    # enforced (read-only rootfs, sized /dev/shm) — not silently recorded — and
-    # that the unenforceable ones (--privileged / --cap-add / --cap-drop) HONEST-
-    # ERROR (exit 2) before running rather than give false security. Rootless ns
-    # (no sudo): the read-only remount + /dev/shm tmpfs work in the user namespace.
-    # The ns engine execs ABSOLUTE paths only, so every probe invokes /bin/busybox.
+    # WP-#92/#94: prove the security/runtime flags on the `ns` engine are ACTUALLY
+    # enforced (read-only rootfs, sized /dev/shm, REAL --cap-drop/--cap-add) — not
+    # silently recorded — and that the unenforceable cases honest-error (exit 2)
+    # before running rather than give false security: --privileged on every engine,
+    # and --cap-* on NON-ns engines (native = no sandbox; vz caps live in the guest).
+    # Rootless ns (no sudo): the read-only remount, /dev/shm tmpfs, and capability
+    # drops (bounding set + capset) all work in the new user namespace. The ns engine
+    # execs ABSOLUTE paths only, so every probe invokes /bin/busybox.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -370,8 +374,11 @@ jobs:
           echo "=== --privileged → honest exit 2 ==="
           "$BIN" run --engine ns --privileged --rootfs alpine -- /bin/true >/tmp/priv.txt 2>&1
           PRIV_EXIT=$?; echo "priv_exit=$PRIV_EXIT"; tail -2 /tmp/priv.txt
-          echo "=== --cap-drop ALL → honest exit 2 ==="
-          "$BIN" run --engine ns --cap-drop ALL --rootfs alpine -- /bin/true >/tmp/cap.txt 2>&1
+          # WP-#94: the `ns` engine now ENFORCES --cap-drop/--cap-add (proved in the
+          # next step). The HONEST-ERROR is for NON-ns engines: native is no sandbox,
+          # so --cap-drop on --engine native must still exit 2 BEFORE running.
+          echo "=== --engine native --cap-drop ALL → honest exit 2 ==="
+          "$BIN" run --engine native --cap-drop ALL -- /bin/true >/tmp/cap.txt 2>&1
           CAP_EXIT=$?; echo "cap_exit=$CAP_EXIT"; tail -2 /tmp/cap.txt
 
           # ── GATE (no false-green: every proof must hold or the job fails) ─────────
@@ -384,5 +391,43 @@ jobs:
           [ "$S20_EXIT" != 0 ]  || { echo "FAIL: 20m write to a 16m /dev/shm succeeded (size not enforced)"; FAIL=1; }
           [ "$S8_EXIT" = 0 ]    || { echo "FAIL: 8m write to a 16m /dev/shm failed (exit $S8_EXIT)"; FAIL=1; }
           [ "$PRIV_EXIT" = 2 ]  || { echo "FAIL: --privileged did not honest-error with exit 2 (exit $PRIV_EXIT)"; FAIL=1; }
-          [ "$CAP_EXIT" = 2 ]   || { echo "FAIL: --cap-drop did not honest-error with exit 2 (exit $CAP_EXIT)"; FAIL=1; }
+          [ "$CAP_EXIT" = 2 ]   || { echo "FAIL: native --cap-drop did not honest-error with exit 2 (exit $CAP_EXIT)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "SECFLAGS=PASS"; else echo "SECFLAGS=FAIL"; exit 1; fi  # gate for real
+
+      - name: Prove --cap-drop/--cap-add capability enforcement (ns engine)
+        run: |
+          # WP-#94: prove the `ns` engine ACTUALLY drops/adds Linux capabilities
+          # (not a silent no-op). CAP_CHOWN is the cleanly-testable rootless cap:
+          # mapped-root holds it, and chowning a file to another uid needs it. The
+          # probe file is written at the rootfs ROOT (/capf) — always present, unlike
+          # /root,/tmp (alpine ships them empty + lightr's snapshot drops empties).
+          # The ns engine execs ABSOLUTE paths only ⇒ every probe invokes /bin/busybox.
+          set +e
+          BIN="$PWD/target/release/lightr"
+
+          echo "=== control: caps held → chown succeeds (expect exit 0) ==="
+          "$BIN" run --engine ns --rootfs alpine -- \
+            /bin/busybox sh -c 'touch /capf && chown 1 /capf' >/tmp/cc.txt 2>&1
+          CC_EXIT=$?; echo "cc_exit=$CC_EXIT"; tail -3 /tmp/cc.txt
+
+          echo "=== dropped: --cap-drop ALL → chown must FAIL (EPERM, non-zero) ==="
+          "$BIN" run --engine ns --cap-drop ALL --rootfs alpine -- \
+            /bin/busybox sh -c 'touch /capf && chown 1 /capf' >/tmp/cd.txt 2>&1
+          CD_EXIT=$?; echo "cd_exit=$CD_EXIT"; tail -3 /tmp/cd.txt
+
+          echo "=== add-back: --cap-drop ALL --cap-add CHOWN → chown succeeds (exit 0) ==="
+          "$BIN" run --engine ns --cap-drop ALL --cap-add CHOWN --rootfs alpine -- \
+            /bin/busybox sh -c 'touch /capf && chown 1 /capf' >/tmp/ca.txt 2>&1
+          CA_EXIT=$?; echo "ca_exit=$CA_EXIT"; tail -3 /tmp/ca.txt
+
+          echo "=== unknown cap name: --cap-drop BOGUS_CAP → fail-closed (non-zero) ==="
+          "$BIN" run --engine ns --cap-drop BOGUS_CAP --rootfs alpine -- /bin/true >/tmp/cu.txt 2>&1
+          CU_EXIT=$?; echo "cu_exit=$CU_EXIT"; tail -3 /tmp/cu.txt
+
+          # ── GATE (assert via exit codes; no false-green) ─────────────────────────
+          FAIL=0
+          [ "$CC_EXIT" = 0 ]  || { echo "FAIL: control chown (caps held) failed (exit $CC_EXIT) — cap baseline wrong"; FAIL=1; }
+          [ "$CD_EXIT" != 0 ] || { echo "FAIL: --cap-drop ALL did NOT block chown (CAP_CHOWN not enforced — FALSE SECURITY)"; FAIL=1; }
+          [ "$CA_EXIT" = 0 ]  || { echo "FAIL: --cap-add CHOWN did not restore chown (exit $CA_EXIT)"; FAIL=1; }
+          [ "$CU_EXIT" != 0 ] || { echo "FAIL: unknown cap name silently accepted (not fail-closed on a typo'd flag)"; FAIL=1; }
+          if [ "$FAIL" = 0 ]; then echo "CAPENFORCE=PASS"; else echo "CAPENFORCE=FAIL"; exit 1; fi  # gate for real
