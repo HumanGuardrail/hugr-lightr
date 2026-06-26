@@ -859,7 +859,10 @@ jobs:
             echo "KPI3_EXEC_TTY=FAIL (util-linux \`script\` absent — cannot drive a headless tty exec)"
             sudo cat /tmp/serve.log; CR stop "$CTR_ID" >/dev/null 2>&1; CR rmp -f "$POD_ID" >/dev/null 2>&1; sudo pkill -f lightr-cri-serve; exit 1
           fi
-          TTY_CMD="sudo crictl --runtime-endpoint unix://$SOCK --image-endpoint unix://$SOCK exec -it $CTR_ID /bin/sh -c 'tty; cat /etc/alpine-release; echo TTYPID=\$\$; test -t 0 && echo IS_TTY'"
+          # #105: also probe for the container's PRIVATE devpts — the in-container
+          # exec should now see /dev/pts as a directory (the ns engine mounts a
+          # `newinstance` devpts in setup_minimal_dev). HAS_DEVPTS proves the mount.
+          TTY_CMD="sudo crictl --runtime-endpoint unix://$SOCK --image-endpoint unix://$SOCK exec -it $CTR_ID /bin/sh -c 'tty; cat /etc/alpine-release; echo TTYPID=\$\$; test -t 0 && echo IS_TTY; test -d /dev/pts && echo HAS_DEVPTS'"
           TTY_OUT=$(script -qec "$TTY_CMD" /dev/null 2>/tmp/exec-tty.log)
           TTY_RC=$?
           echo "=== crictl exec -it output (rc=$TTY_RC) ==="; echo "$TTY_OUT"; echo "=== exec-tty stderr ==="; cat /tmp/exec-tty.log
@@ -867,16 +870,29 @@ jobs:
           [ "$TTY_RC" = 0 ] || { echo "EXEC_TTY_FAIL: crictl exec -it exit code $TTY_RC != 0"; TFAIL=1; }
           # (1) fd 0 is a TTY inside the container — THE proof the pty was wired as
           # the exec's controlling stdin (isatty(0)). In the nsenter model the pty is
-          # host-allocated (like docker/runc exec) and passed IN by fd inheritance,
-          # so `tty`/ttyname(0) canNOT resolve a /dev/pts/* PATH (the container's mount
-          # ns has no matching devpts — a separate /dev-completeness matter, #91-class,
-          # NOT whether the pty is wired). So isatty (IS_TTY) is the hard gate; the
-          # /dev/pts NAME is informational only.
+          # host-allocated (like docker/runc exec) and passed IN by fd inheritance, so
+          # `tty`/ttyname(0) may still NOT resolve a /dev/pts/* PATH: the host pty's
+          # slave has no matching entry in the container's NEW (`newinstance`) devpts
+          # instance (#105). So isatty (IS_TTY) stays the HARD pty gate; the /dev/pts
+          # NAME is not asserted. What #105 DOES guarantee is that /dev/pts EXISTS as a
+          # mounted dir in the container — asserted below.
           echo "$TTY_OUT" | grep -q 'IS_TTY' || { echo "EXEC_TTY_FAIL: \`test -t 0\` false inside ⇒ stdin is not a tty (tty code path not taken)"; TFAIL=1; }
           # (2) ALPINE container rootfs (dotted version), not the host.
           echo "$TTY_OUT" | grep -qE '[0-9]+\.[0-9]+' || { echo "EXEC_TTY_FAIL: /etc/alpine-release not seen ⇒ tty exec is NOT in the container rootfs (host-process fallback?)"; TFAIL=1; }
-          # (informational) the pty NAME, present only if the container has a devpts:
-          if echo "$TTY_OUT" | grep -q '/dev/pts/'; then echo "KPI3_EXEC_TTY_NAME=present (container has a devpts)"; else echo "KPI3_EXEC_TTY_NAME=unnamed (host-allocated pty; container has no /dev/pts — expected, #91-class)"; fi
+          # (3) #105 DEVPTS gate: the container now has a private devpts mounted at
+          # /dev/pts (setup_minimal_dev mounts a `newinstance` devpts). HARD-assert it
+          # exists as a directory in the container (NOT that `tty` names the host pty's
+          # slave there — see note above). Substring grep on the pty-injected output.
+          if echo "$TTY_OUT" | grep -q 'HAS_DEVPTS'; then
+            echo "KPI3_DEVPTS=PASS (container has /dev/pts mounted — private devpts instance, #105)"
+          else
+            echo "EXEC_TTY_FAIL: /dev/pts not a dir inside the container ⇒ devpts (#105) not mounted"; TFAIL=1
+            echo "KPI3_DEVPTS=FAIL (no /dev/pts in the container)"
+          fi
+          # (informational) the pty NAME, present only if `tty` resolved a path in the
+          # container's devpts instance (often unnamed even WITH a devpts — the host pty
+          # slave has no entry in the container's new instance):
+          if echo "$TTY_OUT" | grep -q '/dev/pts/'; then echo "KPI3_EXEC_TTY_NAME=present (tty resolved a /dev/pts/* path)"; else echo "KPI3_EXEC_TTY_NAME=unnamed (host-allocated pty has no entry in the container's newinstance devpts — expected even with #105)"; fi
           if [ "$TFAIL" != 0 ]; then
             echo "KPI3_EXEC_TTY=FAIL (crictl exec -it did not open a pty-backed exec inside the ns container)"
             echo "=== serve.log ==="; sudo cat /tmp/serve.log
