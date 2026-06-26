@@ -711,6 +711,7 @@ dependencies = [
  "libc",
  "lightr-core",
  "lightr-engine",
+ "lightr-index",
  "lightr-oci",
  "lightr-run",
  "lightr-store",

@@ -23,6 +23,11 @@
 
 pub mod vocab;
 
+// WP-#99 (CRI slice 1): the `ns`-run descriptor — the shared serialization
+// contract between this backend (builder) and the `__ns-run` shim in
+// `lightr-cri-serve` (consumer). One type, no drift.
+pub mod ns_run;
+
 // WP-CRI-MVP planes (split by concern, each <400 LOC). The trait impl below
 // delegates to the inherent `_impl` methods defined in these modules. Streaming
 // stays fail-closed here (WP-CRI-STREAM); the sandbox/pod plane is now wired

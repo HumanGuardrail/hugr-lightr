@@ -85,6 +85,10 @@ pub(in crate::build) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
         cap_drop: &[],
         cap_add: &[],
         init: false,
+        // WP-#99: CRI-only carry-slots; a build RUN step neither joins a netns nor
+        // names a cgroup leaf. Defaults preserve today's behaviour.
+        join_netns: None,
+        cgroup_name: None,
     };
     let code = eng.run(&spec)?;
     if code != 0 {

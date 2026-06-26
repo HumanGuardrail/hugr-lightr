@@ -107,20 +107,35 @@ fn install_memory_rlimit(cmd: &mut std::process::Command, memory_bytes: u64) {
 /// subsequent `exec` inherits the caps. If cgroup v2 is unavailable, or any write
 /// is denied (no delegation / no `CAP_SYS_RESOURCE`), returns an honest `Err`;
 /// it never silently pretends to enforce.
+///
+/// WP-#99: `cgroup_name` lets the caller pin an EXPLICIT leaf name. When `Some`,
+/// the leaf is created and joined EVEN IF the limits are unlimited — so the
+/// process lands in a known, killable cgroup (the CRI backend's `stop` writes
+/// that leaf's `cgroup.kill`). When `None`, behavior is unchanged: an unlimited
+/// run is a no-op, a limited run uses the transient `lightr.<pid>` leaf.
 #[cfg(target_os = "linux")]
-pub fn apply_cgroup(limits: &lightr_core::ResourceLimits) -> Result<()> {
-    if limits.is_unlimited() {
+pub fn apply_cgroup(
+    limits: &lightr_core::ResourceLimits,
+    cgroup_name: Option<&str>,
+) -> Result<()> {
+    if cgroup_name.is_none() && limits.is_unlimited() {
         return Ok(());
     }
-    cgroup_v2::apply(limits)
+    cgroup_v2::apply(limits, cgroup_name)
 }
 
 /// Non-Linux: cgroups do not exist. Honest `Err` when a cap is asked for; inert
 /// `Ok(())` when unlimited. (The `ns` engine itself is Linux-only — this arm
 /// only exists so the symbol resolves on every target.)
 #[cfg(not(target_os = "linux"))]
-pub fn apply_cgroup(limits: &lightr_core::ResourceLimits) -> Result<()> {
-    if limits.is_unlimited() {
+pub fn apply_cgroup(
+    limits: &lightr_core::ResourceLimits,
+    cgroup_name: Option<&str>,
+) -> Result<()> {
+    // An explicit leaf name is a Linux-only cgroup-v2 concept; off Linux it is
+    // simply not honored (the ns engine itself is Linux-only). Unlimited + no
+    // name ⇒ inert Ok; any cap or named leaf ⇒ honest Unsupported.
+    if cgroup_name.is_none() && limits.is_unlimited() {
         return Ok(());
     }
     Err(LightrError::Io(std::io::Error::new(
@@ -137,9 +152,17 @@ mod cgroup_v2 {
 
     const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
-    /// Create a transient cgroup, write the caps, and join it. Honest `Err` on
-    /// any failure (no v2 mount, not delegated, write denied).
-    pub fn apply(limits: &lightr_core::ResourceLimits) -> Result<()> {
+    /// Create a cgroup, write the caps, and join it. Honest `Err` on any failure
+    /// (no v2 mount, not delegated, write denied).
+    ///
+    /// WP-#99: `cgroup_name`, when `Some`, names the leaf EXPLICITLY (the CRI
+    /// backend pins `lightr-cri/<cid>` so its `stop` can `cgroup.kill` the whole
+    /// subtree). `None` keeps the transient `lightr.<pid>` leaf (unique per
+    /// process so concurrent runs don't collide).
+    pub fn apply(
+        limits: &lightr_core::ResourceLimits,
+        cgroup_name: Option<&str>,
+    ) -> Result<()> {
         // cgroup v2 presents a unified hierarchy with a `cgroup.controllers`
         // file at the root. Its absence ⇒ v1 / not mounted ⇒ honest Unsupported.
         let root = Path::new(CGROUP_ROOT);
@@ -149,8 +172,12 @@ mod cgroup_v2 {
             ));
         }
 
-        // A transient leaf, unique per process so concurrent runs don't collide.
-        let leaf: PathBuf = root.join(format!("lightr.{}", std::process::id()));
+        // The leaf: an explicit name (CRI; may be a nested `a/b` path) or the
+        // transient per-process default.
+        let leaf: PathBuf = match cgroup_name {
+            Some(name) => root.join(name),
+            None => root.join(format!("lightr.{}", std::process::id())),
+        };
         std::fs::create_dir_all(&leaf).map_err(|e| {
             denied_or_io(
                 e,
@@ -271,9 +298,10 @@ mod tests {
         );
     }
 
-    // apply_cgroup with unlimited never errors (it is a no-op fast path).
+    // apply_cgroup with unlimited + no explicit leaf name never errors (it is a
+    // no-op fast path).
     #[test]
     fn apply_cgroup_unlimited_ok() {
-        assert!(apply_cgroup(&ResourceLimits::default()).is_ok());
+        assert!(apply_cgroup(&ResourceLimits::default(), None).is_ok());
     }
 }

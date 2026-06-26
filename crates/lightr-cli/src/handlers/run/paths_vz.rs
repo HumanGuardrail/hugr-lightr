@@ -92,6 +92,10 @@ pub(crate) fn run_vz_memo(
             cap_drop: &[],
             cap_add: &[],
             init: false,
+            // WP-#99: CRI-only carry-slots; the vz-memo path never joins a netns
+            // nor names a cgroup leaf (it is its own VM). Defaults.
+            join_netns: None,
+            cgroup_name: None,
         };
         // Suppress the guest CONSOLE (boot log + exit marker) from the host's
         // stdout on a memo MISS: real stdout/stderr come from the capture files
