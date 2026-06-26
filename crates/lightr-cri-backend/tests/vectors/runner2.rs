@@ -29,7 +29,17 @@ pub fn execute_step(
     match step {
         // ── sandbox plane ──────────────────────────────────────────────────
         Step::RunSandbox { cfg, expect_err } => {
-            let result = backend.run_sandbox(cfg.clone());
+            // Conformance vectors exercise the CRI STATE MACHINE on the fake /
+            // no-network plane (the real netns + isolation path is proven by the
+            // cri-kpi3 and netns_lifecycle jobs). Force host_network so
+            // start_container takes the deterministic host-process path regardless
+            // of whether THIS runner has CNI — post-#99 a netns'd pod correctly
+            // FAIL-CLOSES on the vectors' non-hydratable images. Safe: no vector
+            // asserts a present pod IP (the only ip assertion is expect_ip_present:
+            // false, which host_network preserves).
+            let mut cfg = cfg.clone();
+            cfg.host_network = true;
+            let result = backend.run_sandbox(cfg);
             check_err_expectation(result, expect_err, "run_sandbox", |id| Some(id.0))
         }
         Step::StopSandbox { id, expect_err } => {
