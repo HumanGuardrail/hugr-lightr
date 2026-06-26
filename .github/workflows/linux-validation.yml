@@ -134,6 +134,27 @@ jobs:
           if [ "$IC" != "7" ]; then echo "NS_INIT_EXIT=FAIL (got $IC, expected 7)"; exit 1; fi
           echo "NS_INIT_EXIT=PASS"
 
+          # ── 3b) --init PID 1 actually REAPS re-parented orphans (AUDIT #101) ──
+          # Steps 1-3 prove PID-1 ENTRY + exit propagation but NOT the reaper's
+          # headline job. Double-fork an orphan: the inner grandchild is re-parented
+          # to PID 1 when its parent subshell exits immediately; after the grandchild
+          # exits it would linger as a ZOMBIE unless PID 1 waitpid(-1)-reaps it. The
+          # workload (PID 2) sleeps past the grandchild's exit, then counts Z-state
+          # procs in its own pid ns — a real reaper ⇒ zero zombies.
+          "$BIN" run --engine ns --init --rootfs alpine -- /bin/busybox sh -c '
+            ( ( sleep 1 ) & ) ;
+            sleep 3 ;
+            Z=0 ;
+            for p in $(ls /proc 2>/dev/null | grep -E "^[0-9]+$") ; do
+              s=$(awk "/^State:/{print \$2}" /proc/$p/status 2>/dev/null) ;
+              [ "$s" = "Z" ] && Z=$((Z+1)) ;
+            done ;
+            echo REAPER_ZOMBIES=$Z' >/tmp/reaper.txt 2>&1
+          echo "--- reaper probe ---"; cat /tmp/reaper.txt
+          RZ=$(grep -oE 'REAPER_ZOMBIES=[0-9]+' /tmp/reaper.txt | cut -d= -f2)
+          if [ "${RZ:-x}" != "0" ]; then echo "NS_INIT_REAP=FAIL (found '${RZ:-?}' zombie(s) — PID 1 --init reaper did not reap the re-parented orphan)"; exit 1; fi
+          echo "NS_INIT_REAP=PASS"
+
           # ── 4) no regression: a plain ns run still exits 0 ──
           "$BIN" run --engine ns --rootfs alpine -- /bin/true
           TC=$?; echo "plain_true_exit=$TC"
@@ -330,23 +351,42 @@ jobs:
           RUN() { sudo -E env "LIGHTR_HOME=$LIGHTR_HOME" "$BIN" "$@"; }
 
           # ── MEMORY: busybox awk doubles a string forever → must be OOM-killed
-          # under memory.max=64m. A faithful cap kills it ⇒ NON-zero exit (137 on
-          # SIGKILL). If it ran to "completion" (exit 0) the cap did NOT bite. ──────
-          echo "=== MEMORY: --memory 64m awk string-bomb → expect OOM kill (non-zero) ==="
+          # AUDIT #101 (true differential): the SAME ~100MB allocator is OOM-KILLED
+          # (signal death, exit >=128) under --memory 64m but COMPLETES (exit 0)
+          # under a generous --memory 512m — proving the cap binds at its VALUE, not
+          # just "an unbounded bomb eventually dies". memory.swap.max=0 makes
+          # memory.max a HARD RAM cap (the 2026-06-26 audit saw it spill to swap +
+          # exit 1 gracefully without it). 2^25 doubling ⇒ ~33MB final, ~100MB peak.
+          MEMBOMB='BEGIN{s="x";for(i=0;i<25;i++)s=s s;print length(s)}'
+          echo "=== MEMORY capped: --memory 64m ~100MB alloc → expect OOM-kill (signal >=128) ==="
           RUN run --engine ns --memory 64m --rootfs alpine -- \
-            /bin/busybox awk 'BEGIN{s="x";while(1)s=s s}' >/tmp/mem.txt 2>&1
-          MEM_EXIT=$?; echo "RESLIMITS_MEM_EXIT=$MEM_EXIT"; tail -3 /tmp/mem.txt
+            /bin/busybox awk "$MEMBOMB" >/tmp/memcap.txt 2>&1
+          MEM_CAP_EXIT=$?; echo "RESLIMITS_MEM_CAP_EXIT=$MEM_CAP_EXIT"; tail -2 /tmp/memcap.txt
+          echo "=== MEMORY control: --memory 512m same alloc → expect completion (0) ==="
+          RUN run --engine ns --memory 512m --rootfs alpine -- \
+            /bin/busybox awk "$MEMBOMB" >/tmp/memfree.txt 2>&1
+          MEM_FREE_EXIT=$?; echo "RESLIMITS_MEM_FREE_EXIT=$MEM_FREE_EXIT"; tail -2 /tmp/memfree.txt
 
           # ── CPU: a short cpu-bound busybox loop under --cpus 0.5 must still RUN to
           # completion (the share throttles, it does not kill). Proves the cpu.max
           # apply path does not error the run. (cpu.max VALUE assertion is covered by
           # the unit/apply path — the transient cgroup is process-scoped + torn down,
           # so a post-hoc host read is unreliable; this proves the limited run works.)
-          echo "=== CPU: --cpus 0.5 short loop → expect completion (exit 0) ==="
-          RUN run --engine ns --cpus 0.5 --rootfs alpine -- \
-            /bin/busybox sh -c 'i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done; echo cpu_ok' \
-            >/tmp/cpu.txt 2>&1
-          CPU_EXIT=$?; echo "RESLIMITS_CPU_EXIT=$CPU_EXIT"; tail -2 /tmp/cpu.txt
+          # AUDIT #101 (throttle differential): the SAME fixed cpu-bound loop is
+          # measurably SLOWER under --cpus 0.2 than uncapped — proving cpu.max
+          # THROTTLES (an ignored --cpus would run in the same wall-time; the old
+          # probe only checked the run COMPLETED). Pure busy loop (no sleep) ⇒
+          # ~fully cpu-bound; 0.2 cores ≈ 5x wall-time vs unthrottled. The constant
+          # ns-setup overhead (~85ms) is in both, so the ratio reflects throttle.
+          CPULOOP='i=0; while [ $i -lt 2000000 ]; do i=$((i+1)); done; echo done'
+          echo "=== CPU capped: --cpus 0.2 busy loop (timed) ==="
+          T0=$(date +%s%N)
+          RUN run --engine ns --cpus 0.2 --rootfs alpine -- /bin/busybox sh -c "$CPULOOP" >/tmp/cpucap.txt 2>&1
+          CPU_CAP_EXIT=$?; CAP_MS=$(( ($(date +%s%N)-T0)/1000000 )); echo "RESLIMITS_CPU_CAP_MS=$CAP_MS exit=$CPU_CAP_EXIT"
+          echo "=== CPU control: no --cpus, same loop (timed) ==="
+          T2=$(date +%s%N)
+          RUN run --engine ns --rootfs alpine -- /bin/busybox sh -c "$CPULOOP" >/tmp/cpufree.txt 2>&1
+          CPU_FREE_EXIT=$?; FREE_MS=$(( ($(date +%s%N)-T2)/1000000 )); echo "RESLIMITS_CPU_FREE_MS=$FREE_MS exit=$CPU_FREE_EXIT"
 
           # ── PIDS: a PIPELINE forks one process per stage at construction time,
           # WITHOUT needing /dev/null or shell job-control — the CAS-materialized
@@ -374,8 +414,16 @@ jobs:
 
           # ── GATE (no false-green: every proof must hold or the job fails) ─────────
           FAIL=0
-          [ "$MEM_EXIT" != 0 ] || { echo "FAIL: 64m awk bomb was NOT OOM-killed (exit $MEM_EXIT)"; FAIL=1; }
-          [ "$CPU_EXIT" = 0 ]  || { echo "FAIL: --cpus 0.5 limited run did not complete (exit $CPU_EXIT)"; FAIL=1; }
+          # memory.max binds at its VALUE: 64m OOM-KILLS the ~100MB alloc (signal
+          # death >=128, NOT a graceful exit-1 swap-thrash), 512m allows it (exit 0).
+          [ "$MEM_CAP_EXIT" -ge 128 ] || { echo "FAIL: --memory 64m did NOT OOM-kill the ~100MB alloc (exit $MEM_CAP_EXIT; want signal-death >=128, not a graceful exit ⇒ cap didn't bind)"; FAIL=1; }
+          [ "$MEM_FREE_EXIT" = 0 ]    || { echo "FAIL: --memory 512m did NOT allow the ~100MB alloc (exit $MEM_FREE_EXIT, want 0)"; FAIL=1; }
+          # cpu.max throttles: both complete, but the 0.2-core run takes >=2x the
+          # uncapped wall-time (guard against an instant/zero free run).
+          { [ "$CPU_CAP_EXIT" = 0 ] && [ "$CPU_FREE_EXIT" = 0 ]; } || { echo "FAIL: cpu loops did not complete (cap=$CPU_CAP_EXIT free=$CPU_FREE_EXIT)"; FAIL=1; }
+          if [ "$FREE_MS" -lt 50 ] || [ "$CAP_MS" -lt $(( FREE_MS * 2 )) ]; then
+            echo "FAIL: --cpus 0.2 did not throttle (cap=${CAP_MS}ms free=${FREE_MS}ms; want cap>=2x free and free>=50ms)"; FAIL=1
+          fi
           # pids.max must bite: the capped run shows fork failures, the control none.
           if ! { [ "$CAP_FORKFAIL" -ge 1 ] && [ "$FREE_FORKFAIL" -eq 0 ]; }; then
             echo "FAIL: pids.max did not cap forks (cap_forkfail=$CAP_FORKFAIL free_forkfail=$FREE_FORKFAIL)"; FAIL=1
