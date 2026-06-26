@@ -106,9 +106,11 @@ pod's pinned netns); containerd runs the same image under runc.
 
 | Metric | lightr | containerd | Ratio |
 |---|---|---|---|
-| Cold-start mean (n=5, ms) | **69.0** | 97.4 | 1.41× faster † |
-| Resident RSS (KB) | **7,128** (cri-serve) | 63,824 (daemon) | **8.95× smaller** |
-| Per-container shim RSS (KB) | **0** (no shim) | 14,828 (one `containerd-shim-runc-v2` per container) | — |
+| Cold-start mean (n=5, ms) | **91.0** (90–92) | 119.2 (110–136) | 1.31× faster |
+| Resident RSS (KB) | **7,064** (cri-serve) | 65,860 (daemon) | **9.32× smaller** |
+| Per-container shim RSS (KB) | **0** (no shim) | 14,960 (one `containerd-shim-runc-v2` per container) | — |
+
+*(Measured execv-aligned post-WP-#102, run `8b4fec4`, ubuntu-latest; both arms report Running at the same lifecycle point — the workload executing — via crictl/gRPC.)*
 
 **The robust, signed headline is FOOTPRINT: lightr's resident process is ~9×
 smaller** (7 MB vs 62 MB) AND there is **no per-container shim** — daemonless +
@@ -116,17 +118,15 @@ shimless. That is the structural result: containerd carries a ~62 MB always-on
 daemon plus a ~15 MB shim per running container; lightr carries a ~7 MB server and
 the container is its own supervised process tree.
 
-**† Cold-start caveat (honest):** the 69.0 ms above was measured BEFORE WP-#102,
-when lightr persisted `CONTAINER_RUNNING` right after spawning the `__ns-run` shim
-(before the in-namespace `pivot_root`/`exec` finished) — i.e. an earlier lifecycle
-milestone than containerd (which reports Running after the task is up), so that
-number is a slight UNDERCOUNT favoring lightr. **WP-#102 (2026-06-26) fixed this:
-lightr now persists `Running` only AFTER the workload `execv`s** (CLOEXEC
-exec-success pipe), making the milestone execv-aligned with containerd. The
-cold-start A/B is being re-measured on the aligned milestone (it will rise
-slightly and is expected to land comparable to containerd); the number here will
-be refreshed from that run. The **FOOTPRINT result (≈9× smaller, shimless) is
-unaffected and remains the hard signed claim.**
+**Cold-start is now milestone-aligned (WP-#102).** An earlier measurement read
+69 ms because lightr used to persist `CONTAINER_RUNNING` right after spawning the
+`__ns-run` shim (before the in-namespace `pivot_root`/`exec` finished) — an
+undercount vs containerd's "task up" milestone. WP-#102 (CLOEXEC exec-success
+pipe) made lightr persist `Running` only AFTER the workload `execv`s; the 91 ms
+above is that honest, execv-aligned figure (it rose ~22 ms, as expected, and is
+still 1.31× under containerd at the SAME milestone). **The headline remains the
+FOOTPRINT: ≈9× smaller resident RSS and zero per-container shim — daemonless +
+shimless.**
 
 ## Honest caveats (read these)
 1. **Microbenchmark of runtime overhead.** Cold-start uses `true`; a heavy app's
