@@ -116,14 +116,17 @@ shimless. That is the structural result: containerd carries a ~62 MB always-on
 daemon plus a ~15 MB shim per running container; lightr carries a ~7 MB server and
 the container is its own supervised process tree.
 
-**† Cold-start caveat (honest, do not oversell):** the 1.41× edge is NOT strictly
-milestone-aligned. lightr persists `CONTAINER_RUNNING` right after spawning the
-`__ns-run` shim, while the in-namespace `pivot_root`/`exec` completes
-asynchronously; containerd reports Running after the task is up. So lightr's
-"Running" milestone sits slightly earlier in the lifecycle (tracked: start-
-milestone alignment, #102). Both are sub-100 ms via crictl/gRPC (the round-trip is
-common to both arms and cancels in the ratio). Read cold-start as "comparable,
-lightr no slower"; read footprint as the hard signed result.
+**† Cold-start caveat (honest):** the 69.0 ms above was measured BEFORE WP-#102,
+when lightr persisted `CONTAINER_RUNNING` right after spawning the `__ns-run` shim
+(before the in-namespace `pivot_root`/`exec` finished) — i.e. an earlier lifecycle
+milestone than containerd (which reports Running after the task is up), so that
+number is a slight UNDERCOUNT favoring lightr. **WP-#102 (2026-06-26) fixed this:
+lightr now persists `Running` only AFTER the workload `execv`s** (CLOEXEC
+exec-success pipe), making the milestone execv-aligned with containerd. The
+cold-start A/B is being re-measured on the aligned milestone (it will rise
+slightly and is expected to land comparable to containerd); the number here will
+be refreshed from that run. The **FOOTPRINT result (≈9× smaller, shimless) is
+unaffected and remains the hard signed claim.**
 
 ## Honest caveats (read these)
 1. **Microbenchmark of runtime overhead.** Cold-start uses `true`; a heavy app's
