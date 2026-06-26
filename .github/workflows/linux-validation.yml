@@ -502,3 +502,48 @@ jobs:
           [ "$CA_EXIT" = 0 ]  || { echo "FAIL: --cap-add DAC_OVERRIDE did not restore the read (exit $CA_EXIT)"; FAIL=1; }
           [ "$CU_EXIT" != 0 ] || { echo "FAIL: unknown cap name silently accepted (not fail-closed on a typo'd flag)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "CAPENFORCE=PASS"; else echo "CAPENFORCE=FAIL"; exit 1; fi  # gate for real
+
+  cri-serve-smoke:
+    # WP-#98: prove the COMPOSED CRI server (the REAL LightrBackend wired into the
+    # sibling lightr-cri shell via crates/lightr-cri-serve) BUILDS and ANSWERS
+    # crictl in CI — the integration landing proof. Needs the PRIVATE sibling repo,
+    # so: the LIGHTR_CRI_CI_TOKEN fine-grained RO PAT (configured via url.insteadOf)
+    # + CARGO_NET_GIT_FETCH_WITH_CLI. lightr-cri-serve is excluded from the default
+    # workspace ⇒ built explicitly via --manifest-path (the gate never pulls tonic).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --no-self-update && rustup default 1.96.0
+      - name: Auth git for the private sibling (cargo git-dep)
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.LIGHTR_CRI_CI_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - name: Build lightr-cri-serve (real backend + sibling shell, git-deps)
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+        run: cargo build --release --manifest-path crates/lightr-cri-serve/Cargo.toml -j2
+      - name: Install crictl
+        run: |
+          set -e -x
+          V=v1.31.1
+          curl -sL "https://github.com/kubernetes-sigs/cri-tools/releases/download/$V/crictl-$V-linux-amd64.tar.gz" | sudo tar -xz -C /usr/local/bin
+          crictl --version
+      - name: Start lightr cri serve + prove it answers crictl
+        run: |
+          set +e
+          BIN="crates/lightr-cri-serve/target/release/lightr-cri-serve"
+          SOCK=/tmp/lcri.sock
+          "$BIN" --socket "$SOCK" --state /tmp/lcri-state >/tmp/serve.log 2>&1 &
+          SVPID=$!
+          for i in $(seq 1 40); do [ -S "$SOCK" ] && break; sleep 0.5; done
+          if [ ! -S "$SOCK" ]; then echo "CRI_SERVE_SMOKE=FAIL (socket never appeared)"; cat /tmp/serve.log; kill $SVPID 2>/dev/null; exit 1; fi
+          crictl --runtime-endpoint "unix://$SOCK" --image-endpoint "unix://$SOCK" version >/tmp/ver.txt 2>&1
+          VER_EXIT=$?; echo "crictl_version_exit=$VER_EXIT"; cat /tmp/ver.txt
+          kill $SVPID 2>/dev/null
+          # PASS iff crictl's Version RPC succeeded → the composed CRI server (real
+          # LightrBackend behind the gRPC shell) answered. No false-green.
+          if [ "$VER_EXIT" = 0 ] && grep -qiE "RuntimeName|RuntimeApiVersion|Version:" /tmp/ver.txt; then
+            echo "CRI_SERVE_SMOKE=PASS"
+          else
+            echo "CRI_SERVE_SMOKE=FAIL"; cat /tmp/serve.log; exit 1
+          fi

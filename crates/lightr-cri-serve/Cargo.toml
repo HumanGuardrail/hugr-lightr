@@ -24,19 +24,23 @@ path = "src/main.rs"
 # The REAL backend (this workspace): LightrBackend + ITS transcribed vocab.
 lightr-cri-backend = { path = "../lightr-cri-backend" }
 
-# The CANONICAL seam trait + vocab (sibling lightr-cri repo), RENAMED to dodge
-# the crate-name collision (both crates are literally named `lightr-cri-backend`).
-# `lightr-cri-server` binds THIS crate's `CriBackend`, so the Adapter must impl
-# THIS one.
+# The CANONICAL seam trait + vocab (sibling lightr-cri repo), RENAMED via
+# `package` to dodge the crate-name collision — both crates are literally named
+# `lightr-cri-backend`, but cargo allows the same name from DISTINCT SOURCES
+# (this one = git; mine above = path), which is exactly how the collision is
+# resolved (verified building locally). `lightr-cri-server` binds THIS crate's
+# `CriBackend`, so the Adapter impls THIS one.
 #
-# PATH DEP = LOCAL VALIDATION ONLY. CI cannot reach a sibling working copy:
-# integration there needs a git dep on lightr-cri + cross-repo auth (owner-gated,
-# tracked as follow-up — out of scope for this WP). The relative path is correct
-# for the canonical repo location (hugr-lightr/crates/lightr-cri-serve); in a git
-# worktree it is satisfied by a `.claude/worktrees/lightr-cri` symlink (untracked).
-cri-canon = { package = "lightr-cri-backend", path = "../../../lightr-cri/crates/lightr-cri-backend" }
+# GIT DEP, PINNED. The sibling is a PRIVATE repo, so both local and CI builds
+# need `CARGO_NET_GIT_FETCH_WITH_CLI=true` + an authed git (locally: the box's gh
+# creds; CI: the `LIGHTR_CRI_CI_TOKEN` fine-grained PAT configured via
+# url.insteadOf). Pinned to a rev so a future sibling rename of this crate does
+# not break us until we bump the pin. (If the sibling later renames the canonical
+# crate to a seam-y name, update `package` + the rev here — see
+# docs/handoff/integration-findings-2026-06-26.md.)
+cri-canon = { package = "lightr-cri-backend", git = "https://github.com/HumanGuardrail/lightr-cri", rev = "17008ca40bf5caf0f0dafc5a1405d5ad15569a76" }
 
 # The backend-agnostic server composition root (sibling). `default-features =
 # false` drops the in-repo fake backend + its `lightr-cri` conformance bin —
 # we only need the generic `run_blocking`/`serve` lib entry.
-lightr-cri-server = { path = "../../../lightr-cri/crates/lightr-cri-server", default-features = false }
+lightr-cri-server = { git = "https://github.com/HumanGuardrail/lightr-cri", rev = "17008ca40bf5caf0f0dafc5a1405d5ad15569a76", default-features = false }
