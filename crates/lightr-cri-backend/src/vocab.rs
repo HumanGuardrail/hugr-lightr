@@ -146,16 +146,19 @@ pub struct ContainerConfig {
 }
 
 /// v1.2 security-context subset mirrored from CRI
-/// `LinuxContainerSecurityContext`. **Enforcement status (honest):** `apparmor`
-/// is the one wired to an enforcement point (the ns engine applies it at
-/// container start — validated by the KPI 4 critest AppArmor specs, which are
-/// integration-gated on the composed `cri serve`). `seccomp` and `capabilities`
-/// are carried on the seam (so the shell can populate them and the contract is
-/// future-proof for the Security Context critest family) but their enforcement is
-/// STAGED — they are NOT claimed as enforced until their own validated landing.
+/// `LinuxContainerSecurityContext`. **Enforcement status (HONEST — corrected
+/// 2026-06-27):** all three fields are CARRIED on the seam (so the shell can
+/// populate them and the contract is future-proof for the Security Context
+/// critest family); NONE is enforced yet. `apparmor` is the KPI-4 TARGET, but its
+/// enforcement — the ns-engine LSM apply at container start — is a PENDING WP
+/// (#106), NOT yet wired, AND additionally gated on the owner-approved frozen-seam
+/// field + the lightr-cri shell's proto→seam mapping (cross-repo #89). `seccomp`
+/// and `capabilities` are likewise carried-only, enforcement STAGED. Do NOT claim
+/// any of these enforced until its own validated landing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SecurityContext {
-    /// AppArmor profile to apply at container start. Enforced (ns engine, KPI 4).
+    /// AppArmor profile. CARRIED on the seam; the KPI-4 target. Enforcement (the
+    /// ns-engine LSM apply at container start) is a PENDING WP (#106) — NOT wired.
     #[serde(default)]
     pub apparmor: Option<SecurityProfile>,
     /// Seccomp profile. CARRIED on the seam; enforcement STAGED (not yet wired).
