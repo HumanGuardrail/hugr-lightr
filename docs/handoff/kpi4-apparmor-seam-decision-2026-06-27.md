@@ -8,6 +8,16 @@
   lightr-cri. Nothing here edits the frozen `docs/contract/` — it asks the owner
   to approve ONE additive field, then the shell mapping is the lightr-cri TL's.
 
+> ## ✅ OWNER DECISION (2026-06-27): APPROVED — scope **(subset)**
+> The owner approved adding the additive `security: Option<SecurityContext>`
+> field (apparmor + seccomp + capabilities, `#[serde(default)]`) to the frozen
+> `ContainerConfig`. **lightr-cri TL: this is your green light** to (1) grow the
+> frozen `docs/contract/` seam by this one additive field (bump to v1.2) and
+> (2) map proto `LinuxContainerSecurityContext` → `security` in `create_container`.
+> hugr-lightr already carries this exact shape; the apparmor enforcement (#106) is
+> mine, wired the moment the field lands. Honesty preserved: seccomp/caps are
+> carried-only (enforcement staged); only apparmor is the KPI-4 enforced target.
+
 ---
 
 ## Where we are (so the decision has full context)
@@ -66,8 +76,9 @@ they are NOT claimed enforced; only `apparmor` is the active KPI-4 target. The
 broader scope is about not re-opening the frozen seam three times, not about
 claiming three features.
 
-> **Owner: please pick (min) or (subset).** I recommend **(subset)** — it costs
-> the same one additive field and my side already matches it.
+> **✅ DECIDED (2026-06-27): owner approved (subset).** The additive field is
+> `security: Option<SecurityContext>` (apparmor + seccomp + capabilities) as shown
+> above. lightr-cri TL: proceed on the shell/contract side.
 
 ---
 
