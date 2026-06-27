@@ -187,6 +187,8 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         cgroup_name: None,
                         // WP-#102: vz supervisor is a microVM; no exec-readiness pipe.
                         exec_ready_fd: None,
+                        // WP-#106: vz LSM lives in the guest; no ns aa_change_onexec.
+                        apparmor: None,
                     };
                     engine.run(&spec).unwrap_or(255)
                 }

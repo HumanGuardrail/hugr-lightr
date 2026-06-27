@@ -85,12 +85,25 @@ pub fn run(a: RunArgs, json: bool) -> i32 {
         oom_score_adj: a.oom_score_adj,
         pids_limit: a.pids_limit,
         shm_size: a.shm_size,
+        apparmor: a.apparmor,
     })
     .resolve()
     {
         Ok(c) => c,
         Err(code) => return code,
     };
+
+    // WP-#106: AppArmor (aa_change_onexec) is an `ns`-engine feature; `create` is
+    // native-only (the supervisor it later starts is a host process). Honest-error
+    // (exit 2) rather than silently record a security flag that won't be enforced.
+    if rc.apparmor.is_some() {
+        eprintln!(
+            "lightr: --apparmor is enforced only on the rootless ns engine \
+             (`lightr run --engine ns --apparmor <profile>`); create is native-only \
+             — refusing to run rather than give false security"
+        );
+        return 2;
+    }
 
     let runflags = match (RawRunFlags {
         volume: a.volume,

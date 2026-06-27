@@ -131,6 +131,8 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                         oom_score_adj: a.oom_score_adj,
                         pids_limit: a.pids_limit,
                         shm_size: a.shm_size,
+                        // WP-#106: `--apparmor <profile>` → ns-engine aa_change_onexec.
+                        apparmor: a.apparmor,
                     },
                     // WP-RUNFLAGS: `-v`/`--tmpfs`/`--name`/`--rm`/`--entrypoint` +
                     // the honest Phase-2 networking flags → resolved in the handler

@@ -196,6 +196,8 @@ mod tests {
             cgroup_name: None,
             // WP-#102: not an ns-readiness path (native engine test). None.
             exec_ready_fd: None,
+            // WP-#106: no AppArmor profile (native engine test). None.
+            apparmor: None,
         };
         let code = engine.run(&spec).expect("echo should not fail");
         assert_eq!(code, 0, "echo exits 0");
@@ -237,6 +239,8 @@ mod tests {
             cgroup_name: None,
             // WP-#102: not an ns-readiness path (native engine test). None.
             exec_ready_fd: None,
+            // WP-#106: no AppArmor profile (native engine test). None.
+            apparmor: None,
         };
         let code = engine.run(&spec).expect("sh should not fail to launch");
         assert_eq!(code, 5, "exit code must be 5, got {code}");
@@ -275,6 +279,8 @@ mod tests {
             cgroup_name: None,
             // WP-#102: not an ns-readiness path (native engine test). None.
             exec_ready_fd: None,
+            // WP-#106: no AppArmor profile (native engine test). None.
+            apparmor: None,
         };
         let err = engine.run(&spec).unwrap_err();
         let msg = err.to_string();

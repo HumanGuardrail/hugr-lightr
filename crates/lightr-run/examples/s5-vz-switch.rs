@@ -131,6 +131,8 @@ fn boot_vm(
         cgroup_name: None,
         // WP-#102: vz example; no exec-readiness pipe. None.
         exec_ready_fd: None,
+        // WP-#106: vz example; no ns AppArmor profile. None.
+        apparmor: None,
     };
     let code = engine
         .run(&spec)

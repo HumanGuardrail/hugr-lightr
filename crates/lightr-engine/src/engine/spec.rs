@@ -186,4 +186,19 @@ pub struct ExecSpec<'a> {
     /// `RawFd` on unix) — the same fd-carrier technique as `net_fd`, so the field
     /// is present on every target and the windows build stays green. Default None.
     pub exec_ready_fd: Option<std::os::raw::c_int>,
+
+    /// WP-#106 (KPI 4): the AppArmor profile NAME to exec the workload under. ONLY
+    /// the `ns` engine honors it: as the LAST step before the workload `execv`
+    /// (after caps), PID 1 writes `exec <profile>` to
+    /// `/proc/self/attr/apparmor/exec` (fallback older kernels: `/proc/self/attr/exec`)
+    /// so the kernel applies the profile on the exec (aa_change_onexec — the
+    /// standard runc/crun method). `Some("<name>")` ⇒ a loaded profile (CRI
+    /// `Localhost`); `Some("unconfined")` ⇒ explicitly run unconfined (the kernel
+    /// accepts `exec unconfined`); `None` ⇒ no change / inherit the caller's profile
+    /// (unchanged behavior). FAIL-CLOSED: if the open OR write fails (profile not
+    /// loaded / not permitted) the run aborts non-zero — it NEVER execs unconfined
+    /// when a profile was requested. native/vz IGNORE it (native is no sandbox —
+    /// honest-errored at the handler; vz LSM lives inside the guest). RUNTIME-ONLY —
+    /// NEVER a memo key (like `read_only`/`cap_drop`/`cap_add`). Default None.
+    pub apparmor: Option<&'a str>,
 }

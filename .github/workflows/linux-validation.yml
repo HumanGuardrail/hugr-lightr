@@ -557,6 +557,69 @@ jobs:
           [ "$CU_EXIT" != 0 ] || { echo "FAIL: unknown cap name silently accepted (not fail-closed on a typo'd flag)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "CAPENFORCE=PASS"; else echo "CAPENFORCE=FAIL"; exit 1; fi  # gate for real
 
+      - name: Prove --apparmor LSM enforcement + fail-closed (WP-#106 / KPI 4)
+        run: |
+          # WP-#106: prove the `ns` engine ACTUALLY applies an AppArmor profile to the
+          # workload (aa_change_onexec) — not a silent no-op — and that an UNLOADABLE
+          # profile is fail-closed (never run unconfined). Regime: AppArmor on
+          # ubuntu-latest + `kernel.apparmor_restrict_unprivileged_userns=0` (set in
+          # the rootfs-prep step, like every other ns job) so the rootless userns is
+          # permitted; the profile is loaded by root via `apparmor_parser -r`. The ns
+          # engine itself runs ROOTLESS — an unconfined task changing onexec into a
+          # loaded profile needs no privilege, which is exactly the runc/crun method.
+          set +e
+          BIN="$PWD/target/release/lightr"
+
+          # ── Bake a readable secret into the rootfs (the denied target). It MUST
+          # exist so the CONTROL read succeeds (a missing file would fail with ENOENT
+          # — a false positive that looks like a denial). Re-snapshot as alpine-aa. ──
+          echo "top-secret-bytes" | sudo tee /tmp/alroot/etc/lightr-secret >/dev/null
+          sudo chmod 0644 /tmp/alroot/etc/lightr-secret
+          "$BIN" snapshot --dir /tmp/alroot --name alpine-aa
+
+          # ── Load a MINIMAL, DETERMINISTIC profile: near-unconfined (allow all
+          # file/cap/network so busybox runs), with ONE explicit DENY — reading
+          # /etc/lightr-secret. A `deny` rule overrides the broad `file,` allow, so
+          # the differential isolates EXACTLY the profile bit. attach_disconnected +
+          # mediate_deleted make path mediation correct across the engine's
+          # pivot_root (the standard runc flags for a pivoted rootfs). ──
+          cat > /tmp/lightr-test-deny <<'PROFILE'
+          profile lightr-test-deny flags=(attach_disconnected,mediate_deleted) {
+            file,
+            capability,
+            network,
+            deny /etc/lightr-secret r,
+          }
+          PROFILE
+          sudo apparmor_parser -r /tmp/lightr-test-deny
+          LOAD_EXIT=$?; echo "apparmor_parser exit=$LOAD_EXIT"
+          sudo aa-status 2>/dev/null | grep -i lightr-test-deny || echo "(profile not shown in aa-status)"
+
+          PROBE='cat /etc/lightr-secret && echo READ_OK'
+
+          echo "=== control: read /etc/lightr-secret WITHOUT --apparmor → expect OK (exit 0) ==="
+          "$BIN" run --engine ns --rootfs alpine-aa -- /bin/busybox sh -c "$PROBE" >/tmp/aa_ctl.txt 2>&1
+          AA_CTL_EXIT=$?; echo "aa_ctl_exit=$AA_CTL_EXIT"; tail -3 /tmp/aa_ctl.txt
+
+          echo "=== enforced: read /etc/lightr-secret UNDER --apparmor lightr-test-deny → expect FAIL (denied) ==="
+          "$BIN" run --engine ns --apparmor lightr-test-deny --rootfs alpine-aa -- /bin/busybox sh -c "$PROBE" >/tmp/aa_enf.txt 2>&1
+          AA_ENF_EXIT=$?; echo "aa_enf_exit=$AA_ENF_EXIT"; tail -3 /tmp/aa_enf.txt
+
+          echo "=== fail-closed: --apparmor no-such-profile-xyz → expect EXIT NON-ZERO (never run unconfined) ==="
+          "$BIN" run --engine ns --apparmor no-such-profile-xyz --rootfs alpine-aa -- /bin/true >/tmp/aa_fc.txt 2>&1
+          AA_FC_EXIT=$?; echo "aa_fc_exit=$AA_FC_EXIT"; tail -3 /tmp/aa_fc.txt
+
+          # ── GATE (no false-green; the differential asserts the PROFILE bit) ───────
+          FAIL=0
+          [ "$LOAD_EXIT" = 0 ]    || { echo "FAIL: apparmor_parser could not load the test profile (exit $LOAD_EXIT)"; FAIL=1; }
+          [ "$AA_CTL_EXIT" = 0 ]  || { echo "FAIL: control read WITHOUT --apparmor failed (exit $AA_CTL_EXIT) — baseline wrong"; FAIL=1; }
+          grep -q READ_OK /tmp/aa_ctl.txt || { echo "FAIL: control read produced no READ_OK proof"; FAIL=1; }
+          [ "$AA_ENF_EXIT" != 0 ] || { echo "FAIL: --apparmor did NOT block the denied read (profile NOT enforced — FALSE SECURITY)"; FAIL=1; }
+          grep -qiE "denied|permission" /tmp/aa_enf.txt || { echo "FAIL: enforced run failed but NOT with a permission/denied error (failed for the wrong reason)"; FAIL=1; }
+          grep -q READ_OK /tmp/aa_enf.txt && { echo "FAIL: enforced run still read the secret (profile bit not applied)"; FAIL=1; }
+          [ "$AA_FC_EXIT" != 0 ]  || { echo "FAIL: an unloadable --apparmor profile ran anyway (NOT fail-closed — ran unconfined)"; FAIL=1; }
+          if [ "$FAIL" = 0 ]; then echo "APPARMOR=PASS"; else echo "APPARMOR=FAIL"; exit 1; fi  # gate for real
+
   cri-serve-smoke:
     # WP-#98: prove the COMPOSED CRI server (the REAL LightrBackend wired into the
     # sibling lightr-cri shell via crates/lightr-cri-serve) BUILDS and ANSWERS
