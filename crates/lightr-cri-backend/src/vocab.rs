@@ -146,19 +146,20 @@ pub struct ContainerConfig {
 }
 
 /// v1.2 security-context subset mirrored from CRI
-/// `LinuxContainerSecurityContext`. **Enforcement status (HONEST — corrected
-/// 2026-06-27):** all three fields are CARRIED on the seam (so the shell can
-/// populate them and the contract is future-proof for the Security Context
-/// critest family); NONE is enforced yet. `apparmor` is the KPI-4 TARGET, but its
-/// enforcement — the ns-engine LSM apply at container start — is a PENDING WP
-/// (#106), NOT yet wired, AND additionally gated on the owner-approved frozen-seam
-/// field + the lightr-cri shell's proto→seam mapping (cross-repo #89). `seccomp`
-/// and `capabilities` are likewise carried-only, enforcement STAGED. Do NOT claim
-/// any of these enforced until its own validated landing.
+/// `LinuxContainerSecurityContext`. **Enforcement status (HONEST — 2026-06-27):**
+/// `apparmor` enforcement IS now wired — the ns engine applies it at container
+/// start via `aa_change_onexec`, fail-closed on an unloadable profile (#106,
+/// CI-proven via `lightr run --apparmor`: a deny profile blocks the op, a missing
+/// profile fails the run). The CRI path is plumbed (RunDescriptor.apparmor +
+/// build_ns_plan mapping) but stays INERT until the owner-approved frozen-seam
+/// field + the lightr-cri shell's proto→seam mapping land (cross-repo #89) — only
+/// then does a kubelet-sourced profile reach the engine (→ critest AppArmor). By
+/// contrast `seccomp` and `capabilities` are carried-only, enforcement STAGED (not
+/// wired) — do NOT claim those enforced until their own validated landing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SecurityContext {
-    /// AppArmor profile. CARRIED on the seam; the KPI-4 target. Enforcement (the
-    /// ns-engine LSM apply at container start) is a PENDING WP (#106) — NOT wired.
+    /// AppArmor profile. ENFORCED by the ns engine at container start (#106,
+    /// aa_change_onexec, fail-closed). CRI-sourced profile awaits the seam (#89).
     #[serde(default)]
     pub apparmor: Option<SecurityProfile>,
     /// Seccomp profile. CARRIED on the seam; enforcement STAGED (not yet wired).
