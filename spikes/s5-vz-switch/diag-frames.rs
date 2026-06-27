@@ -119,6 +119,8 @@ fn main() {
         net_fd: Some(guest_fd),
         // WP-#102: stale spike (not a workspace member); kept for field-completeness.
         exec_ready_fd: None,
+        // WP-#106: stale spike (not a workspace member); kept for field-completeness.
+        apparmor: None,
     };
     let code = engine.run(&spec).unwrap();
     let so = std::fs::read_to_string(rootfs_dir.join(".lightr-stdout")).unwrap_or_default();

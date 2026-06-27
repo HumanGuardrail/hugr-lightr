@@ -204,6 +204,26 @@ impl LightrBackend {
             None => (Vec::new(), Vec::new()),
         };
 
+        // WP-#106 (KPI 4): map the v1.2 security context's AppArmor profile to the
+        // profile NAME the ns engine execs under (aa_change_onexec). READY-BUT-INERT
+        // today: `rec.config.security` is usually `None` (the cross-repo seam #89 that
+        // maps the kubelet's proto profile into this field is not landed), so this is
+        // `None` and the start path is byte-identical to before. The mapping:
+        //   Localhost      ⇒ the loaded profile name (`localhost_ref`)
+        //   Unconfined     ⇒ "unconfined" (explicitly run unconfined)
+        //   RuntimeDefault ⇒ None (inherit for now — a named runtime-default profile
+        //                    is a future choice; documented, not yet wired)
+        let apparmor: Option<String> = rec
+            .config
+            .security
+            .as_ref()
+            .and_then(|s| s.apparmor.as_ref())
+            .and_then(|p| match p.profile_type {
+                crate::vocab::ProfileType::Localhost => Some(p.localhost_ref.clone()),
+                crate::vocab::ProfileType::Unconfined => Some("unconfined".to_string()),
+                crate::vocab::ProfileType::RuntimeDefault => None,
+            });
+
         Ok(crate::ns_run::RunDescriptor {
             rootfs,
             argv: argv.to_vec(),
@@ -225,6 +245,10 @@ impl LightrBackend {
             // `start_container_impl` right before spawn (so the fd's lifetime is the
             // spawn's). The plan itself carries None.
             exec_ready_fd: None,
+            // WP-#106: ready-but-inert AppArmor profile (None until the seam #89 maps
+            // the kubelet profile into rec.config.security). The ns engine applies it
+            // via aa_change_onexec right before the container's execv (fail-closed).
+            apparmor,
         })
     }
 

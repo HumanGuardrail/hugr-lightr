@@ -98,6 +98,8 @@ pub(crate) fn run_vz_memo(
             cgroup_name: None,
             // WP-#102: vz-memo path is its own VM; no exec-readiness pipe. None.
             exec_ready_fd: None,
+            // WP-#106: vz LSM lives inside the guest; no ns aa_change_onexec. None.
+            apparmor: None,
         };
         // Suppress the guest CONSOLE (boot log + exit marker) from the host's
         // stdout on a memo MISS: real stdout/stderr come from the capture files

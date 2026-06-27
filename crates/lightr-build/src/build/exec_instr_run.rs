@@ -91,6 +91,8 @@ pub(in crate::build) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
         cgroup_name: None,
         // WP-#102: a build RUN step is synchronous; no exec-readiness pipe. None.
         exec_ready_fd: None,
+        // WP-#106: a build RUN step applies no AppArmor profile. None.
+        apparmor: None,
     };
     let code = eng.run(&spec)?;
     if code != 0 {

@@ -176,6 +176,20 @@ pub fn run(
         return 2;
     }
 
+    // WP-#106: `--apparmor` is REAL only on the `ns` engine (it applies the profile
+    // via aa_change_onexec right before exec). For any OTHER engine it is
+    // HONEST-ERRORED (exit 2) BEFORE provisioning — native is no sandbox by design,
+    // and the vz LSM lives inside the guest (not managed by this shim). A silent
+    // no-op on a security flag would give false security (the failure WP-#92 refused).
+    if engine_kind != EngineKind::Ns && rc.apparmor.is_some() {
+        eprintln!(
+            "lightr: --apparmor (AppArmor LSM enforcement) is implemented only on the \
+             rootless ns engine (--engine ns); native is no sandbox and the vz LSM lives \
+             inside the guest — refusing to run rather than give false security"
+        );
+        return 2;
+    }
+
     // WP-#95: `--init` is ENFORCED on the `ns` engine (real PID-1 reaper). On any
     // OTHER engine it is a recorded-only carry-slot (native is a host process with no
     // pid namespace; vz reaps via its own guest PID 1) — say so honestly rather than
@@ -439,6 +453,10 @@ pub fn run(
             // WP-#95: `--init` reaches the ns engine (a real PID-1 reaper inside the
             // new pid namespace). RUNTIME-ONLY; never part of the memo key.
             rc.init,
+            // WP-#106: `--apparmor` reaches the ns engine (aa_change_onexec, applied
+            // as the last pre-execv step). native/vz never get here with it set — the
+            // engine-aware guard above honest-errors them first. RUNTIME-ONLY.
+            rc.apparmor.as_deref(),
         );
     }
 

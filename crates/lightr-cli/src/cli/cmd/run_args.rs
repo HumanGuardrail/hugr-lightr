@@ -168,6 +168,12 @@ pub(crate) struct RunArgs {
     /// Size of /dev/shm (docker --shm-size: 64m, 1g, or bare bytes)
     #[arg(long, value_name = "SIZE")]
     pub(crate) shm_size: Option<String>,
+    /// Apply an AppArmor profile to the container (docker --security-opt
+    /// apparmor=<profile>). Value is a LOADED profile name, or "unconfined" to
+    /// run explicitly unconfined. WP-#106: enforced ONLY on the `ns` engine (the
+    /// Linux LSM apply via aa_change_onexec); native/vz honest-error (exit 2).
+    #[arg(long, value_name = "PROFILE")]
+    pub(crate) apparmor: Option<String>,
     #[arg(last = true, required = true)]
     pub(crate) command: Vec<String>,
 }

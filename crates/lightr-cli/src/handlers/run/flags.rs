@@ -142,6 +142,10 @@ pub struct RawRcFlags {
     pub oom_score_adj: Option<i32>,
     pub pids_limit: Option<i64>,
     pub shm_size: Option<String>,
+    /// WP-#106: `--apparmor <profile>` — the AppArmor profile name (or
+    /// "unconfined") to exec the container under. ns-engine only (honest-errored
+    /// elsewhere). RUNTIME-ONLY.
+    pub apparmor: Option<String>,
 }
 
 /// The resolved WP-RC-FLAGS config: `--label` parsed to `(key,value)` pairs and
@@ -160,6 +164,10 @@ pub struct RcConfig {
     pub oom_score_adj: Option<i32>,
     pub pids_limit: Option<i64>,
     pub shm_size: Option<u64>,
+    /// WP-#106: `--apparmor <profile>` — passes through unparsed (the profile name
+    /// is a free string; "unconfined" is the only special token, handled by the ns
+    /// engine). ns-engine only. RUNTIME-ONLY.
+    pub apparmor: Option<String>,
 }
 
 impl RawRcFlags {
@@ -188,6 +196,7 @@ impl RawRcFlags {
             oom_score_adj: self.oom_score_adj,
             pids_limit: self.pids_limit,
             shm_size,
+            apparmor: self.apparmor,
         })
     }
 }

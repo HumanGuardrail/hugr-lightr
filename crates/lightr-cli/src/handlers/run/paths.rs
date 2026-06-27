@@ -83,6 +83,10 @@ pub(super) fn run_engine(
     // pid namespace (the workload becomes PID 2). native/vz ignore it (recorded-only
     // carry-slot). RUNTIME-ONLY; never part of the memo key.
     init: bool,
+    // WP-#106: `--apparmor <profile>` ⇒ the ns engine applies the AppArmor profile
+    // via aa_change_onexec as the last step before exec (fail-closed). native/vz are
+    // honest-errored at the handler, so this arrives `None` there. RUNTIME-ONLY.
+    apparmor: Option<&str>,
 ) -> i32 {
     // Hydrate rootfs ref into a temp dir if provided
     let rootfs_tmp: Option<tempfile::TempDir>;
@@ -178,6 +182,10 @@ pub(super) fn run_engine(
         // WP-#102: exec-readiness signalling is a CRI-backend concern; the CLI run
         // path is synchronous (run() blocks) and never wires a pipe. Default None.
         exec_ready_fd: None,
+        // WP-#106: `--apparmor <profile>` reaches the ns engine here (the only engine
+        // that enforces it; native/vz are honest-errored at the handler). Applied via
+        // aa_change_onexec as the last step before exec. RUNTIME-ONLY; never keyed.
+        apparmor,
     };
 
     let code = match engine.run(&spec) {

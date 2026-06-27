@@ -167,6 +167,13 @@ mod ns_impl {
             // pre-#102 path (no pipe, no close-points, no CLOEXEC dance). Each level
             // CLOSES its copy after forking the next, so only PID 1 holds it.
             let exec_ready_fd: Option<libc::c_int> = spec.exec_ready_fd;
+            // WP-#106: the AppArmor profile NAME to exec the workload under (a loaded
+            // profile for CRI `Localhost`, or "unconfined" to explicitly run
+            // unconfined; `None` ⇒ no change / inherit). Captured (owned) pre-fork like
+            // `command`/`cap_*` so PID 1 owns its copy; applied as the LAST pre-execv
+            // step (after caps), fail-closed. `None` ⇒ byte-identical to the pre-#106
+            // path (no attr write).
+            let apparmor: Option<String> = spec.apparmor.map(|s| s.to_owned());
 
             // WP-#95: fork the SETUP process. NOTE (corrected from a wrong pre-#95
             // comment): this child does NOT become PID 1 — `unshare(CLONE_NEWPID)`
@@ -197,6 +204,7 @@ mod ns_impl {
                         join_netns.as_deref(),
                         cgroup_name.as_deref(),
                         exec_ready_fd,
+                        apparmor.as_deref(),
                     );
                     std::process::exit(rc);
                 }
@@ -246,6 +254,7 @@ mod ns_impl {
         join_netns: Option<&std::path::Path>,
         cgroup_name: Option<&str>,
         exec_ready_fd: Option<libc::c_int>,
+        apparmor: Option<&str>,
     ) -> i32 {
         // WP-#99: JOIN the pod's existing netns BEFORE `unshare(CLONE_NEWUSER)`.
         // THE ordering rule: we must `setns(CLONE_NEWNET)` while still real root in
@@ -576,6 +585,10 @@ mod ns_impl {
                     // Caps applied LAST, in the execing process (fail-closed: a capset
                     // failure `_exit`s rather than exec with the WRONG set).
                     apply_caps_if_any(desired_caps_vec.as_deref(), exec_ready_fd);
+                    // WP-#106: apply the AppArmor profile LAST (after caps), right
+                    // before execv (aa_change_onexec). Fail-closed: a profile that
+                    // can't be applied `_exit`s rather than exec unconfined.
+                    apply_apparmor_if_any(apparmor, exec_ready_fd);
                     // WP-#102: arm the exec-success pipe (CLOEXEC) right before execv.
                     arm_exec_ready(exec_ready_fd);
                     unsafe { libc::execv(prog_c.as_ptr(), argv_ptrs.as_ptr()) };
@@ -598,6 +611,10 @@ mod ns_impl {
                 // No `--init`: the workload itself is PID 1. Caps LAST, in the execing
                 // process (fail-closed via `_exit`).
                 apply_caps_if_any(desired_caps_vec.as_deref(), exec_ready_fd);
+                // WP-#106: apply the AppArmor profile LAST (after caps), right before
+                // execv (aa_change_onexec). Fail-closed: a profile that can't be
+                // applied `_exit`s rather than exec unconfined.
+                apply_apparmor_if_any(apparmor, exec_ready_fd);
                 // WP-#102: arm the exec-success pipe (CLOEXEC) right before execv — a
                 // successful execv auto-closes it ⇒ the backend's reader sees EOF.
                 arm_exec_ready(exec_ready_fd);
@@ -650,6 +667,53 @@ mod ns_impl {
                 unsafe { libc::_exit(1) };
             }
         }
+    }
+
+    /// WP-#106: apply an AppArmor profile to the EXECing process via the kernel's
+    /// `aa_change_onexec` mechanism — write `exec <profile>` to the apparmor exec
+    /// attr right before `execv`, so the kernel transitions the new image into the
+    /// profile on the exec (the standard runc/crun method). `None` ⇒ no change
+    /// (inherit). Called post-fork/pre-exec, AFTER caps, so a failure must `_exit`
+    /// (fail-closed) — exec'ing UNCONFINED when a profile was requested would be
+    /// false security (worse than an error), and it is what makes the critest
+    /// "should error on unloadable profile" pass.
+    ///
+    /// Like `apply_caps_if_any`, an apply failure ALSO signals the exec-readiness
+    /// pipe (`exec_ready_fd`) with bytes before `_exit(1)` — otherwise the
+    /// kernel-closed fd reads as EOF ⇒ a false `Running`. `None` (no pipe) ⇒ no-op.
+    fn apply_apparmor_if_any(profile: Option<&str>, exec_ready_fd: Option<libc::c_int>) {
+        if let Some(profile) = profile {
+            if let Err(e) = apply_apparmor(profile) {
+                eprintln!("lightr-engine ns: apparmor: {e}");
+                signal_setup_failed(exec_ready_fd, &format!("apparmor: {e}"));
+                unsafe { libc::_exit(1) };
+            }
+        }
+    }
+
+    /// WP-#106: write `exec <profile>` to the AppArmor exec attr (aa_change_onexec
+    /// wire format). Newer kernels expose the per-LSM path
+    /// `/proc/self/attr/apparmor/exec`; older kernels only have
+    /// `/proc/self/attr/exec` — so an `ENOENT` on the former falls back to the
+    /// latter. For `"unconfined"` the kernel accepts `exec unconfined`. Any open OR
+    /// write error (profile not loaded / not permitted) is returned so the caller
+    /// fails closed. Uses std file I/O — consistent with the other PID-1 setup steps
+    /// here (`create_dir_all`, `symlink`); the child is single-threaded post-fork.
+    fn apply_apparmor(profile: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        let cmd = format!("exec {profile}");
+        let mut f = match std::fs::OpenOptions::new()
+            .write(true)
+            .open("/proc/self/attr/apparmor/exec")
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::OpenOptions::new()
+                .write(true)
+                .open("/proc/self/attr/exec")?,
+            Err(e) => return Err(e),
+        };
+        f.write_all(cmd.as_bytes())?;
+        Ok(())
     }
 
     /// WP-#102: arm the exec-readiness pipe for a SUCCESSFUL exec by setting the

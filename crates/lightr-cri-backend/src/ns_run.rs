@@ -58,6 +58,16 @@ pub struct RunDescriptor {
     /// sees EOF ⇒ persist Running). `None` ⇒ no readiness signalling (host path).
     #[serde(default)]
     pub exec_ready_fd: Option<i32>,
+    /// WP-#106 (KPI 4): the AppArmor profile NAME to exec the container under, mapped
+    /// from `rec.config.security.apparmor` in `build_ns_plan` (CRI `Localhost` ⇒ the
+    /// loaded profile name; `Unconfined` ⇒ `"unconfined"`; `RuntimeDefault` ⇒ `None`,
+    /// i.e. inherit, for now). Becomes `ExecSpec.apparmor`; the ns engine applies it
+    /// via aa_change_onexec right before the container's `execv` (fail-closed). `None`
+    /// ⇒ no profile change (today's behavior — security is usually None until the
+    /// cross-repo seam #89 maps the kubelet profile through). `#[serde(default)]` keeps
+    /// old descriptors deserializing as `None`.
+    #[serde(default)]
+    pub apparmor: Option<String>,
 }
 
 /// Entry point for the `__ns-run` re-exec shim: read a [`RunDescriptor`] (JSON)
@@ -126,6 +136,10 @@ pub fn run_shim() -> ! {
         // WP-#102: the inherited write end of the backend's exec-readiness pipe; the
         // ns engine threads it to PID 1 (CLOEXEC-before-execv). `None` on the host path.
         exec_ready_fd: desc.exec_ready_fd,
+        // WP-#106: the AppArmor profile mapped from the CRI security context (ready for
+        // the cross-repo seam #89; `None` today). The ns engine applies it via
+        // aa_change_onexec right before the container's execv (fail-closed).
+        apparmor: desc.apparmor.as_deref(),
     };
 
     match engine.run(&spec) {
