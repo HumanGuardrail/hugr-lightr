@@ -204,6 +204,11 @@ pub fn run(
         return 2;
     }
 
+    // NOTE (`--user` on ns): a non-root `--user` is honest-errored by the ns ENGINE
+    // itself (its single-uid userns maps only container-root; a subuid RANGE mapping is
+    // required — tracked #115). No handler-side guard is needed: the engine is the
+    // single choke point covering CLI `-u`, image USER, and CRI RunAsUser uniformly.
+
     // `--tmpfs`: the `ns` engine mounts a REAL tmpfs in the container mount ns; the
     // `native` engine has its own pre-existing model (a fresh empty scratch DIR per
     // run via `materialize_tmpfs` — native is reproducibility, not a mount sandbox).

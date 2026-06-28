@@ -723,6 +723,41 @@ jobs:
           [ "$TFVZ_EXIT" = 2 ] || { echo "FAIL: vz --tmpfs did not honest-error with exit 2 (got $TFVZ_EXIT)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "ADDHOST_TMPFS=PASS"; else echo "ADDHOST_TMPFS=FAIL"; exit 1; fi  # gate for real
 
+      - name: Prove --user is honest (root no-op runs; non-root fails closed, never silent-root) (WP-#113)
+        run: |
+          # WP-#113 v1: the rootless ns userns uses a SINGLE-uid map ("0 <outer> 1") +
+          # setgroups=deny, so the ONLY in-container identity is container-root. A
+          # non-root --user CANNOT be honored (the target uid is unmapped) — but it
+          # must NEVER silently run as root (a security footgun). So: --user 0/root is a
+          # no-op that RUNS (as root); a non-root --user FAILS CLOSED with a clear
+          # error. Real non-root support needs a subuid RANGE mapping (tracked #115).
+          set +e
+          BIN="$PWD/target/release/lightr"
+
+          echo "=== --user 0 (root) → no-op, runs as uid 0 ==="
+          "$BIN" run --engine ns --user 0 --rootfs alpine-aa -- /bin/busybox sh -c 'id -u' >/tmp/u_root.txt 2>&1
+          U_ROOT_EXIT=$?; echo "u_root_exit=$U_ROOT_EXIT"; cat /tmp/u_root.txt
+
+          echo "=== --user 1000 (non-root) → FAIL CLOSED (never silent-root) ==="
+          "$BIN" run --engine ns --user 1000 --rootfs alpine-aa -- /bin/busybox sh -c 'id -u' >/tmp/u_nr.txt 2>&1
+          U_NR_EXIT=$?; echo "u_nr_exit=$U_NR_EXIT"; tail -3 /tmp/u_nr.txt
+
+          echo "=== --user 1000:1000 (non-root) → FAIL CLOSED ==="
+          "$BIN" run --engine ns --user 1000:1000 --rootfs alpine-aa -- /bin/true >/tmp/u_nr2.txt 2>&1
+          U_NR2_EXIT=$?; echo "u_nr2_exit=$U_NR2_EXIT"; tail -3 /tmp/u_nr2.txt
+
+          # ── GATE ────────────────────────────────────────────────────────────────
+          FAIL=0
+          [ "$U_ROOT_EXIT" = 0 ] || { echo "FAIL: --user 0 (root no-op) did not run (exit $U_ROOT_EXIT)"; FAIL=1; }
+          [ "$(sed -n 1p /tmp/u_root.txt)" = 0 ] || { echo "FAIL: --user 0 did not run as uid 0 (got '$(sed -n 1p /tmp/u_root.txt)')"; FAIL=1; }
+          # The CRITICAL security assertion: a non-root --user must FAIL, never silently run as root.
+          [ "$U_NR_EXIT" != 0 ] || { echo "FAIL: non-root --user 1000 RAN (exit 0) — silent run-as-root footgun NOT closed"; FAIL=1; }
+          # The workload must NOT have executed (no bare "0" line from `id -u` = no silent-root).
+          grep -qx "0" /tmp/u_nr.txt && { echo "FAIL: non-root --user 1000 executed and printed uid 0 (silent-root)"; FAIL=1; }
+          grep -qiE "subuid|not yet supported|non-root" /tmp/u_nr.txt || { echo "FAIL: non-root --user error lacks a clear reason"; FAIL=1; }
+          [ "$U_NR2_EXIT" != 0 ] || { echo "FAIL: non-root --user 1000:1000 RAN (exit 0) — footgun NOT closed"; FAIL=1; }
+          if [ "$FAIL" = 0 ]; then echo "USER_NS=PASS"; else echo "USER_NS=FAIL"; exit 1; fi  # gate for real
+
   cri-serve-smoke:
     # WP-#98: prove the COMPOSED CRI server (the REAL LightrBackend wired into the
     # sibling lightr-cri shell via crates/lightr-cri-serve) BUILDS and ANSWERS
