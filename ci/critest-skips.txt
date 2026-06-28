@@ -1,0 +1,122 @@
+# critest skip-list — VENDORED COPY (self-contained CI).
+# ============================================================================
+# SYNCED FROM: lightr-cri ci/critest-skips.txt
+#   source commit: 219b686  (2026-06-20 09:45:35 -0300)
+#   synced on:     2026-06-27
+# WHY VENDORED: the critest-conformance job in .github/workflows/
+#   linux-validation.yml runs the REAL composed CRI server (lightr-cri-serve =
+#   the real LightrBackend behind the canonical CriBackend). We cannot take a
+#   CI-time dependency on the private sibling lightr-cri repo just for this
+#   file, so its skip regexes are copied here verbatim. Keep in sync when the
+#   sibling list changes (update the source commit + synced-on header).
+# DO NOT EDIT the upstream block below to make the job green — a real
+#   conformance gap is triaged by the lead (fix the backend, or add a JUSTIFIED
+#   skip in the OURS section with a tracked reason). No false-green.
+# ============================================================================
+#
+# Format: <regex>  # reason → R2   (one ginkgo regex per line). These are
+# joined by | and passed to critest as --ginkgo.skip. Comment lines (^#) and
+# blank lines are stripped; the part before the first '#' is the regex.
+#
+# ── BEGIN upstream (lightr-cri @ 219b686) ───────────────────────────────────
+
+# RuntimeConfig / UpdateRuntimeConfig — UNIMPLEMENTED (literal code per
+# r1-kubelet-smoke.md law; any other code = kubelet startup fails). R2 N/A.
+[Rr]untime[Cc]onfig  # reason → R2
+[Uu]pdate[Rr]untime[Cc]onfig  # reason → R2
+[Rr]untime [Cc]onfig  # reason → R2
+
+# Container stats beyond basic (metrics descriptors, WritableLayer stats) —
+# fake backend returns zeroed values; descriptor-level assertions fail.
+[Ww]ritable[Ll]ayer  # reason → R2
+[Mm]etrics [Dd]escriptor  # reason → R2
+[Cc]ontainer[Ff][Ss][Ss]tats  # reason → R2
+[Ii]mage[Ff][Ss][Ss]tats  # reason → R2
+
+# Checkpoint/restore — UNIMPLEMENTED; no checkpoint engine in scope.
+[Cc]heckpoint  # reason → R2
+[Rr]estore  # reason → R2
+
+# Events / GetContainerEvents — evented PLEG alpha off in kubelet 1.33;
+# DESCOPED to R2 per build-spec-r1 §1.
+[Ee]vent  # reason → R2
+[Cc]ontainer[Ee]vents  # reason → R2
+[Pp][Ll][Ee][Gg]  # reason → R2
+
+# UpdateContainerResources — UNIMPLEMENTED; no cgroup resource update path.
+[Uu]pdate[Cc]ontainer[Rr]esources  # reason → R2
+[Rr]esource [Uu]pdate  # reason → R2
+
+# ReopenContainerLog — tolerated per kubelet matrix (log spam only); not
+# blocking R1 but the describe block still fails on assertions.
+[Rr]eopen  # reason → R2
+[Rr]eopen[Cc]ontainer[Ll]og  # reason → R2
+
+# Security Context (all sub-describes: NamespaceOption, bucket, SeccompProfilePath,
+# NoNewPrivs, setuid/seccomp/caps/namespaces) — needs real isolation engine.
+# All 23 items failed in R0; none passed. Whole block safe to skip. R2.
+Security Context  # reason → R2
+
+# AppArmor — needs a real LSM/AppArmor enforcement engine (load + verify + reject
+# unloadable profiles); the fake has none, so the "should error on unloadable
+# profile" specs fail (expected error, got nil). Same class as Security Context.
+# Owner-authorized R2 (2026-06-19).
+AppArmor  # reason → R2
+
+# Container Mount Readonly — needs privileged mount support (tmpfs/bind-mount
+# syscalls require CAP_SYS_ADMIN; fake backend has no mount namespace). R2.
+should support non-recursive readonly mounts  # reason → R2
+
+# Container Mount Propagation — needs privileged mount support (bind-mount
+# propagation requires real mount namespace + CAP_SYS_ADMIN). R2.
+Mount Propagation  # reason → R2
+
+# Container OOM — needs cgroup memory limits (cgroup v1/v2 memory.limit_in_bytes;
+# fake backend runs plain host processes with no cgroup isolation). R2.
+OOMKilled  # reason → R2
+should output OOMKilled reason  # reason → R2
+
+# Multiple Containers — pod shared-namespace semantics (PID/IPC/net sharing
+# requires real namespace sharing; fake does not implement). R2.
+Multiple Containers  # reason → R2
+
+# PodSandbox sysctls — needs real Linux kernel sysctl namespace. R2.
+should support.*sysctls  # reason → R2
+runtime should support sysctls  # reason → R2
+
+# Image Manager — fake images are synthetic CAS records; critest expects real
+# OCI image semantics. All 7 items failed; none passed in R0. R2.
+public image with tag should be pulled and removed  # reason → R2
+public image without tag should be pulled and removed  # reason → R2
+public image with digest should be pulled and removed  # reason → R2
+image status should support all kinds of references  # reason → R2
+image status get image fields should not have Uid  # reason → R2
+listImage should get exactly 3 image in the result list  # reason → R2
+listImage should get exactly 3 repoTags  # reason → R2
+public image should timeout if requested  # reason → R2
+
+# Networking with a real workload (port-mapping + portforward) — RUNTIME-TIER.
+# critest's networking container uses the webserver IMAGE's ENTRYPOINT (no
+# Command/Args override; pkg/validate/networking.go createWebServerContainer),
+# i.e. the HTTP server is a real image binary. The fake has no image layer and
+# runs HOST binaries, so there is no server to listen on the CNI IP -> the test
+# curl gets connection refused. Not fake-conquerable; the lightr backend
+# conquers it (materialize image from CAS + run its entrypoint inside the sandbox
+# netns). CNI portmap DNAT + the dial-in-netns wiring are already correct.
+# Owner-directed conquest attempted; proven runtime-tier 2026-06-20.
+port mapping  # reason → R2 (runtime-tier: real image HTTP server)
+portforward  # reason → R2 (runtime-tier: real image HTTP server)
+
+# ── END upstream ────────────────────────────────────────────────────────────
+#
+# ── BEGIN ours (hugr-lightr real-backend additions) ─────────────────────────
+# AppArmor end-to-end via CRI: the AppArmor enforcement seam between the CRI
+# backend and the ns engine is the cross-repo seam #89, which is NOT mapped
+# end-to-end through the CRI surface yet (the ns engine ENFORCES a profile at
+# container start — #106 — but the CRI ExecSpec → ns-engine apparmor plumbing
+# is not wired through the composed server). So the AppArmor critest specs
+# cannot pass end-to-end via CRI on the real backend. Upstream already skips
+# "AppArmor" above; this OURS note records the #89 reason for our run and is the
+# explicit pending marker. Remove once #89 closes the seam end-to-end.
+AppArmor  # reason → pending #89 (CRI→ns-engine apparmor seam not mapped end-to-end)
+# ── END ours ─────────────────────────────────────────────────────────────────
