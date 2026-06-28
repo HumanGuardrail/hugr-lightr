@@ -142,6 +142,13 @@ mod ns_impl {
             let rootfs_path = rootfs.to_owned();
             let cwd_str = spec.cwd.to_string_lossy().into_owned();
             let command: Vec<String> = spec.command.to_vec();
+            // CRITEST "starting container": critest starts containers with a BARE
+            // command (`top`). The ns engine `execv`s with the INHERITED env (it does
+            // not `execve`), so the workload's PATH is the value carried in `spec.env`
+            // — capture it (cloned, like `command`) pre-fork so PID 1 owns its copy and
+            // can execvp-resolve argv[0] against the CONTAINER's PATH post-pivot. `None`
+            // ⇒ the standard default PATH is used (see `pathres::resolve_in_path`).
+            let env_path: Option<String> = crate::pathres::path_from_env(spec.env);
             let limits = spec.limits;
             // WP-NET-ISO: `--net=none` ⇒ create a network namespace (CLONE_NEWNET)
             // so the container gets an isolated, empty net stack (loopback only).
@@ -194,6 +201,7 @@ mod ns_impl {
                         &rootfs_path,
                         &cwd_str,
                         &command,
+                        env_path.as_deref(),
                         &limits,
                         net_isolate,
                         read_only,
@@ -244,6 +252,10 @@ mod ns_impl {
         rootfs: &std::path::Path,
         cwd: &str,
         command: &[String],
+        // CRITEST "starting container": the workload's PATH (from `spec.env`), used to
+        // execvp-resolve a bare argv[0] against the CONTAINER rootfs post-pivot. `None`
+        // ⇒ the standard default PATH (`pathres::DEFAULT_PATH`).
+        env_path: Option<&str>,
         limits: &lightr_core::ResourceLimits,
         net_isolate: bool,
         read_only: bool,
@@ -375,7 +387,13 @@ mod ns_impl {
             eprintln!("lightr-engine ns: empty command");
             return 1;
         }
-        let prog_c = match CString::new(command[0].as_bytes()) {
+        // Early NUL-validate argv[0] in the SETUP process (a return-able error, before
+        // the pid-ns fork) — an interior NUL is a malformed command. The program string
+        // is RE-resolved against the container PATH post-pivot in PID 1
+        // (`pathres::resolve_in_path`), which builds the actual exec CString; this check
+        // just rejects a bad name early with a clean `return 1` rather than a post-fork
+        // `_exit`. (`_`-prefixed: validation only, not the exec'd pointer.)
+        let _prog_c = match CString::new(command[0].as_bytes()) {
             Ok(c) => c,
             Err(_) => {
                 eprintln!("lightr-engine ns: bad program name");
@@ -567,6 +585,30 @@ mod ns_impl {
                 libc::chdir(cwd_c.as_ptr());
             }
 
+            // CRITEST "starting container": execvp-style PATH resolution of argv[0].
+            // critest starts containers with a BARE command (`top`); raw `execv` does
+            // NO PATH search, so `execv("top")` ENOENTs (the 20/34 failure root cause).
+            // Resolve HERE — post-pivot, so `access(X_OK)` checks hit the CONTAINER
+            // rootfs (not the host) — against the workload's own PATH (`env_path`, or
+            // the standard default when absent). A path-qualified argv[0] (contains a
+            // `/`) is returned as-is (NO search) ⇒ byte-identical to the pre-fix path.
+            // Fail-closed: if nothing resolves, signal the exec-readiness pipe and
+            // `_exit(127)` exactly like the existing execv-ENOENT path — never exec an
+            // empty/wrong program. The resolved CString is copied across the `--init`
+            // fork below, so it stays valid for the workload's execv.
+            let prog_resolved = match crate::pathres::resolve_in_path(&command[0], env_path) {
+                Some(p) => p,
+                None => {
+                    let e = std::io::Error::from_raw_os_error(libc::ENOENT);
+                    signal_exec_failed(exec_ready_fd, &e);
+                    eprintln!(
+                        "lightr-engine ns: exec failed: {:?} not found in container PATH",
+                        command[0]
+                    );
+                    unsafe { libc::_exit(127) };
+                }
+            };
+
             if init {
                 // `--init`: PID 1 is a minimal reaper; the workload is its child (so
                 // the workload is PID 2). PID 1 reaps orphaned zombies and propagates
@@ -591,7 +633,9 @@ mod ns_impl {
                     apply_apparmor_if_any(apparmor, exec_ready_fd);
                     // WP-#102: arm the exec-success pipe (CLOEXEC) right before execv.
                     arm_exec_ready(exec_ready_fd);
-                    unsafe { libc::execv(prog_c.as_ptr(), argv_ptrs.as_ptr()) };
+                    // PATH-resolved program (argv unchanged ⇒ argv[0] stays the
+                    // conventional name, matching execvp).
+                    unsafe { libc::execv(prog_resolved.as_ptr(), argv_ptrs.as_ptr()) };
                     // execv returned ⇒ it FAILED. Signal BYTES down the pipe first.
                     let e = std::io::Error::last_os_error();
                     signal_exec_failed(exec_ready_fd, &e);
@@ -618,7 +662,9 @@ mod ns_impl {
                 // WP-#102: arm the exec-success pipe (CLOEXEC) right before execv — a
                 // successful execv auto-closes it ⇒ the backend's reader sees EOF.
                 arm_exec_ready(exec_ready_fd);
-                unsafe { libc::execv(prog_c.as_ptr(), argv_ptrs.as_ptr()) };
+                // PATH-resolved program (argv unchanged ⇒ argv[0] stays the
+                // conventional name, matching execvp).
+                unsafe { libc::execv(prog_resolved.as_ptr(), argv_ptrs.as_ptr()) };
                 // execv returned ⇒ it FAILED. Signal BYTES down the pipe first.
                 let e = std::io::Error::last_os_error();
                 signal_exec_failed(exec_ready_fd, &e);

@@ -221,7 +221,28 @@ fn run_exec_shim_linux() -> ! {
     let mut env_p: Vec<*const libc::c_char> = env_c.iter().map(|c| c.as_ptr()).collect();
     env_p.push(std::ptr::null());
 
-    unsafe { libc::execve(argv_c[0].as_ptr(), argv_p.as_ptr(), env_p.as_ptr()) };
+    // CRITEST "starting container" (execSync path): critest's `execSync` runs BARE
+    // commands too, and `execve` does NO PATH search — so resolve argv[0] execvp-style
+    // against the CONTAINER's PATH (from `desc.env`, or the standard default when
+    // absent) using the SAME helper the ns engine uses. We are post-setns(mnt) here, so
+    // `access(X_OK)` inside the helper hits the CONTAINER rootfs. A path-qualified
+    // argv[0] (contains `/`) is used as-is (NO search) ⇒ unchanged behavior. Fail-closed:
+    // if nothing resolves, `_exit(127)` like the existing execve-ENOENT path below —
+    // never exec a wrong/empty path, never fall back to a host exec. The argv array is
+    // unchanged ⇒ argv[0] stays the conventional name (matching execvp).
+    let env_path = lightr_engine::pathres::path_from_env(&desc.env);
+    let prog_c = match lightr_engine::pathres::resolve_in_path(&desc.argv[0], env_path.as_deref()) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "lightr-cri ns-exec: {:?} not found in container PATH",
+                desc.argv.first()
+            );
+            unsafe { libc::_exit(127) }
+        }
+    };
+
+    unsafe { libc::execve(prog_c.as_ptr(), argv_p.as_ptr(), env_p.as_ptr()) };
     // execve only returns on error.
     eprintln!(
         "lightr-cri ns-exec: execve {:?}: {}",
