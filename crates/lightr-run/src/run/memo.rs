@@ -200,17 +200,22 @@ mod memo_key;
 pub(super) use memo_key::build_key;
 
 pub fn run_memoized(spec: &RunSpec, store: &Store) -> Result<RunOutcome> {
-    run_memoized_with(spec, store, &lightr_core::ResourceLimits::default())
+    run_memoized_with(spec, store, &lightr_core::ResourceLimits::default(), &[])
 }
 
-/// Run with explicit resource caps. `limits` are a **separate** exec parameter,
-/// NOT part of the memo key (build-spec-parity.md §0): resource caps don't
-/// change deterministic output, so an OOM-kill is an environmental failure, not
-/// a cached result. The 16 callers of `run_memoized` keep unlimited defaults.
+/// Run with explicit resource caps. `limits` + `ulimits` are **separate** exec
+/// parameters, NOT part of the memo key (build-spec-parity.md §0): resource caps
+/// don't change deterministic output, so an OOM-kill / rlimit hit is an
+/// environmental failure, not a cached result. The 16 callers of `run_memoized`
+/// keep unlimited defaults (`&[]` ulimits). `ulimits` (`--ulimit`) are applied via
+/// a `pre_exec` `setrlimit` hook on the native spawn (the memo-path honest-boundary
+/// law: a `--ulimit` is enforceable natively, so it is APPLIED, never silently
+/// dropped).
 pub fn run_memoized_with(
     spec: &RunSpec,
     store: &Store,
     limits: &lightr_core::ResourceLimits,
+    ulimits: &[lightr_engine::Ulimit],
 ) -> Result<RunOutcome> {
     // F-203: validate native limit enforceability BEFORE the AC lookup, so a
     // cache-HIT can't bypass the honest error (limits are excluded from the key).
@@ -298,6 +303,9 @@ pub fn run_memoized_with(
     super::apply_cfg::apply_run_config_spec(spec, &mut cmd); // RC-SEAM-FREEZE (no-op)
                                                              // F-203: apply resource caps (RLIMIT_AS/DATA via pre_exec); no-op when unlimited.
     crate::limits::apply_native(&mut cmd, limits)?;
+    // `--ulimit`: per-process setrlimit caps via a pre_exec hook (memo-path
+    // honest-boundary law — enforceable natively, so applied not dropped). Empty ⇒ no-op.
+    crate::limits::apply_native_ulimits(&mut cmd, ulimits);
     let output = cmd.output().map_err(LightrError::Io)?;
 
     let exit_code = {

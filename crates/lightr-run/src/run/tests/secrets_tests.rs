@@ -270,6 +270,6 @@ fn missing_secret_ref_fails_closed() {
         stop_signal: None,
         ..Default::default()
     };
-    let run_err = run_memoized_with(&spec, &store, &lightr_core::ResourceLimits::default());
+    let run_err = run_memoized_with(&spec, &store, &lightr_core::ResourceLimits::default(), &[]);
     assert!(run_err.is_err(), "run with a missing secret must Err");
 }

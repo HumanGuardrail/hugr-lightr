@@ -105,6 +105,56 @@ fn install_memory_rlimit(cmd: &mut std::process::Command, memory_bytes: u64) {
     }
 }
 
+/// Apply `--ulimit` per-process caps to a not-yet-spawned native `Command` (the
+/// memoized native path) via a `pre_exec` `setrlimit` hook — the memo-path sibling
+/// of `lightr-engine::limits::apply_native_ulimits`, mirroring [`install_memory_rlimit`].
+/// Empty ⇒ no hook (byte-identical to the pre-feature path). The hook runs in the
+/// forked child before `execvp`; a failing `setrlimit` aborts the spawn (surfaces as
+/// an `io::Error` from `.output()`) — FAIL-CLOSED, never a silent drop (the memo-path
+/// honest-boundary law). Unlike a cpu *share*, a `--ulimit` IS faithfully enforceable
+/// natively (it is exactly `setrlimit`), so it is APPLIED here, not honest-errored.
+/// `unix` only (`pre_exec`/`setrlimit` are POSIX; the CLI honest-errors vz).
+#[cfg(unix)]
+pub fn apply_native_ulimits(cmd: &mut std::process::Command, ulimits: &[lightr_engine::Ulimit]) {
+    use std::os::unix::process::CommandExt;
+    if ulimits.is_empty() {
+        return;
+    }
+    // Owned copy so the closure is `'static`.
+    let ulimits: Vec<lightr_engine::Ulimit> = ulimits.to_vec();
+    // SAFETY: see install_memory_rlimit — the hook runs in the forked child before
+    // execvp and calls only async-signal-safe setrlimit on captured Copy data (the
+    // Vec is moved in; no allocation, no shared locks).
+    unsafe {
+        cmd.pre_exec(move || {
+            for u in &ulimits {
+                let to_rlim = |v: u64| -> libc::rlim_t {
+                    if v == u64::MAX {
+                        libc::RLIM_INFINITY
+                    } else {
+                        v as libc::rlim_t
+                    }
+                };
+                let rl = libc::rlimit {
+                    rlim_cur: to_rlim(u.soft),
+                    rlim_max: to_rlim(u.hard),
+                };
+                if libc::setrlimit(u.resource as _, &rl) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Non-unix: `setrlimit` is POSIX-only; a `--ulimit` never reaches a non-unix native
+/// path (the symbol exists so callers resolve everywhere).
+#[cfg(not(unix))]
+pub fn apply_native_ulimits(cmd: &mut std::process::Command, ulimits: &[lightr_engine::Ulimit]) {
+    let _ = (cmd, ulimits);
+}
+
 /// Apply resource caps via cgroup v2 (the `ns` engine, Linux).
 ///
 /// The memoized run uses the native spawn, so this path is not reached from
