@@ -472,6 +472,16 @@ pub fn run(
         };
     }
 
+    // `--ulimit TYPE=SOFT[:HARD]` ⇒ per-process setrlimit caps. Parsed ONCE here
+    // (BEFORE the path split) because BOTH the engine path (ns: setrlimit in PID 1;
+    // native+rootfs: pre_exec) AND the native+no-rootfs memo path apply it — a
+    // `--ulimit` is enforceable natively, so it must never be a silent no-op on the
+    // default `lightr run` (memo-path honest-boundary law). Bad input ⇒ honest exit 2.
+    let ulimits = match parse_ulimits(&runflags.ulimit) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+
     if use_engine_path {
         // `--add-host HOST:IP` ⇒ `(hostname, ip)` pairs for the ns engine's
         // /etc/hosts write. Already value-validated as `HOST:IP` in
@@ -489,13 +499,6 @@ pub fn run(
         // `target` with an optional `:size=<bytes|N[kmg]>,mode=<octal>` suffix
         // (Docker's tmpfs option shape). Bad options are an honest exit 2.
         let tmpfs_mounts = match parse_tmpfs(&runflags.tmpfs) {
-            Ok(v) => v,
-            Err(code) => return code,
-        };
-        // `--ulimit TYPE=SOFT[:HARD]` ⇒ the engine's per-process setrlimit caps.
-        // Enforced on native (pre_exec setrlimit) + ns (setrlimit in PID 1); vz is
-        // honest-errored at the handler above. Bad input is an honest exit 2.
-        let ulimits = match parse_ulimits(&runflags.ulimit) {
             Ok(v) => v,
             Err(code) => return code,
         };
@@ -575,6 +578,9 @@ pub fn run(
         rc,
         // WP-RUNFLAGS: the resolved `-v`/`--tmpfs`/`--name`/`--rm`/`--entrypoint`.
         runflags,
+        // `--ulimit`: parsed per-process setrlimit caps, applied on the memo native
+        // spawn via a pre_exec hook (enforceable natively ⇒ never silently dropped).
+        ulimits,
     })
 }
 

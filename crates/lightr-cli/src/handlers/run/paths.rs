@@ -290,6 +290,10 @@ pub(super) struct NativeRun<'a> {
     /// and the detached supervisor; `--name`/`--rm` are detached-only (a foreground
     /// run has no run dir — guarded at the handler).
     pub runflags: super::runflags::RunFlags,
+    /// `--ulimit` parsed per-process setrlimit caps. Applied on the memoized native
+    /// spawn via a `pre_exec` hook (a `--ulimit` is enforceable natively ⇒ never a
+    /// silent no-op on the default `lightr run`). RUNTIME-ONLY (excluded from the key).
+    pub ulimits: Vec<lightr_engine::Ulimit>,
 }
 
 pub(super) fn run_native_memo(req: NativeRun) -> i32 {
@@ -316,6 +320,7 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
         stop_signal,
         rc,
         runflags,
+        ulimits,
     } = req;
     let input_paths: Vec<std::path::PathBuf> = if inputs.is_empty() {
         vec![cwd.clone()]
@@ -427,7 +432,7 @@ pub(super) fn run_native_memo(req: NativeRun) -> i32 {
             Err(e) => return die_lightr(&e),
         }
     } else {
-        match run_memoized_with(&spec, store, &limits) {
+        match run_memoized_with(&spec, store, &limits, &ulimits) {
             Ok(o) => o,
             Err(e) => return die_lightr(&e),
         }

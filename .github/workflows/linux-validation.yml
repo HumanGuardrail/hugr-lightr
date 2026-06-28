@@ -780,6 +780,14 @@ jobs:
           "$BIN" run --engine ns --ulimit nofile=32:128 --rootfs alpine-aa -- /bin/busybox sh -c 'echo "S=$(ulimit -Sn) H=$(ulimit -Hn)"' >/tmp/ul_sh.txt 2>&1
           UL_SH_EXIT=$?; echo "ush_exit=$UL_SH_EXIT"; cat /tmp/ul_sh.txt
 
+          echo "=== native MEMO path (default, no rootfs): --ulimit nofile=48 enforced too ==="
+          # The default `lightr run` (native, no rootfs) goes through the memo path —
+          # prove --ulimit is applied there (not silently dropped). The memo key
+          # EXCLUDES limits, so the `# umemo-uniq` comment makes the command unique to
+          # force a cache MISS (else a prior `ulimit -n` output could be served stale).
+          "$BIN" run --ulimit nofile=48 -- /bin/sh -c 'ulimit -n # umemo-uniq' >/tmp/ul_memo.txt 2>&1
+          UL_MEMO_EXIT=$?; GOTM=$(sed -n 1p /tmp/ul_memo.txt); echo "umemo_exit=$UL_MEMO_EXIT got=$GOTM"; cat /tmp/ul_memo.txt
+
           echo "=== vz + --ulimit → honest exit 2 (limits live in the guest) ==="
           "$BIN" run --engine vz --ulimit nofile=64 --rootfs alpine-aa -- /bin/true >/tmp/ul_vz.txt 2>&1
           UL_VZ_EXIT=$?; echo "uvz_exit=$UL_VZ_EXIT"; tail -3 /tmp/ul_vz.txt
@@ -792,6 +800,8 @@ jobs:
           [ "$GOT64" != "$BASE" ] || { echo "FAIL: enforced nofile ($GOT64) == BASE ($BASE) — cap not applied"; FAIL=1; }
           [ "$UL_SH_EXIT" = 0 ] || { echo "FAIL: --ulimit nofile=32:128 run failed (exit $UL_SH_EXIT)"; FAIL=1; }
           grep -qx "S=32 H=128" /tmp/ul_sh.txt || { echo "FAIL: soft:hard split wrong (got '$(sed -n 1p /tmp/ul_sh.txt)', expected 'S=32 H=128')"; FAIL=1; }
+          [ "$UL_MEMO_EXIT" = 0 ] || { echo "FAIL: native memo --ulimit run failed (exit $UL_MEMO_EXIT)"; FAIL=1; }
+          [ "$GOTM" = 48 ] || { echo "FAIL: native memo path did NOT apply --ulimit nofile=48 (got '$GOTM') — silent no-op on the default lightr run"; FAIL=1; }
           [ "$UL_VZ_EXIT" = 2 ] || { echo "FAIL: vz + --ulimit exit '$UL_VZ_EXIT' (expected 2 honest-error)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "ULIMIT=PASS"; else echo "ULIMIT=FAIL"; exit 1; fi  # gate for real
 
