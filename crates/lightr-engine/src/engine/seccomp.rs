@@ -108,6 +108,22 @@ pub fn compile_from_path(path: &str) -> std::io::Result<CompiledSeccomp> {
     compile(&profile)
 }
 
+/// Compile the BUILT-IN `--seccomp default` curated profile (vendored
+/// `seccomp_default.json`): a default-deny (ERRNO/EPERM) allow-list derived from
+/// the Docker/moby default profile, filtered to the x86_64 names `syscall_nr`
+/// resolves. Same fail-closed `compile` path as `compile_from_path`, but the
+/// profile is embedded at build time (`include_str!`) so it needs no host file.
+pub fn compile_default() -> std::io::Result<CompiledSeccomp> {
+    const DEFAULT_PROFILE: &str = include_str!("seccomp_default.json");
+    let profile: OciSeccomp = serde_json::from_str(DEFAULT_PROFILE).map_err(|e| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("built-in seccomp profile parse: {e}"),
+        )
+    })?;
+    compile(&profile)
+}
+
 fn err_unsupported(msg: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidData, msg.into())
 }
@@ -277,6 +293,10 @@ fn syscall_nr(name: &str) -> Option<i64> {
         "access" => libc::SYS_access,
         "adjtimex" => libc::SYS_adjtimex,
         "alarm" => libc::SYS_alarm,
+        // x86_64 nr 158 — glibc/musl TLS setup calls this in every program's
+        // startup (ARCH_SET_FS); REQUIRED for the `default` allow-list or the C
+        // runtime traps before `main`. Added for the built-in profile (WP-#111+).
+        "arch_prctl" => libc::SYS_arch_prctl,
         "bind" => libc::SYS_bind,
         "brk" => libc::SYS_brk,
         "capget" => libc::SYS_capget,
@@ -353,6 +373,7 @@ fn syscall_nr(name: &str) -> Option<i64> {
         "getpid" => libc::SYS_getpid,
         "getppid" => libc::SYS_getppid,
         "getpriority" => libc::SYS_getpriority,
+        "get_robust_list" => libc::SYS_get_robust_list,
         "getrandom" => libc::SYS_getrandom,
         "getresgid" => libc::SYS_getresgid,
         "getresuid" => libc::SYS_getresuid,
@@ -439,6 +460,7 @@ fn syscall_nr(name: &str) -> Option<i64> {
         "openat" => libc::SYS_openat,
         "openat2" => libc::SYS_openat2,
         "pause" => libc::SYS_pause,
+        "personality" => libc::SYS_personality,
         "pidfd_getfd" => libc::SYS_pidfd_getfd,
         "pidfd_open" => libc::SYS_pidfd_open,
         "pidfd_send_signal" => libc::SYS_pidfd_send_signal,
@@ -721,6 +743,37 @@ mod tests {
                                { "names": ["rmdir"], "action": "SCMP_ACT_KILL" } ] }"#,
         );
         assert!(r.is_err(), "mixed per-syscall actions must fail closed");
+    }
+
+    #[test]
+    fn builtin_default_profile_compiles_and_is_default_deny() {
+        // The vendored `seccomp_default.json` parses + compiles (every listed name
+        // must resolve in `syscall_nr`, or this fails closed) ...
+        let c = compile_default().expect("built-in default profile compiles");
+        let nr = |n| syscall_nr(n).unwrap() as u32;
+        // ... a representative ALLOWED syscall falls through to the ALLOW block ...
+        assert_eq!(
+            run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr("read")),
+            SECCOMP_RET_ALLOW,
+            "an allow-listed syscall (read) must be ALLOW"
+        );
+        assert_eq!(
+            run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr("arch_prctl")),
+            SECCOMP_RET_ALLOW,
+            "arch_prctl (C-runtime startup) must be ALLOW or every workload traps"
+        );
+        // ... and a syscall NOT in the allow-list hits the default ERRNO(EPERM),
+        // proving this is a real default-deny allow-list (not allow-all).
+        assert_eq!(
+            run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr("ptrace")),
+            SECCOMP_RET_ERRNO | 1,
+            "a non-allow-listed syscall (ptrace) must be ERRNO(EPERM)"
+        );
+        assert_eq!(
+            run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr("reboot")),
+            SECCOMP_RET_ERRNO | 1,
+            "a non-allow-listed syscall (reboot) must be ERRNO(EPERM)"
+        );
     }
 
     #[test]
