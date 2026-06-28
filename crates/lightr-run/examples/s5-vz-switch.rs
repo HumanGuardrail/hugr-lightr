@@ -141,6 +141,8 @@ fn boot_vm(
         tmpfs: &[],
         // --ulimit: vz example; no ns setrlimit here.
         ulimits: &[],
+        // --oom-score-adj: vz example; OOM tuning lives in the guest. None.
+        oom_score_adj: None,
     };
     let code = engine
         .run(&spec)

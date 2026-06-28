@@ -236,6 +236,8 @@ pub fn run_shim() -> ! {
         tmpfs: &[],
         // `--ulimit` is a Docker-run flag; the CRI path has no ulimit source today.
         ulimits: &[],
+        // `--oom-score-adj` is a Docker-run flag; the CRI path has no oom source today.
+        oom_score_adj: None,
     };
 
     match engine.run(&spec) {

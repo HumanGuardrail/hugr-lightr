@@ -218,6 +218,12 @@ mod ns_impl {
             // still holds CAP_SYS_RESOURCE there, a lowering always works). Empty ⇒
             // no-op (byte-identical to the pre-feature path).
             let ulimits: Vec<Ulimit> = spec.ulimits.to_vec();
+            // `--oom-score-adj` (Docker parity): the OOM killer score adjustment.
+            // Captured (by Copy) pre-fork like `ulimits` so PID 1 owns its copy;
+            // applied EARLY in PID 1 (alongside `apply_ulimits_if_any`) via a write
+            // to /proc/self/oom_score_adj. `None` ⇒ no-op (byte-identical to the
+            // pre-feature path).
+            let oom_score_adj: Option<i32> = spec.oom_score_adj;
 
             // WP-#95: fork the SETUP process. NOTE (corrected from a wrong pre-#95
             // comment): this child does NOT become PID 1 — `unshare(CLONE_NEWPID)`
@@ -258,6 +264,7 @@ mod ns_impl {
                         &add_host,
                         &tmpfs,
                         &ulimits,
+                        oom_score_adj,
                     );
                     std::process::exit(rc);
                 }
@@ -336,6 +343,9 @@ mod ns_impl {
         // `--ulimit`: per-process `setrlimit` caps applied in PID 1, EARLY (before
         // the caps/user/seccomp block). Empty ⇒ the pre-feature path is unchanged.
         ulimits: &[Ulimit],
+        // `--oom-score-adj`: written to /proc/self/oom_score_adj in PID 1, EARLY
+        // (alongside the ulimits apply). `None` ⇒ the pre-feature path is unchanged.
+        oom_score_adj: Option<i32>,
     ) -> i32 {
         // WP-#99: JOIN the pod's existing netns BEFORE `unshare(CLONE_NEWUSER)`.
         // THE ordering rule: we must `setns(CLONE_NEWNET)` while still real root in
@@ -831,6 +841,10 @@ mod ns_impl {
                     // caps/user/seccomp, so a hard-limit RAISE still holds
                     // CAP_SYS_RESOURCE (a lowering always works). Fail-closed.
                     apply_ulimits_if_any(ulimits, exec_ready_fd);
+                    // `--oom-score-adj`: write /proc/self/oom_score_adj EARLY (a
+                    // rootless RAISE always works; a LOWERING below the parent EPERMs
+                    // ⇒ fail-closed). `None` ⇒ no-op.
+                    apply_oom_score_adj_if_any(oom_score_adj, exec_ready_fd);
                     // Caps applied LAST, in the execing process (fail-closed: a capset
                     // failure `_exit`s rather than exec with the WRONG set).
                     apply_caps_if_any(desired_caps_vec.as_deref(), exec_ready_fd);
@@ -875,6 +889,10 @@ mod ns_impl {
                 // caps/user/seccomp (a hard-limit raise still holds CAP_SYS_RESOURCE;
                 // a lowering always works). Fail-closed.
                 apply_ulimits_if_any(ulimits, exec_ready_fd);
+                // `--oom-score-adj`: write /proc/self/oom_score_adj EARLY (a rootless
+                // RAISE always works; a LOWERING below the parent EPERMs ⇒ fail-closed).
+                // `None` ⇒ no-op.
+                apply_oom_score_adj_if_any(oom_score_adj, exec_ready_fd);
                 // Caps LAST, in the execing process (fail-closed via `_exit`).
                 apply_caps_if_any(desired_caps_vec.as_deref(), exec_ready_fd);
                 // WP-#106: apply the AppArmor profile LAST (after caps), right before
@@ -970,6 +988,47 @@ mod ns_impl {
                 signal_setup_failed(exec_ready_fd, "ulimit setrlimit failed");
                 unsafe { libc::_exit(1) };
             }
+        }
+    }
+
+    /// `--oom-score-adj`: write the integer to `/proc/self/oom_score_adj` in the
+    /// EXECing process, EARLY (alongside `apply_ulimits_if_any`, before
+    /// caps/user/seccomp). Mirrors `lightr-run::apply_cfg::install_oom_score_adj`'s
+    /// write idiom (open `O_WRONLY` + write the decimal text + close), but here it
+    /// runs in our own PID (not a `pre_exec` hook) so a plain heap-formatted string
+    /// is fine. `None` ⇒ no-op (byte-identical to the pre-feature path). Called
+    /// post-fork, so a failing write is FAIL-CLOSED: a rootless RAISE always works,
+    /// but a LOWERING below the parent's score EPERMs — an honest error, never a
+    /// silent drop. It signals the exec-readiness pipe with bytes (so the
+    /// kernel-closed fd is NOT misread as EOF ⇒ a false `Running`) and `_exit(1)`s
+    /// rather than exec with the WRONG score. Mirrors `apply_ulimits_if_any`.
+    fn apply_oom_score_adj_if_any(oom: Option<i32>, exec_ready_fd: Option<libc::c_int>) {
+        let adj = match oom {
+            None => return,
+            Some(a) => a,
+        };
+        let s = format!("{adj}");
+        let path = c"/proc/self/oom_score_adj";
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY) };
+        if fd < 0 {
+            let e = std::io::Error::last_os_error();
+            eprintln!("lightr-engine ns: --oom-score-adj open(/proc/self/oom_score_adj) failed: {e}");
+            signal_setup_failed(exec_ready_fd, "oom_score_adj open failed");
+            unsafe { libc::_exit(1) };
+        }
+        let n = unsafe {
+            libc::write(fd, s.as_ptr() as *const libc::c_void, s.len())
+        };
+        let werr = if n < 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        unsafe { libc::close(fd) };
+        if let Some(e) = werr {
+            eprintln!("lightr-engine ns: --oom-score-adj write({adj}) failed: {e}");
+            signal_setup_failed(exec_ready_fd, "oom_score_adj write failed");
+            unsafe { libc::_exit(1) };
         }
     }
 

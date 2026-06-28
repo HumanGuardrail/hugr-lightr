@@ -332,4 +332,20 @@ pub struct ExecSpec<'a> {
     /// the handler (its limits live inside the guest). RUNTIME-ONLY — NEVER a memo
     /// key. Default `&[]` ⇒ byte-identical to the pre-feature path.
     pub ulimits: &'a [Ulimit],
+
+    /// `--oom-score-adj` (Docker parity): the OOM killer score adjustment for the
+    /// workload. ONLY the `ns` engine honors it via `ExecSpec.oom_score_adj`: in
+    /// PID 1 it writes the integer to `/proc/self/oom_score_adj` (a real
+    /// per-process effect needing no namespace), EARLY — before the caps/user/
+    /// seccomp block, so a (rootless-disallowed) LOWERING below the parent's score
+    /// still holds whatever privilege the userns baseline grants. FAIL-CLOSED: a
+    /// failing write (rootless can RAISE freely, but LOWERING below the parent
+    /// EPERMs) aborts the run rather than exec with the WRONG score — an honest
+    /// error, never a silent drop. The `native` engine has its OWN apply path (a
+    /// `pre_exec` write in `lightr-run::apply_cfg::install_oom_score_adj` on the
+    /// memo path), so it IGNORES this field to avoid a double-apply; vz's OOM
+    /// tuning lives inside the guest. RUNTIME-ONLY — NEVER a memo key (like
+    /// `ulimits`/`read_only`). Default `None` ⇒ byte-identical to the pre-feature
+    /// path (no `/proc` write).
+    pub oom_score_adj: Option<i32>,
 }

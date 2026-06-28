@@ -197,6 +197,9 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         tmpfs: &[],
                         // --ulimit: vz is its own VM; no ns setrlimit here.
                         ulimits: &[],
+                        // --oom-score-adj: vz is its own VM; OOM tuning lives in the
+                        // guest. None.
+                        oom_score_adj: None,
                     };
                     engine.run(&spec).unwrap_or(255)
                 }
