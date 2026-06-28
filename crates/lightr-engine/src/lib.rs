@@ -3,6 +3,10 @@
 pub mod engine;
 pub mod limits;
 pub mod pack;
+/// PATH resolution of `argv[0]` (execvp-style) for the raw `execv`/`execve` sites
+/// — shared by the ns engine workload exec and the `__ns-exec` shim. Ties to the
+/// critest "should support starting container" conformance (bare-command start).
+pub mod pathres;
 
 /// Re-export the guest-env PATH so the vz-memo key (lightr-cli handler) hashes
 /// the EXACT value the engine injects into the guest command — one source of
