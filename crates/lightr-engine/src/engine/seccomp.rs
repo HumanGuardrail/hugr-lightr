@@ -155,41 +155,47 @@ fn compile(profile: &OciSeccomp) -> std::io::Result<CompiledSeccomp> {
     let listed_ret = listed_ret.unwrap_or(default_ret);
 
     // ── Build the flat cBPF program ──────────────────────────────────────────
-    // Layout:
+    // Layout (the DEFAULT-ret MUST come first — it is the FALL-THROUGH target):
     //   [0] LD  arch
-    //   [1] JEQ arch == X86_64 ? -> [3] (load nr) : -> default-ret
+    //   [1] JEQ arch == X86_64 ? -> [2] (load nr) : -> default-ret
     //   [2] LD  nr
-    //   [3..3+N] JEQ nr == nrs[i] ? -> listed-ret : fall through
-    //   [..]  RET listed-ret
-    //   [..]  RET default-ret
+    //   [3..3+N] JEQ nr == nrs[i] ? -> JUMP to listed-ret : fall through
+    //   [3+N]    RET default-ret   <- non-matching syscalls FALL THROUGH to here
+    //   [3+N+1]  RET listed-ret    <- matching JEQs JUMP past default to here
     // All jt/jf are RELATIVE offsets counted from the instruction AFTER the jump.
+    //
+    // ORDER IS LOAD-BEARING: a flat JEQ chain falls through on no-match, so the
+    // block that immediately follows the JEQs is the no-match action — that MUST
+    // be the DEFAULT action. (WP-#108 first cut had these two ret blocks swapped,
+    // so EVERY non-listed syscall hit the listed ERRNO ⇒ the filter denied all
+    // syscalls ⇒ musl segfaulted. The `run_bpf` simulator tests below pin this.)
     let n = nrs.len();
-    // index of the two ret blocks (after: ld arch, jeq arch, ld nr, N jeqs)
-    let listed_ret_idx = 3 + n; // 0:ld arch, 1:jeq arch, 2:ld nr, then N jeqs
-    let default_ret_idx = listed_ret_idx + 1;
+    let default_ret_idx = 3 + n; // 0:ld arch, 1:jeq arch, 2:ld nr, then N jeqs
+    let listed_ret_idx = default_ret_idx + 1;
 
-    let mut prog: Vec<libc::sock_filter> = Vec::with_capacity(default_ret_idx + 1);
+    let mut prog: Vec<libc::sock_filter> = Vec::with_capacity(listed_ret_idx + 1);
 
     // [0] LD arch
     prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARCH_OFFSET));
-    // [1] JEQ arch == X86_64 → continue (jt=0, next is LD nr); else → default ret.
-    // jf is the distance from the instruction AFTER this jump (index 2) to the
-    // default-ret block.
+    // [1] JEQ arch == X86_64 → continue (jt=0, next is LD nr); foreign arch →
+    // default ret. jf is the distance from the instruction AFTER this jump
+    // (index 2) to the default-ret block.
     let jf_to_default = (default_ret_idx - 2) as u8;
     prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, jf_to_default));
     // [2] LD nr
     prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR_OFFSET));
-    // [3..] one JEQ per listed syscall: match → listed-ret, else fall through.
+    // [3..] one JEQ per listed syscall: match → JUMP to listed-ret; no match →
+    // fall through (eventually to the default-ret that sits right after the chain).
     for (i, nr) in nrs.iter().enumerate() {
         let here = 3 + i; // this instruction's index
         // distance from the instruction AFTER this jump to the listed-ret block.
         let jt = (listed_ret_idx - (here + 1)) as u8;
         prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, *nr as u32, jt, 0));
     }
-    // listed-ret block
-    prog.push(stmt(BPF_RET | BPF_K, listed_ret));
-    // default-ret block
+    // default-ret block FIRST (the fall-through target for non-matching syscalls)
     prog.push(stmt(BPF_RET | BPF_K, default_ret));
+    // listed-ret block (the JUMP target for matched syscalls)
+    prog.push(stmt(BPF_RET | BPF_K, listed_ret));
 
     Ok(CompiledSeccomp { prog })
 }
@@ -586,23 +592,98 @@ mod tests {
         compile(&p)
     }
 
+    /// Minimal cBPF interpreter for the exact subset our compiler emits
+    /// (`LD|W|ABS`, `JMP|JEQ|K`, `RET|K`). Returns the `SECCOMP_RET_*` value the
+    /// program yields for a given `(arch, nr)`. This is what pins the CONTROL
+    /// FLOW — the #108 first cut compiled to a valid program with the right ret
+    /// VALUES but the wrong fall-through, which an index/value assertion missed
+    /// but this simulator catches.
+    fn run_bpf(prog: &[libc::sock_filter], arch: u32, nr: u32) -> u32 {
+        let mut pc = 0usize;
+        let mut acc: u32 = 0;
+        loop {
+            let insn = prog[pc];
+            if insn.code == BPF_LD | BPF_W | BPF_ABS {
+                acc = match insn.k {
+                    SECCOMP_DATA_NR_OFFSET => nr,
+                    SECCOMP_DATA_ARCH_OFFSET => arch,
+                    other => panic!("unexpected LD offset {other}"),
+                };
+                pc += 1;
+            } else if insn.code == BPF_JMP | BPF_JEQ | BPF_K {
+                let taken = if acc == insn.k { insn.jt } else { insn.jf } as usize;
+                pc += 1 + taken;
+            } else if insn.code == BPF_RET | BPF_K {
+                return insn.k;
+            } else {
+                panic!("unexpected opcode {:#x}", insn.code);
+            }
+        }
+    }
+
+    const I386_ARCH: u32 = 0x4000_0003; // AUDIT_ARCH_I386 — a "foreign" arch here.
+
     #[test]
-    fn deny_list_profile_compiles_with_expected_ret_blocks() {
-        // default ALLOW, mkdir/mkdirat → ERRNO. 2 listed syscalls.
+    fn deny_list_selectively_blocks_only_listed_syscalls() {
+        // default ALLOW, mkdir/mkdirat → ERRNO(EPERM). The filter MUST block ONLY
+        // mkdir/mkdirat and ALLOW everything else (the bug was: it blocked all).
         let c = profile(
             r#"{ "defaultAction": "SCMP_ACT_ALLOW",
                  "syscalls": [ { "names": ["mkdir","mkdirat"], "action": "SCMP_ACT_ERRNO", "errnoRet": 1 } ] }"#,
         )
         .expect("supported profile compiles");
-        // ld arch, jeq arch, ld nr, 2 jeqs, listed-ret, default-ret = 7.
+        // ld arch, jeq arch, ld nr, 2 jeqs, default-ret, listed-ret = 7.
         assert_eq!(c.prog.len(), 7, "expected flat 7-insn program");
-        // last two are the ret blocks.
-        let listed = c.prog[5];
-        let default = c.prog[6];
-        assert_eq!(listed.code, BPF_RET | BPF_K);
-        assert_eq!(default.code, BPF_RET | BPF_K);
-        assert_eq!(listed.k, SECCOMP_RET_ERRNO | 1, "listed = ERRNO(EPERM)");
-        assert_eq!(default.k, SECCOMP_RET_ALLOW, "default = ALLOW");
+        let nr = |n| syscall_nr(n).unwrap() as u32;
+        assert_eq!(
+            run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr("mkdir")),
+            SECCOMP_RET_ERRNO | 1,
+            "mkdir must be ERRNO(EPERM)"
+        );
+        assert_eq!(
+            run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr("mkdirat")),
+            SECCOMP_RET_ERRNO | 1,
+            "mkdirat must be ERRNO(EPERM)"
+        );
+        // THE REGRESSION GUARD: a non-listed syscall MUST fall through to default ALLOW.
+        assert_eq!(
+            run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr("write")),
+            SECCOMP_RET_ALLOW,
+            "non-listed syscall (write) MUST fall through to default ALLOW, not the listed action"
+        );
+        assert_eq!(
+            run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr("execve")),
+            SECCOMP_RET_ALLOW,
+            "non-listed syscall (execve) MUST be ALLOW"
+        );
+        // foreign arch → the default action (documented behavior).
+        assert_eq!(
+            run_bpf(&c.prog, I386_ARCH, nr("mkdir")),
+            SECCOMP_RET_ALLOW,
+            "foreign arch resolves to the default action"
+        );
+    }
+
+    #[test]
+    fn allow_list_default_deny_allows_only_listed() {
+        // default ERRNO (deny), allow only write — the inverse shape. Proves the
+        // compiler is correct for allow-lists too (default-deny is the Docker shape).
+        let c = profile(
+            r#"{ "defaultAction": "SCMP_ACT_ERRNO",
+                 "syscalls": [ { "names": ["write"], "action": "SCMP_ACT_ALLOW" } ] }"#,
+        )
+        .expect("allow-list profile compiles");
+        let nr = |n| syscall_nr(n).unwrap() as u32;
+        assert_eq!(
+            run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr("write")),
+            SECCOMP_RET_ALLOW,
+            "listed write must be ALLOW"
+        );
+        assert_eq!(
+            run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr("mkdir")),
+            SECCOMP_RET_ERRNO | 1,
+            "non-listed syscall must hit default ERRNO"
+        );
     }
 
     #[test]

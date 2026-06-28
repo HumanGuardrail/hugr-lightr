@@ -653,9 +653,18 @@ jobs:
           "$BIN" run --engine ns --rootfs alpine-aa -- /bin/busybox sh -c 'mkdir /tmp/sct && echo MKDIR_OK' >/tmp/sc_ctl.txt 2>&1
           SC_CTL_EXIT=$?; echo "sc_ctl_exit=$SC_CTL_EXIT"; tail -3 /tmp/sc_ctl.txt
 
-          echo "=== enforced: mkdir UNDER --seccomp deny → expect FAIL (EPERM, no MKDIR_OK) ==="
+          echo "=== enforced: mkdir UNDER --seccomp deny → expect EPERM (no MKDIR_OK, clean error) ==="
           "$BIN" run --engine ns --seccomp /tmp/lightr-seccomp-deny.json --rootfs alpine-aa -- /bin/busybox sh -c 'mkdir /tmp/sct2 && echo MKDIR_OK' >/tmp/sc_enf.txt 2>&1
           SC_ENF_EXIT=$?; echo "sc_enf_exit=$SC_ENF_EXIT"; tail -3 /tmp/sc_enf.txt
+
+          echo "=== SELECTIVE: a NON-mkdir cmd UNDER the SAME deny profile → expect OK (filter is selective, NOT deny-all) ==="
+          # THE REGRESSION GUARD for the #108 inverted-fall-through bug: if the filter
+          # wrongly ERRNO'd EVERY syscall, busybox here would crash/fail instead of
+          # printing SELECTIVE_OK. A correct selective filter lets everything-but-mkdir
+          # through. (The first cut SIGSEGV'd here — denied all — yet the crude
+          # enf!=0 check still false-greened; this case is what makes the gate honest.)
+          "$BIN" run --engine ns --seccomp /tmp/lightr-seccomp-deny.json --rootfs alpine-aa -- /bin/busybox sh -c 'echo SELECTIVE_OK' >/tmp/sc_sel.txt 2>&1
+          SC_SEL_EXIT=$?; echo "sc_sel_exit=$SC_SEL_EXIT"; tail -3 /tmp/sc_sel.txt
 
           echo "=== fail-closed: --seccomp /tmp/no-such-profile.json → expect EXIT NON-ZERO (never run unfiltered) ==="
           "$BIN" run --engine ns --seccomp /tmp/no-such-profile.json --rootfs alpine-aa -- /bin/true >/tmp/sc_fc.txt 2>&1
@@ -667,6 +676,10 @@ jobs:
           grep -q MKDIR_OK /tmp/sc_ctl.txt || { echo "FAIL: control mkdir produced no MKDIR_OK proof"; FAIL=1; }
           [ "$SC_ENF_EXIT" != 0 ] || { echo "FAIL: --seccomp did NOT block mkdir (filter NOT enforced — FALSE SECURITY)"; FAIL=1; }
           grep -q MKDIR_OK /tmp/sc_enf.txt && { echo "FAIL: enforced run still mkdir'd (filter bit not applied)"; FAIL=1; }
+          # Selectivity: the non-mkdir cmd MUST succeed under the same profile (proves
+          # we block ONLY the listed syscalls, not everything — catches deny-all).
+          [ "$SC_SEL_EXIT" = 0 ] || { echo "FAIL: a non-mkdir cmd FAILED under the deny profile (exit $SC_SEL_EXIT) — filter is deny-all, NOT selective"; FAIL=1; }
+          grep -q SELECTIVE_OK /tmp/sc_sel.txt || { echo "FAIL: selective probe produced no SELECTIVE_OK — non-listed syscalls were blocked"; FAIL=1; }
           [ "$SC_FC_EXIT" != 0 ]  || { echo "FAIL: an unloadable --seccomp profile ran anyway (NOT fail-closed — ran unfiltered)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "SECCOMP=PASS"; else echo "SECCOMP=FAIL"; exit 1; fi  # gate for real
 
