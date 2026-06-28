@@ -174,6 +174,13 @@ pub(crate) struct RunArgs {
     /// Linux LSM apply via aa_change_onexec); native/vz honest-error (exit 2).
     #[arg(long, value_name = "PROFILE")]
     pub(crate) apparmor: Option<String>,
+    /// Apply a seccomp profile to the container (docker --security-opt
+    /// seccomp=<path>). Value is the PATH to an OCI seccomp JSON profile, or
+    /// "unconfined" to run explicitly without a seccomp filter. WP-#108: enforced
+    /// ONLY on the `ns` engine (NO_NEW_PRIVS + a compiled classic-BPF filter
+    /// installed right before exec); native/vz honest-error (exit 2).
+    #[arg(long, value_name = "PATH")]
+    pub(crate) seccomp: Option<String>,
     #[arg(last = true, required = true)]
     pub(crate) command: Vec<String>,
 }

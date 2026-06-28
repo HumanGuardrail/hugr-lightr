@@ -81,6 +81,17 @@ pub struct RunDescriptor {
     /// old descriptors deserializing as `None`.
     #[serde(default)]
     pub apparmor: Option<String>,
+    /// WP-#108 (seccomp): the PATH to an OCI seccomp JSON profile to enforce on the
+    /// container (or "unconfined"), mapped from `rec.config.security.seccomp` in
+    /// `build_ns_plan` (CRI `Localhost` ⇒ the profile path `localhost_ref`;
+    /// `Unconfined` ⇒ `"unconfined"`; `RuntimeDefault` ⇒ `None`, i.e. inherit, for
+    /// now). Becomes `ExecSpec.seccomp`; the ns engine compiles it before pivot and
+    /// installs the cBPF filter right before the container's `execv` (fail-closed).
+    /// `None` ⇒ no profile change (today's behavior — `rec.config.security` is usually
+    /// None until the cross-repo seam maps the kubelet profile through).
+    /// `#[serde(default)]` keeps old descriptors deserializing as `None`.
+    #[serde(default)]
+    pub seccomp: Option<String>,
     /// WP-#107 (CRI GAP 1, "starting container with volume"): the CRI
     /// `ContainerConfig.mounts`, host-side already realpath'd in `build_ns_plan` (the
     /// symlink-host-path spec resolves `host_path` BEFORE it reaches here — a host
@@ -210,6 +221,10 @@ pub fn run_shim() -> ! {
         // the cross-repo seam #89; `None` today). The ns engine applies it via
         // aa_change_onexec right before the container's execv (fail-closed).
         apparmor: desc.apparmor.as_deref(),
+        // WP-#108: the seccomp profile path mapped from the CRI security context
+        // (`None` today until the seam maps it). The ns engine compiles it before
+        // pivot and installs the cBPF filter right before execv (fail-closed).
+        seccomp: desc.seccomp.as_deref(),
         // WP-#107 (CRI GAP 1): the CRI volume bind mounts (host_path already
         // realpath'd in build_ns_plan). The ns engine binds each into the rootfs
         // before pivot, fail-closed. Empty ⇒ unchanged.

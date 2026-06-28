@@ -127,6 +127,7 @@ fn desired_caps(
 
 #[cfg(target_os = "linux")]
 mod ns_impl {
+    use super::super::seccomp;
     use super::super::spec::BindMount;
     use super::{desired_caps, Engine, ExecSpec, CAP_LAST_CAP};
     use lightr_core::{LightrError, Result};
@@ -182,6 +183,13 @@ mod ns_impl {
             // step (after caps), fail-closed. `None` ⇒ byte-identical to the pre-#106
             // path (no attr write).
             let apparmor: Option<String> = spec.apparmor.map(|s| s.to_owned());
+            // WP-#108 (seccomp): the PATH to an OCI seccomp JSON profile (or
+            // "unconfined") to enforce on the workload. Captured (owned) pre-fork like
+            // `apparmor` so PID 1 owns its copy. PID 1 COMPILES it early (before
+            // pivot_root, while the host path is visible) and INSTALLS it late (after
+            // the apparmor apply, right before execv), fail-closed. `None`/"unconfined"
+            // ⇒ no filter (byte-identical to the pre-#108 path for `None`).
+            let seccomp: Option<String> = spec.seccomp.map(|s| s.to_owned());
             // WP-#107 (CRI GAP 1/2/3): CRI container/sandbox setup the ns engine must
             // honor — volume bind mounts, the synthesized /etc/resolv.conf content, and
             // the sandbox hostname (which also drives a CLONE_NEWUTS unshare). Captured
@@ -222,6 +230,7 @@ mod ns_impl {
                         cgroup_name.as_deref(),
                         exec_ready_fd,
                         apparmor.as_deref(),
+                        seccomp.as_deref(),
                         &bind_mounts,
                         resolv_conf.as_deref(),
                         hostname.as_deref(),
@@ -279,6 +288,11 @@ mod ns_impl {
         cgroup_name: Option<&str>,
         exec_ready_fd: Option<libc::c_int>,
         apparmor: Option<&str>,
+        // WP-#108 (seccomp): the PATH to an OCI seccomp JSON profile (or
+        // "unconfined") to enforce on the workload. Compiled EARLY (pre-pivot, host
+        // path visible) + installed LATE (pre-execv), fail-closed. `None`/"unconfined"
+        // ⇒ no filter.
+        seccomp: Option<&str>,
         // WP-#107 (CRI GAP 1/2/3): CRI volume bind mounts, the synthesized
         // /etc/resolv.conf content, and the sandbox hostname. Empty/None ⇒ the
         // pre-#107 path is unchanged.
@@ -582,6 +596,28 @@ mod ns_impl {
                 }
             }
 
+            // WP-#108 (seccomp), EARLY half: COMPILE the OCI seccomp profile NOW —
+            // BEFORE pivot_root, while the HOST profile path is still reachable (after
+            // the put_old MNT_DETACH it is gone, exactly like the CRI volume host_paths
+            // above). The compiled cBPF program (a plain Vec) is held in a local and
+            // INSTALLED late (after the apparmor apply, right before execv), so the
+            // filter is armed last — never restricting PID 1's own rootfs setup. A
+            // `Some("unconfined")` profile compiles to None (explicit no-op). Fail-
+            // closed: an unreadable/unparseable/unsupported profile `_exit`s rather
+            // than exec unfiltered (the same discipline as #106 AppArmor). `None` ⇒
+            // byte-identical to the pre-#108 path.
+            let compiled_seccomp: Option<seccomp::CompiledSeccomp> = match seccomp {
+                Some(p) if p != "unconfined" => match seccomp::compile_from_path(p) {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        eprintln!("lightr-engine ns: seccomp: {e}");
+                        signal_setup_failed(exec_ready_fd, &format!("seccomp: {e}"));
+                        unsafe { libc::_exit(1) };
+                    }
+                },
+                _ => None,
+            };
+
             // 4. Create put_old dir inside rootfs, then pivot_root
             let put_old = rootfs.join(".put_old");
             if std::fs::create_dir_all(&put_old).is_err() {
@@ -721,6 +757,11 @@ mod ns_impl {
                     // before execv (aa_change_onexec). Fail-closed: a profile that
                     // can't be applied `_exit`s rather than exec unconfined.
                     apply_apparmor_if_any(apparmor, exec_ready_fd);
+                    // WP-#108: install the (pre-compiled) seccomp filter LAST — after
+                    // apparmor, right before execv. Fail-closed: an install failure
+                    // `_exit`s rather than exec unfiltered. `None` (no profile /
+                    // "unconfined") ⇒ no-op.
+                    apply_seccomp_if_any(compiled_seccomp.as_ref(), exec_ready_fd);
                     // WP-#102: arm the exec-success pipe (CLOEXEC) right before execv.
                     arm_exec_ready(exec_ready_fd);
                     // PATH-resolved program (argv unchanged ⇒ argv[0] stays the
@@ -749,6 +790,11 @@ mod ns_impl {
                 // execv (aa_change_onexec). Fail-closed: a profile that can't be
                 // applied `_exit`s rather than exec unconfined.
                 apply_apparmor_if_any(apparmor, exec_ready_fd);
+                // WP-#108: install the (pre-compiled) seccomp filter LAST — after
+                // apparmor, right before execv. Fail-closed: an install failure
+                // `_exit`s rather than exec unfiltered. `None` (no profile /
+                // "unconfined") ⇒ no-op.
+                apply_seccomp_if_any(compiled_seccomp.as_ref(), exec_ready_fd);
                 // WP-#102: arm the exec-success pipe (CLOEXEC) right before execv — a
                 // successful execv auto-closes it ⇒ the backend's reader sees EOF.
                 arm_exec_ready(exec_ready_fd);
@@ -822,6 +868,27 @@ mod ns_impl {
             if let Err(e) = apply_apparmor(profile) {
                 eprintln!("lightr-engine ns: apparmor: {e}");
                 signal_setup_failed(exec_ready_fd, &format!("apparmor: {e}"));
+                unsafe { libc::_exit(1) };
+            }
+        }
+    }
+
+    /// WP-#108: install a (pre-compiled) seccomp cBPF filter in the EXECing process,
+    /// right before `execv` and AFTER the apparmor apply. The profile was COMPILED
+    /// EARLY (pre-pivot, while the host path was visible); this LATE step only
+    /// installs it (NO_NEW_PRIVS + `seccomp(2)`/`prctl`). `None` ⇒ no profile or
+    /// `"unconfined"` ⇒ explicit no-op. Like `apply_caps_if_any`/`apply_apparmor_if_any`,
+    /// an install failure is fail-closed: it signals the exec-readiness pipe with
+    /// bytes (so the kernel-closed fd is NOT misread as EOF ⇒ a false `Running`) and
+    /// `_exit(1)`s rather than exec UNFILTERED when a filter was requested.
+    fn apply_seccomp_if_any(
+        compiled: Option<&seccomp::CompiledSeccomp>,
+        exec_ready_fd: Option<libc::c_int>,
+    ) {
+        if let Some(c) = compiled {
+            if let Err(e) = c.apply() {
+                eprintln!("lightr-engine ns: seccomp: {e}");
+                signal_setup_failed(exec_ready_fd, &format!("seccomp: {e}"));
                 unsafe { libc::_exit(1) };
             }
         }

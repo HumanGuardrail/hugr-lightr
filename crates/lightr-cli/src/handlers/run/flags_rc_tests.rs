@@ -87,6 +87,7 @@ fn resolve_threads_every_flag() {
         pids_limit: Some(128),
         shm_size: Some("64m".to_string()),
         apparmor: Some("lightr-test-deny".to_string()),
+        seccomp: Some("/tmp/lightr-test-seccomp.json".to_string()),
     };
     let cfg = raw.resolve().expect("resolves");
     assert_eq!(cfg.hostname.as_deref(), Some("h1"));
@@ -105,6 +106,8 @@ fn resolve_threads_every_flag() {
     assert_eq!(cfg.shm_size, Some(64 * 1024 * 1024));
     // WP-#106: `--apparmor` threads through unparsed (profile name passthrough).
     assert_eq!(cfg.apparmor.as_deref(), Some("lightr-test-deny"));
+    // WP-#108: `--seccomp` threads through unparsed (profile path passthrough).
+    assert_eq!(cfg.seccomp.as_deref(), Some("/tmp/lightr-test-seccomp.json"));
 }
 
 /// A bad `--label` (or `--shm-size`) fails the whole resolve fail-closed (exit

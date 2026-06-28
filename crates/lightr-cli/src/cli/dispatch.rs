@@ -133,6 +133,8 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                         shm_size: a.shm_size,
                         // WP-#106: `--apparmor <profile>` → ns-engine aa_change_onexec.
                         apparmor: a.apparmor,
+                        // WP-#108: `--seccomp <path>` → ns-engine cBPF filter install.
+                        seccomp: a.seccomp,
                     },
                     // WP-RUNFLAGS: `-v`/`--tmpfs`/`--name`/`--rm`/`--entrypoint` +
                     // the honest Phase-2 networking flags → resolved in the handler

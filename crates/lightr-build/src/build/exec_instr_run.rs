@@ -93,6 +93,8 @@ pub(in crate::build) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
         exec_ready_fd: None,
         // WP-#106: a build RUN step applies no AppArmor profile. None.
         apparmor: None,
+        // WP-#108: a build RUN step applies no seccomp profile. None.
+        seccomp: None,
         // WP-#107: no CRI volume mounts / DNS / hostname here.
         bind_mounts: &[],
         resolv_conf: None,

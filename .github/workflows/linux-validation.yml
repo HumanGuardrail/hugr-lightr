@@ -629,6 +629,47 @@ jobs:
           [ "$AA_FC_EXIT" != 0 ]  || { echo "FAIL: an unloadable --apparmor profile ran anyway (NOT fail-closed — ran unconfined)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "APPARMOR=PASS"; else echo "APPARMOR=FAIL"; exit 1; fi  # gate for real
 
+      - name: Prove --seccomp BPF enforcement + fail-closed (WP-#108)
+        run: |
+          # WP-#108: prove the `ns` engine ACTUALLY installs a seccomp-bpf filter on
+          # the workload (NO_NEW_PRIVS + a hand-compiled cBPF program) — not a silent
+          # no-op — and that an UNLOADABLE profile is fail-closed (never run
+          # unfiltered). Differential: a deny profile that ERRNOs mkdir/mkdirat — the
+          # CONTROL run mkdirs fine, the ENFORCED run gets EPERM, the FAIL-CLOSED run
+          # (missing profile file) aborts non-zero. The ns engine runs ROOTLESS; an
+          # unprivileged seccomp filter needs only NO_NEW_PRIVS, exactly the
+          # runc/crun method. Reuses the same alpine rootfs the apparmor probe uses.
+          set +e
+          BIN="$PWD/target/release/lightr"
+
+          # ── A deny profile: default ALLOW, mkdir/mkdirat → ERRNO(EPERM). The only
+          # supported shapes (no `args`, one shared action) so the hand-rolled
+          # compiler accepts it. ──
+          cat > /tmp/lightr-seccomp-deny.json <<'EOF'
+          { "defaultAction": "SCMP_ACT_ALLOW", "syscalls": [ { "names": ["mkdir","mkdirat"], "action": "SCMP_ACT_ERRNO", "errnoRet": 1 } ] }
+          EOF
+
+          echo "=== control: mkdir WITHOUT --seccomp → expect OK (exit 0) ==="
+          "$BIN" run --engine ns --rootfs alpine-aa -- /bin/busybox sh -c 'mkdir /tmp/sct && echo MKDIR_OK' >/tmp/sc_ctl.txt 2>&1
+          SC_CTL_EXIT=$?; echo "sc_ctl_exit=$SC_CTL_EXIT"; tail -3 /tmp/sc_ctl.txt
+
+          echo "=== enforced: mkdir UNDER --seccomp deny → expect FAIL (EPERM, no MKDIR_OK) ==="
+          "$BIN" run --engine ns --seccomp /tmp/lightr-seccomp-deny.json --rootfs alpine-aa -- /bin/busybox sh -c 'mkdir /tmp/sct2 && echo MKDIR_OK' >/tmp/sc_enf.txt 2>&1
+          SC_ENF_EXIT=$?; echo "sc_enf_exit=$SC_ENF_EXIT"; tail -3 /tmp/sc_enf.txt
+
+          echo "=== fail-closed: --seccomp /tmp/no-such-profile.json → expect EXIT NON-ZERO (never run unfiltered) ==="
+          "$BIN" run --engine ns --seccomp /tmp/no-such-profile.json --rootfs alpine-aa -- /bin/true >/tmp/sc_fc.txt 2>&1
+          SC_FC_EXIT=$?; echo "sc_fc_exit=$SC_FC_EXIT"; tail -3 /tmp/sc_fc.txt
+
+          # ── GATE (no false-green; the differential asserts the FILTER bit) ────────
+          FAIL=0
+          [ "$SC_CTL_EXIT" = 0 ]  || { echo "FAIL: control mkdir WITHOUT --seccomp failed (exit $SC_CTL_EXIT) — baseline wrong"; FAIL=1; }
+          grep -q MKDIR_OK /tmp/sc_ctl.txt || { echo "FAIL: control mkdir produced no MKDIR_OK proof"; FAIL=1; }
+          [ "$SC_ENF_EXIT" != 0 ] || { echo "FAIL: --seccomp did NOT block mkdir (filter NOT enforced — FALSE SECURITY)"; FAIL=1; }
+          grep -q MKDIR_OK /tmp/sc_enf.txt && { echo "FAIL: enforced run still mkdir'd (filter bit not applied)"; FAIL=1; }
+          [ "$SC_FC_EXIT" != 0 ]  || { echo "FAIL: an unloadable --seccomp profile ran anyway (NOT fail-closed — ran unfiltered)"; FAIL=1; }
+          if [ "$FAIL" = 0 ]; then echo "SECCOMP=PASS"; else echo "SECCOMP=FAIL"; exit 1; fi  # gate for real
+
   cri-serve-smoke:
     # WP-#98: prove the COMPOSED CRI server (the REAL LightrBackend wired into the
     # sibling lightr-cri shell via crates/lightr-cri-serve) BUILDS and ANSWERS

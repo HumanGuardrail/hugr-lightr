@@ -189,6 +189,8 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         exec_ready_fd: None,
                         // WP-#106: vz LSM lives in the guest; no ns aa_change_onexec.
                         apparmor: None,
+                        // WP-#108: vz seccomp lives in the guest; no ns filter install.
+                        seccomp: None,
                         // WP-#107: no CRI volume mounts / DNS / hostname here.
                         bind_mounts: &[],
                         resolv_conf: None,

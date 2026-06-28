@@ -202,6 +202,8 @@ mod tests {
             exec_ready_fd: None,
             // WP-#106: no AppArmor profile (native engine test). None.
             apparmor: None,
+            // WP-#108: no seccomp profile (native engine test). None.
+            seccomp: None,
             // WP-#107: no CRI volume mounts / DNS / hostname (native engine test).
             bind_mounts: &[],
             resolv_conf: None,
@@ -248,6 +250,8 @@ mod tests {
             exec_ready_fd: None,
             // WP-#106: no AppArmor profile (native engine test). None.
             apparmor: None,
+            // WP-#108: no seccomp profile (native engine test). None.
+            seccomp: None,
             // WP-#107: no CRI volume mounts / DNS / hostname (native engine test).
             bind_mounts: &[],
             resolv_conf: None,
@@ -291,6 +295,8 @@ mod tests {
             exec_ready_fd: None,
             // WP-#106: no AppArmor profile (native engine test). None.
             apparmor: None,
+            // WP-#108: no seccomp profile (native engine test). None.
+            seccomp: None,
             // WP-#107: no CRI volume mounts / DNS / hostname (native engine test).
             bind_mounts: &[],
             resolv_conf: None,
