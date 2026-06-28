@@ -696,8 +696,11 @@ jobs:
           "$BIN" run --engine ns --add-host myhost.local:10.9.8.7 --rootfs alpine-aa -- /bin/busybox sh -c 'grep myhost.local /etc/hosts' >/tmp/ah.txt 2>&1
           AH_EXIT=$?; echo "ah_exit=$AH_EXIT"; tail -3 /tmp/ah.txt
 
-          echo "=== --add-host preserves the image's default 127.0.0.1 localhost (APPEND, not truncate) ==="
-          "$BIN" run --engine ns --add-host myhost.local:10.9.8.7 --rootfs alpine-aa -- /bin/busybox sh -c 'grep -c localhost /etc/hosts' >/tmp/ah2.txt 2>&1
+          echo "=== --add-host accumulates MULTIPLE entries (append loop, base-independent) ==="
+          # Two --add-host entries must BOTH land (proves the append loop, without
+          # assuming anything about the base image's /etc/hosts — alpine ships none).
+          # The hermetic append-vs-truncate proof lives in ns.rs hosts_tests.
+          "$BIN" run --engine ns --add-host a.local:1.1.1.1 --add-host b.local:2.2.2.2 --rootfs alpine-aa -- /bin/busybox sh -c 'grep -c "\.local" /etc/hosts' >/tmp/ah2.txt 2>&1
           AH2_EXIT=$?; echo "ah2_exit=$AH2_EXIT"; tail -1 /tmp/ah2.txt
 
           echo "=== --tmpfs /scratch: write a file + confirm /scratch is a tmpfs in /proc/mounts ==="
@@ -712,8 +715,8 @@ jobs:
           FAIL=0
           [ "$AH_EXIT" = 0 ] || { echo "FAIL: --add-host entry not found in /etc/hosts (exit $AH_EXIT)"; FAIL=1; }
           grep -q "10.9.8.7" /tmp/ah.txt || { echo "FAIL: /etc/hosts line missing the IP 10.9.8.7"; FAIL=1; }
-          # APPEND (not truncate): the image's default localhost line must survive.
-          [ "$AH2_EXIT" = 0 ] && [ "$(tail -1 /tmp/ah2.txt)" -ge 1 ] 2>/dev/null || { echo "FAIL: --add-host clobbered the image /etc/hosts (no localhost line left)"; FAIL=1; }
+          # Multiple --add-host entries must BOTH be present (append loop accumulates).
+          [ "$AH2_EXIT" = 0 ] && [ "$(tail -1 /tmp/ah2.txt)" = 2 ] || { echo "FAIL: --add-host did not write both entries (got '$(tail -1 /tmp/ah2.txt)' .local lines, want 2)"; FAIL=1; }
           [ "$TF_EXIT" = 0 ] || { echo "FAIL: --tmpfs write/mount check failed (exit $TF_EXIT)"; FAIL=1; }
           grep -q "^hi$" /tmp/tf.txt || { echo "FAIL: --tmpfs target was not writable (no 'hi' read back)"; FAIL=1; }
           grep -q " /scratch tmpfs" /tmp/tf.txt || { echo "FAIL: /scratch is not a tmpfs in /proc/mounts (mount did not happen)"; FAIL=1; }
