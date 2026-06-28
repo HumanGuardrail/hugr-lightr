@@ -224,6 +224,21 @@ pub struct ExecSpec<'a> {
     /// NEVER a memo key (like `read_only`/`cap_drop`/`cap_add`). Default None.
     pub apparmor: Option<&'a str>,
 
+    /// WP-#108 (seccomp): the PATH to an OCI seccomp JSON profile to enforce on the
+    /// workload, or `"unconfined"` to run explicitly without a seccomp filter. ONLY
+    /// the `ns` engine honors it: EARLY (in PID 1, before `pivot_root`, while the
+    /// host profile path is still visible) it compiles the profile to a classic-BPF
+    /// program; LATE (after the AppArmor apply, right before the workload `execv`) it
+    /// installs the filter via `seccomp(2)`/`prctl(PR_SET_SECCOMP)` (NO_NEW_PRIVS
+    /// first). `Some("<path>")` ⇒ compile+install; `Some("unconfined")` ⇒ no filter
+    /// (explicit); `None` ⇒ no change (unchanged behavior). FAIL-CLOSED: if the
+    /// profile cannot be read/parsed/compiled (EARLY) or installed (LATE) the run
+    /// aborts non-zero — it NEVER execs unfiltered when a profile was requested (the
+    /// same discipline as #106 AppArmor). native/vz IGNORE it (native is no sandbox —
+    /// honest-errored at the handler; vz's seccomp lives inside the guest).
+    /// RUNTIME-ONLY — NEVER a memo key. Default None.
+    pub seccomp: Option<&'a str>,
+
     /// WP-#107 (CRI GAP 1): CRI volume mounts (`ContainerConfig.mounts`) to
     /// bind-mount into the container before exec. ONLY the `ns` engine honors them:
     /// in PID 1, AFTER pivot_root + the /dev/proc/shm setup and BEFORE the workload

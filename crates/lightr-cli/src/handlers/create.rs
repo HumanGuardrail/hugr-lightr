@@ -86,6 +86,7 @@ pub fn run(a: RunArgs, json: bool) -> i32 {
         pids_limit: a.pids_limit,
         shm_size: a.shm_size,
         apparmor: a.apparmor,
+        seccomp: a.seccomp,
     })
     .resolve()
     {
@@ -100,6 +101,18 @@ pub fn run(a: RunArgs, json: bool) -> i32 {
         eprintln!(
             "lightr: --apparmor is enforced only on the rootless ns engine \
              (`lightr run --engine ns --apparmor <profile>`); create is native-only \
+             — refusing to run rather than give false security"
+        );
+        return 2;
+    }
+
+    // WP-#108: seccomp (cBPF filter install) is an `ns`-engine feature; `create` is
+    // native-only (the supervisor it later starts is a host process). Honest-error
+    // (exit 2) rather than silently record a security flag that won't be enforced.
+    if rc.seccomp.is_some() {
+        eprintln!(
+            "lightr: --seccomp is enforced only on the rootless ns engine \
+             (`lightr run --engine ns --seccomp <path>`); create is native-only \
              — refusing to run rather than give false security"
         );
         return 2;

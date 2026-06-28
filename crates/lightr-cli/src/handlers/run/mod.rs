@@ -190,6 +190,20 @@ pub fn run(
         return 2;
     }
 
+    // WP-#108: `--seccomp` is REAL only on the `ns` engine (it compiles the OCI
+    // profile to cBPF and installs it via seccomp(2)/prctl right before exec). For
+    // any OTHER engine it is HONEST-ERRORED (exit 2) BEFORE provisioning — native is
+    // no sandbox by design, and vz's seccomp lives inside the guest (not managed by
+    // this shim). A silent no-op on a security flag would give false security.
+    if engine_kind != EngineKind::Ns && rc.seccomp.is_some() {
+        eprintln!(
+            "lightr: --seccomp (seccomp-bpf enforcement) is implemented only on the \
+             rootless ns engine (--engine ns); native is no sandbox and vz seccomp lives \
+             inside the guest — refusing to run rather than give false security"
+        );
+        return 2;
+    }
+
     // WP-#95: `--init` is ENFORCED on the `ns` engine (real PID-1 reaper). On any
     // OTHER engine it is a recorded-only carry-slot (native is a host process with no
     // pid namespace; vz reaps via its own guest PID 1) — say so honestly rather than
@@ -457,6 +471,10 @@ pub fn run(
             // as the last pre-execv step). native/vz never get here with it set — the
             // engine-aware guard above honest-errors them first. RUNTIME-ONLY.
             rc.apparmor.as_deref(),
+            // WP-#108: `--seccomp` reaches the ns engine (cBPF filter install, applied
+            // right before exec after apparmor). native/vz never get here with it set —
+            // the engine-aware guard above honest-errors them first. RUNTIME-ONLY.
+            rc.seccomp.as_deref(),
         );
     }
 

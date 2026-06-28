@@ -233,6 +233,25 @@ impl LightrBackend {
                 crate::vocab::ProfileType::RuntimeDefault => None,
             });
 
+        // WP-#108 (seccomp): mirror the apparmor mapping above — `rec.config.security`
+        // is usually `None` today (the cross-repo seam mapping the kubelet's proto
+        // seccomp profile into this field is not landed), so this is `None` and the
+        // start path is byte-identical to before. The mapping:
+        //   Localhost      ⇒ the profile PATH (`localhost_ref`)
+        //   Unconfined     ⇒ "unconfined" (explicitly run without a filter)
+        //   RuntimeDefault ⇒ None (inherit for now — a named runtime-default profile
+        //                    is a future choice; documented, not yet wired)
+        let seccomp: Option<String> = rec
+            .config
+            .security
+            .as_ref()
+            .and_then(|s| s.seccomp.as_ref())
+            .and_then(|p| match p.profile_type {
+                crate::vocab::ProfileType::Localhost => Some(p.localhost_ref.clone()),
+                crate::vocab::ProfileType::Unconfined => Some("unconfined".to_string()),
+                crate::vocab::ProfileType::RuntimeDefault => None,
+            });
+
         // WP-#107 (CRI GAP 1, "starting container with volume" + symlink-host-path):
         // map the CRI `ContainerConfig.mounts` to the descriptor. Resolve `host_path`
         // HOST-SIDE here (the symlink-host-path spec creates a symlink to the real
@@ -294,6 +313,10 @@ impl LightrBackend {
             // the kubelet profile into rec.config.security). The ns engine applies it
             // via aa_change_onexec right before the container's execv (fail-closed).
             apparmor,
+            // WP-#108: ready-but-inert seccomp profile (None until the seam maps the
+            // kubelet profile into rec.config.security). The ns engine compiles it
+            // before pivot and installs the cBPF filter right before execv (fail-closed).
+            seccomp,
             // WP-#107 (CRI GAP 1/2/3): the volume bind mounts (host-side realpath'd),
             // the synthesized /etc/resolv.conf, and the sandbox hostname. The ns engine
             // applies them in PID 1 (mounts + resolv.conf + hostname/UTS), fail-closed.

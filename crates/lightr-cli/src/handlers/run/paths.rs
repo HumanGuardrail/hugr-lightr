@@ -87,6 +87,10 @@ pub(super) fn run_engine(
     // via aa_change_onexec as the last step before exec (fail-closed). native/vz are
     // honest-errored at the handler, so this arrives `None` there. RUNTIME-ONLY.
     apparmor: Option<&str>,
+    // WP-#108: `--seccomp <path>` ⇒ the ns engine compiles the OCI profile to cBPF
+    // (before pivot) and installs it right before exec (fail-closed). native/vz are
+    // honest-errored at the handler, so this arrives `None` there. RUNTIME-ONLY.
+    seccomp: Option<&str>,
 ) -> i32 {
     // Hydrate rootfs ref into a temp dir if provided
     let rootfs_tmp: Option<tempfile::TempDir>;
@@ -186,6 +190,10 @@ pub(super) fn run_engine(
         // that enforces it; native/vz are honest-errored at the handler). Applied via
         // aa_change_onexec as the last step before exec. RUNTIME-ONLY; never keyed.
         apparmor,
+        // WP-#108: `--seccomp <path>` reaches the ns engine here (the only engine that
+        // enforces it; native/vz are honest-errored at the handler). Compiled before
+        // pivot, installed right before exec. RUNTIME-ONLY; never keyed.
+        seccomp,
         // WP-#107: CRI volume mounts / DNS resolv.conf / hostname are CRI-backend
         // concerns (built in build_ns_plan from the sandbox/container config). The
         // CLI `lightr run` path never sets them — defaults preserve today's behaviour.

@@ -5,6 +5,10 @@ pub mod kind;
 pub mod native;
 pub mod ns;
 pub mod probe;
+// WP-#108 (seccomp): OCI seccomp profile → cBPF compiler + apply, consumed by the
+// `ns` engine (PID 1). Linux-only (the whole module is `#![cfg(target_os = "linux")]`).
+#[cfg(target_os = "linux")]
+pub(crate) mod seccomp;
 pub mod spec;
 pub mod vz;
 pub mod wsl;

@@ -146,6 +146,10 @@ pub struct RawRcFlags {
     /// "unconfined") to exec the container under. ns-engine only (honest-errored
     /// elsewhere). RUNTIME-ONLY.
     pub apparmor: Option<String>,
+    /// WP-#108: `--seccomp <path>` — the PATH to an OCI seccomp JSON profile (or
+    /// "unconfined") to enforce on the container. ns-engine only (honest-errored
+    /// elsewhere). RUNTIME-ONLY.
+    pub seccomp: Option<String>,
 }
 
 /// The resolved WP-RC-FLAGS config: `--label` parsed to `(key,value)` pairs and
@@ -168,6 +172,10 @@ pub struct RcConfig {
     /// is a free string; "unconfined" is the only special token, handled by the ns
     /// engine). ns-engine only. RUNTIME-ONLY.
     pub apparmor: Option<String>,
+    /// WP-#108: `--seccomp <path>` — passes through unparsed (a profile PATH;
+    /// "unconfined" is the only special token, handled by the ns engine, which
+    /// compiles the file before exec). ns-engine only. RUNTIME-ONLY.
+    pub seccomp: Option<String>,
 }
 
 impl RawRcFlags {
@@ -197,6 +205,7 @@ impl RawRcFlags {
             pids_limit: self.pids_limit,
             shm_size,
             apparmor: self.apparmor,
+            seccomp: self.seccomp,
         })
     }
 }

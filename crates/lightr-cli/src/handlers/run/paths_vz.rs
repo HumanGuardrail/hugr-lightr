@@ -100,6 +100,8 @@ pub(crate) fn run_vz_memo(
             exec_ready_fd: None,
             // WP-#106: vz LSM lives inside the guest; no ns aa_change_onexec. None.
             apparmor: None,
+            // WP-#108: vz seccomp lives inside the guest; no ns filter install. None.
+            seccomp: None,
             // WP-#107: no CRI volume mounts / DNS / hostname here.
             bind_mounts: &[],
             resolv_conf: None,
