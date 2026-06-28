@@ -64,6 +64,29 @@ pub struct BindMount {
     pub readonly: bool,
 }
 
+// ── tmpfs mount (--tmpfs) ───────────────────────────────────────────────────
+//
+// One `--tmpfs` request AFTER parsing. The `ns` engine mounts a fresh tmpfs at
+// `<rootfs>/<target>` (mirrors the /dev/shm sized-tmpfs mount). `size` is an
+// optional byte cap (`None` ⇒ the kernel default, half of RAM); `mode` is the
+// octal permission string applied to the mount root (Docker defaults to `1777`,
+// the sticky-world-writable mode of a scratch dir). DISTINCT from `ResolvedMount`
+// (the full Docker `-v` volume model) — this is the minimal tmpfs carry-slot the
+// `ns` engine honors, mirroring `BindMount`. RUNTIME-ONLY (never a memo key).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TmpfsMount {
+    /// In-container destination (absolute, e.g. `/scratch`). The `ns` engine
+    /// `mkdir -p`s `<rootfs>/<target>` then mounts a tmpfs onto it.
+    pub target: String,
+    /// Optional size cap in BYTES (`size=` mount option). `None` ⇒ no `size=`
+    /// option (kernel default ≈ half of RAM, like Docker's `--tmpfs DST` with
+    /// no size).
+    pub size: Option<u64>,
+    /// Permission mode for the tmpfs root, as an OCTAL string without leading
+    /// `0` (e.g. `"1777"`). Docker defaults to `1777`.
+    pub mode: String,
+}
+
 // ── ExecSpec ──────────────────────────────────────────────────────────────────
 
 pub struct ExecSpec<'a> {
@@ -258,4 +281,16 @@ pub struct ExecSpec<'a> {
     /// resolv.conf untouched (no DNS config on the sandbox). native/vz ignore it.
     /// RUNTIME-ONLY — NEVER a memo key. Default None ⇒ unchanged behavior.
     pub resolv_conf: Option<&'a str>,
+
+    /// `--tmpfs` (Docker parity): tmpfs mounts to set up inside the container.
+    /// ONLY the `ns` engine honors them: in PID 1, AFTER pivot_root + the
+    /// /dev/proc/shm setup and BEFORE the rootfs read-only remount, for each entry
+    /// it `mkdir -p`s `<target>` under the new root and mounts a fresh tmpfs onto it
+    /// (`MS_NOSUID|MS_NODEV`, with `size=`/`mode=` options — exec is ALLOWED, matching
+    /// Docker's `--tmpfs` default of `nosuid,nodev`). FAIL-CLOSED: a requested tmpfs
+    /// that cannot be mounted aborts the run (a silently dropped mount would be a
+    /// parity lie). native/vz are honest-errored at the handler (native has no
+    /// rootfs; vz mounts live inside the guest). RUNTIME-ONLY — NEVER a memo key.
+    /// Default `&[]` ⇒ byte-identical to the pre-feature path.
+    pub tmpfs: &'a [TmpfsMount],
 }

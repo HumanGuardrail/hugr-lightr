@@ -105,6 +105,7 @@ pub(crate) fn run_vz_memo(
             // WP-#107: no CRI volume mounts / DNS / hostname here.
             bind_mounts: &[],
             resolv_conf: None,
+            tmpfs: &[],
         };
         // Suppress the guest CONSOLE (boot log + exit marker) from the host's
         // stdout on a memo MISS: real stdout/stderr come from the capture files

@@ -35,28 +35,44 @@ pub(super) fn publish_all_policy_error(
 }
 
 /// WP-NET3: the vz container-networking flags (`--network`/`--network-alias`/
-/// `--add-host`/`--dns`) are honored ONLY on the `--engine vz --rootfs <img>`
-/// path — that is where a per-container mesh NIC + guest `/etc/hosts`/resolv.conf
-/// exist. The native engine SHARES the host network (no per-container netns) and
-/// has no container rootfs to write, so any networking flag on native (or vz
-/// without a rootfs) is an honest exit 2, never a silent drop. Guarded BEFORE any
-/// provisioning, because only the handler has the engine + rootfs. Returns
-/// `Some(2)` for a bad combo, `None` when valid (no networking flag, or vz+rootfs).
+/// `--dns`) are honored ONLY on the `--engine vz --rootfs <img>` path — that is
+/// where a per-container mesh NIC + guest resolv.conf exist. The native engine
+/// SHARES the host network (no per-container netns) and has no container rootfs to
+/// write, so any of those flags on native (or vz without a rootfs) is an honest
+/// exit 2, never a silent drop.
+///
+/// `--add-host` is the EXCEPTION: it now does REAL work on the `ns` engine (PID 1
+/// appends `(ip, hostname)` lines to the container's /etc/hosts before pivot), so
+/// it is split OUT of the vz-only set and ALLOWED on `--engine ns`. native still
+/// rejects it (no container rootfs to write /etc/hosts into reliably). Guarded
+/// BEFORE any provisioning, because only the handler has the engine + rootfs.
+/// Returns `Some(2)` for a bad combo, `None` when valid.
 pub(super) fn network_flags_policy_error(
     runflags: &super::runflags::RunFlags,
     engine: EngineKind,
     rootfs_ref: Option<&str>,
 ) -> Option<i32> {
-    let net_flag = runflags.network.is_some()
-        || !runflags.network_alias.is_empty()
-        || !runflags.add_host.is_empty()
-        || !runflags.dns.is_empty();
     let vz_container = engine == EngineKind::Vz && rootfs_ref.is_some();
-    if net_flag && !vz_container {
+    // `--network`/`--network-alias`/`--dns` stay vz+rootfs-only.
+    let vz_only_flag = runflags.network.is_some()
+        || !runflags.network_alias.is_empty()
+        || !runflags.dns.is_empty();
+    if vz_only_flag && !vz_container {
         eprintln!(
-            "lightr: --network/--network-alias/--add-host/--dns require --engine vz \
+            "lightr: --network/--network-alias/--dns require --engine vz \
              --rootfs <img> (the native engine shares the host network — no per-container \
              netns or rootfs)"
+        );
+        return Some(2);
+    }
+    // `--add-host` is honored on vz (guest /etc/hosts) AND on the ns engine (the
+    // container rootfs /etc/hosts written in PID 1). It is rejected only where there
+    // is no container rootfs to write into — native (and vz without a rootfs).
+    if !runflags.add_host.is_empty() && !vz_container && engine != EngineKind::Ns {
+        eprintln!(
+            "lightr: --add-host requires --engine ns or --engine vz --rootfs <img> \
+             (it writes the container's /etc/hosts; the native engine has no container \
+             rootfs to write)"
         );
         return Some(2);
     }

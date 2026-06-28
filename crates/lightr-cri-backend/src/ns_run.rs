@@ -232,6 +232,8 @@ pub fn run_shim() -> ! {
         // WP-#107 (CRI GAP 2): the synthesized /etc/resolv.conf content. The ns
         // engine writes it into the rootfs before pivot. `None` ⇒ image untouched.
         resolv_conf: desc.resolv_conf.as_deref(),
+        // `--tmpfs` is a Docker-run flag; the CRI path has no tmpfs source today.
+        tmpfs: &[],
     };
 
     match engine.run(&spec) {
