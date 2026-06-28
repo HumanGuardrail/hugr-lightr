@@ -129,6 +129,7 @@ fn desired_caps(
 mod ns_impl {
     use super::super::seccomp;
     use super::super::spec::{BindMount, TmpfsMount, Ulimit};
+    use super::super::subid;
     use super::{desired_caps, Engine, ExecSpec, CAP_LAST_CAP};
     use lightr_core::{LightrError, Result};
     use std::ffi::CString;
@@ -225,6 +226,51 @@ mod ns_impl {
             // pre-feature path).
             let oom_score_adj: Option<i32> = spec.oom_score_adj;
 
+            // WP-#114: real non-root `--user` on the rootless ns engine. The default
+            // single-uid map ("0 <outer> 1") makes ONLY container-root exist inside, so
+            // a non-root `--user` cannot be honored (#113 fails it closed). To run a
+            // workload as a real non-root in-container uid we need a subordinate-id
+            // RANGE map — which an unprivileged process canNOT write itself; it must be
+            // written from OUTSIDE the userns by the setuid-root newuidmap/newgidmap
+            // helpers (authorized against /etc/subuid + /etc/subgid). THIS process (the
+            // shim) is that outside parent: it forks the setup child below, then maps it.
+            //
+            // We enter the RANGE path ONLY when (a) a NON-root `--user` was requested AND
+            // (b) the host actually has a subuid/subgid allocation + the helpers. If
+            // either is missing, `subid_setup` is None ⇒ the byte-identical single-uid
+            // path runs and the non-root `--user` hits the #113 honest-error (no silent
+            // root). Two one-byte pipes synchronize the dance: the child signals "userns
+            // created" on `ready`, the parent installs the maps and replies on `done`.
+            let subid_setup: Option<SubidSetup> = if wants_subid_range(user.as_deref()) {
+                plan_subid_range().and_then(|plan| {
+                    let mut ready = [0 as libc::c_int; 2];
+                    let mut done = [0 as libc::c_int; 2];
+                    if unsafe { libc::pipe(ready.as_mut_ptr()) } != 0 {
+                        return None;
+                    }
+                    if unsafe { libc::pipe(done.as_mut_ptr()) } != 0 {
+                        unsafe {
+                            libc::close(ready[0]);
+                            libc::close(ready[1]);
+                        }
+                        return None;
+                    }
+                    Some(SubidSetup {
+                        plan,
+                        ready_r: ready[0],
+                        ready_w: ready[1],
+                        done_r: done[0],
+                        done_w: done[1],
+                    })
+                })
+            } else {
+                None
+            };
+            // The CHILD-side ends (write `ready`, read `done`) passed into the setup
+            // process; `Some` ALSO tells PID 1 the target uid IS mapped (real drop).
+            let subid_sync: Option<(libc::c_int, libc::c_int)> =
+                subid_setup.as_ref().map(|s| (s.ready_w, s.done_r));
+
             // WP-#95: fork the SETUP process. NOTE (corrected from a wrong pre-#95
             // comment): this child does NOT become PID 1 — `unshare(CLONE_NEWPID)`
             // only places the unsharer's FIRST CHILD into the new pid namespace, and
@@ -240,6 +286,14 @@ mod ns_impl {
                 -1 => Err(LightrError::Io(std::io::Error::last_os_error())),
                 0 => {
                     // ── child ──────────────────────────────────────────────
+                    // WP-#114: this setup child only WRITES `ready` + READS `done`;
+                    // close the parent's ends so a parent crash can't wedge it.
+                    if let Some(s) = subid_setup.as_ref() {
+                        unsafe {
+                            libc::close(s.ready_r);
+                            libc::close(s.done_w);
+                        }
+                    }
                     let rc = run_in_namespaces(
                         &rootfs_path,
                         &cwd_str,
@@ -265,6 +319,7 @@ mod ns_impl {
                         &tmpfs,
                         &ulimits,
                         oom_score_adj,
+                        subid_sync,
                     );
                     std::process::exit(rc);
                 }
@@ -277,6 +332,22 @@ mod ns_impl {
                     // Close BEFORE waitpid (which blocks for the container's life).
                     if let Some(fd) = exec_ready_fd {
                         unsafe { libc::close(fd) };
+                    }
+                    // WP-#114: the newuidmap/newgidmap RANGE dance. The setup child has
+                    // unshared its userns; as the OUTSIDE parent we install a subuid
+                    // RANGE map on it via the setuid-root helpers, then release it. Runs
+                    // BEFORE waitpid (which blocks for the container's life). Closes the
+                    // child's pipe ends first (we only read `ready` + write `done`); the
+                    // dance closes its own ends. On failure it still replies on `done`
+                    // (status byte) so the child never wedges — the child then fails
+                    // closed (signals the exec pipe + exits), so the backend sees an
+                    // error, never a false `Running`.
+                    if let Some(s) = subid_setup.as_ref() {
+                        unsafe {
+                            libc::close(s.ready_w);
+                            libc::close(s.done_r);
+                        }
+                        run_parent_subid_dance(child_pid, &s.plan, s.ready_r, s.done_w);
                     }
                     let mut wstatus: libc::c_int = 0;
                     let r = unsafe { libc::waitpid(child_pid, &mut wstatus, 0) };
@@ -346,6 +417,13 @@ mod ns_impl {
         // `--oom-score-adj`: written to /proc/self/oom_score_adj in PID 1, EARLY
         // (alongside the ulimits apply). `None` ⇒ the pre-feature path is unchanged.
         oom_score_adj: Option<i32>,
+        // WP-#114: the CHILD-side ends `(ready_w, done_r)` of the subuid RANGE-map
+        // handshake. `Some` ⇒ a real non-root `--user` with subid support: skip the
+        // single-uid self-map, signal "userns created" on `ready_w`, wait for the
+        // outside parent's newuidmap/newgidmap on `done_r`, and (in PID 1) do a REAL
+        // privilege drop (the target uid IS mapped). `None` ⇒ the byte-identical
+        // single-uid path (root no-op / non-root #113 honest-error).
+        subid_sync: Option<(libc::c_int, libc::c_int)>,
     ) -> i32 {
         // WP-#99: JOIN the pod's existing netns BEFORE `unshare(CLONE_NEWUSER)`.
         // THE ordering rule: we must `setns(CLONE_NEWNET)` while still real root in
@@ -399,13 +477,57 @@ mod ns_impl {
             return 1;
         }
 
-        // Map uid 0 inside → real outer uid (captured above)
-        if write_map("/proc/self/uid_map", &format!("0 {} 1\n", uid)).is_err()
-            || write_map("/proc/self/setgroups", "deny\n").is_err()
-            || write_map("/proc/self/gid_map", &format!("0 {} 1\n", gid)).is_err()
-        {
-            eprintln!("lightr-engine ns: uid/gid map failed");
-            return 1;
+        // Map the new userns. Two strategies (WP-#114):
+        //  • DEFAULT (single-uid): write our OWN single-id map "0 <outer> 1" + setgroups
+        //    deny + gid_map — only container-root exists inside (byte-identical to the
+        //    pre-#114 path).
+        //  • RANGE (subid_sync = Some): a real non-root `--user` was requested AND the
+        //    host has /etc/subuid + the newuidmap helpers. We canNOT write a range map
+        //    ourselves (the kernel only allows the single self-map), so the OUTSIDE
+        //    parent installs it via newuidmap/newgidmap. Signal "userns created", wait
+        //    for the parent, then continue. We deliberately do NOT write setgroups=deny
+        //    here — newgidmap writes gid_map WITH privilege, leaving setgroups usable so
+        //    PID 1 can drop supplementary groups on the `--user` switch.
+        match subid_sync {
+            None => {
+                if write_map("/proc/self/uid_map", &format!("0 {} 1\n", uid)).is_err()
+                    || write_map("/proc/self/setgroups", "deny\n").is_err()
+                    || write_map("/proc/self/gid_map", &format!("0 {} 1\n", gid)).is_err()
+                {
+                    eprintln!("lightr-engine ns: uid/gid map failed");
+                    return 1;
+                }
+            }
+            Some((ready_w, done_r)) => {
+                let one = [1u8; 1];
+                if unsafe { libc::write(ready_w, one.as_ptr() as *const libc::c_void, 1) } != 1 {
+                    eprintln!("lightr-engine ns: subid handshake (signal) failed");
+                    unsafe {
+                        libc::close(ready_w);
+                        libc::close(done_r);
+                    }
+                    signal_setup_failed(exec_ready_fd, "subid: handshake signal failed");
+                    return 1;
+                }
+                unsafe { libc::close(ready_w) };
+                let mut status = [0u8; 1];
+                let n = unsafe {
+                    libc::read(done_r, status.as_mut_ptr() as *mut libc::c_void, 1)
+                };
+                unsafe { libc::close(done_r) };
+                if n != 1 || status[0] != 0 {
+                    eprintln!(
+                        "lightr-engine ns: subid RANGE mapping failed (newuidmap/newgidmap) \
+                         — cannot run as the requested non-root user"
+                    );
+                    signal_setup_failed(
+                        exec_ready_fd,
+                        "subid: range mapping failed (newuidmap/newgidmap)",
+                    );
+                    return 1;
+                }
+                // Maps installed by the parent; the captured `uid`/`gid` are unused here.
+            }
         }
 
         // F-203 (#90): apply cgroup v2 caps (memory.max / cpu.max / pids.max) HERE
@@ -868,7 +990,7 @@ mod ns_impl {
                     // still hold CAP_SETUID/SETGID and before any filter could block the
                     // setuid syscalls. `execve` then naturally clears caps for the now
                     // non-root process. Fail-closed. `None` ⇒ no-op.
-                    apply_user_if_any(user, exec_ready_fd);
+                    apply_user_if_any(user, exec_ready_fd, subid_sync.is_some());
                     // WP-#108: install the (pre-compiled) seccomp filter LAST — after
                     // apparmor, right before execv. Fail-closed: an install failure
                     // `_exit`s rather than exec unfiltered. `None` (no profile /
@@ -915,7 +1037,7 @@ mod ns_impl {
                 // hold CAP_SETUID/SETGID and before any filter could block the setuid
                 // syscalls. `execve` then naturally clears caps for the now non-root
                 // process. Fail-closed. `None` ⇒ no-op.
-                apply_user_if_any(user, exec_ready_fd);
+                apply_user_if_any(user, exec_ready_fd, subid_sync.is_some());
                 // WP-#108: install the (pre-compiled) seccomp filter LAST — after
                 // apparmor, right before execv. Fail-closed: an install failure
                 // `_exit`s rather than exec unfiltered. `None` (no profile /
@@ -1106,7 +1228,7 @@ mod ns_impl {
     /// EOF ⇒ a false `Running`) and `_exit(1)`s rather than exec with the WRONG identity
     /// (running the workload as root when a non-root user was requested is a SECURITY
     /// bug, worse than an error).
-    fn apply_user_if_any(user: Option<&str>, exec_ready_fd: Option<libc::c_int>) {
+    fn apply_user_if_any(user: Option<&str>, exec_ready_fd: Option<libc::c_int>, use_range: bool) {
         let spec = match user {
             None => return,
             Some(s) => s,
@@ -1119,6 +1241,36 @@ mod ns_impl {
                 unsafe { libc::_exit(1) };
             }
         };
+        // WP-#114: RANGE path — the outside parent installed a subuid RANGE map, so the
+        // target uid/gid IS mapped. Drop privilege FOR REAL: setgroups([gid]) → setgid
+        // → setuid (the canonical order: shed supplementary groups + gid while still
+        // privileged, then uid last). Fail-closed at EVERY step — exec'ing with the
+        // WRONG identity (e.g. still-root when a non-root user was asked for) is a
+        // security bug, worse than an error. `setgroups` is usable because the range
+        // path never wrote setgroups=deny (newgidmap wrote gid_map with privilege).
+        // This also covers a root target on the range path (the calls are no-ops).
+        if use_range {
+            let groups = [gid as libc::gid_t];
+            if unsafe { libc::setgroups(1, groups.as_ptr()) } != 0 {
+                let e = std::io::Error::last_os_error();
+                eprintln!("lightr-engine ns: --user: setgroups([{gid}]) failed: {e}");
+                signal_setup_failed(exec_ready_fd, "--user: setgroups failed");
+                unsafe { libc::_exit(1) };
+            }
+            if unsafe { libc::setgid(gid as libc::gid_t) } != 0 {
+                let e = std::io::Error::last_os_error();
+                eprintln!("lightr-engine ns: --user: setgid({gid}) failed: {e}");
+                signal_setup_failed(exec_ready_fd, "--user: setgid failed");
+                unsafe { libc::_exit(1) };
+            }
+            if unsafe { libc::setuid(uid as libc::uid_t) } != 0 {
+                let e = std::io::Error::last_os_error();
+                eprintln!("lightr-engine ns: --user: setuid({uid}) failed: {e}");
+                signal_setup_failed(exec_ready_fd, "--user: setuid failed");
+                unsafe { libc::_exit(1) };
+            }
+            return;
+        }
         // v1 SCOPE (honest boundary): the ns userns uses a SINGLE-uid map
         // (`"0 <outer> 1"`) with `setgroups=deny` (see the uid_map/gid_map writes
         // above), so the ONLY identity that exists inside the container is
@@ -1241,6 +1393,143 @@ mod ns_impl {
             }
         }
         Ok(None)
+    }
+
+    // ── WP-#114: rootless subuid RANGE mapping (real non-root `--user`) ───────────
+
+    /// Everything the OUTSIDE parent (the shim) needs to map a subuid RANGE onto the
+    /// setup child via the setuid-root helpers. Computed pre-fork; `None` ⇒ no range
+    /// (the single-uid path runs).
+    struct SubidPlan {
+        host_uid: u32,
+        host_gid: u32,
+        uid_range: subid::SubIdRange,
+        gid_range: subid::SubIdRange,
+        newuidmap: std::path::PathBuf,
+        newgidmap: std::path::PathBuf,
+    }
+
+    /// The two one-byte sync pipes for the dance, plus the plan. `ready_*` carries the
+    /// child's "userns created" signal (child WRITES, parent READS); `done_*` carries
+    /// the parent's "maps installed (0) / failed (1)" reply (parent WRITES, child READS).
+    struct SubidSetup {
+        plan: SubidPlan,
+        ready_r: libc::c_int,
+        ready_w: libc::c_int,
+        done_r: libc::c_int,
+        done_w: libc::c_int,
+    }
+
+    /// Does this `--user` spec ask for a NON-root identity (so it needs a subuid
+    /// RANGE)? Syntactic — names other than `root` are assumed non-root (a name that
+    /// resolves to root still works on the range path, the drop is just a no-op). The
+    /// root forms (`0` / `root`, with an absent or root gid) stay on the byte-identical
+    /// single-uid path. A non-root gid alone (`0:5`) also needs the range.
+    fn wants_subid_range(user: Option<&str>) -> bool {
+        let s = match user {
+            None => return false,
+            Some(s) => s,
+        };
+        let (u, g) = match s.split_once(':') {
+            Some((u, g)) => (u, Some(g)),
+            None => (s, None),
+        };
+        let is_root = |p: &str| p == "0" || p == "root";
+        let uid_root = is_root(u);
+        // Absent gid follows the uid (numeric uid ⇒ gid 0; `root` ⇒ gid 0) ⇒ root iff
+        // the uid is root. An explicit gid is judged on its own.
+        let gid_root = match g {
+            None => uid_root,
+            Some(g) => is_root(g),
+        };
+        !(uid_root && gid_root)
+    }
+
+    /// Build the RANGE plan: the host uid/gid, their /etc/subuid + /etc/subgid
+    /// allocations, and the newuidmap/newgidmap helper paths. `None` if ANYTHING is
+    /// missing (no allocation, helpers not installed) ⇒ the caller falls back to the
+    /// single-uid path, where a non-root `--user` hits the #113 honest-error (no
+    /// silent root). Pure lookups (getuid/getpwuid + file reads); pre-fork.
+    fn plan_subid_range() -> Option<SubidPlan> {
+        let host_uid = unsafe { libc::getuid() } as u32;
+        let host_gid = unsafe { libc::getgid() } as u32;
+        let uname = host_username(host_uid)?;
+        let uid_range = subid::lookup_subid("/etc/subuid", &uname, host_uid)?;
+        let gid_range = subid::lookup_subid("/etc/subgid", &uname, host_gid)?;
+        let newuidmap = subid::find_helper("newuidmap")?;
+        let newgidmap = subid::find_helper("newgidmap")?;
+        Some(SubidPlan {
+            host_uid,
+            host_gid,
+            uid_range,
+            gid_range,
+            newuidmap,
+            newgidmap,
+        })
+    }
+
+    /// Resolve the calling uid to its login NAME via `getpwuid` (subid files are
+    /// usually keyed by name). `None` if the uid has no passwd entry.
+    fn host_username(uid: u32) -> Option<String> {
+        let pw = unsafe { libc::getpwuid(uid as libc::uid_t) };
+        if pw.is_null() {
+            return None;
+        }
+        let name = unsafe { (*pw).pw_name };
+        if name.is_null() {
+            return None;
+        }
+        unsafe { std::ffi::CStr::from_ptr(name) }
+            .to_str()
+            .ok()
+            .map(|s| s.to_string())
+    }
+
+    /// The parent side of the dance: wait for the child's "userns created" signal,
+    /// install the RANGE maps via newuidmap/newgidmap, then ALWAYS reply on `done_w`
+    /// (status 0=ok / 1=fail) so the child never wedges. Closes both fds it owns.
+    fn run_parent_subid_dance(
+        child_pid: libc::pid_t,
+        plan: &SubidPlan,
+        ready_r: libc::c_int,
+        done_w: libc::c_int,
+    ) {
+        let mut b = [0u8; 1];
+        let n = unsafe { libc::read(ready_r, b.as_mut_ptr() as *mut libc::c_void, 1) };
+        unsafe { libc::close(ready_r) };
+        let ok = if n == 1 {
+            let pid_s = child_pid.to_string();
+            run_newidmap(&plan.newuidmap, &pid_s, plan.host_uid, plan.uid_range)
+                && run_newidmap(&plan.newgidmap, &pid_s, plan.host_gid, plan.gid_range)
+        } else {
+            false
+        };
+        let status = [if ok { 0u8 } else { 1u8 }; 1];
+        unsafe {
+            libc::write(done_w, status.as_ptr() as *const libc::c_void, 1);
+            libc::close(done_w);
+        }
+    }
+
+    /// Run one helper: `newuidmap PID  0 <host_id> 1   1 <base> <count>` — i.e. map
+    /// container-root (intra 0) to the user's OWN id (always allowed, count 1), AND
+    /// container ids `1..=count` to the subordinate RANGE `base..`. Returns true on a
+    /// clean exit. The helper itself authorizes the range against /etc/sub{u,g}id.
+    fn run_newidmap(
+        helper: &std::path::Path,
+        pid_s: &str,
+        host_id: u32,
+        range: subid::SubIdRange,
+    ) -> bool {
+        use std::process::Command;
+        matches!(
+            Command::new(helper)
+                .arg(pid_s)
+                .args(["0", &host_id.to_string(), "1"])
+                .args(["1", &range.base.to_string(), &range.count.to_string()])
+                .status(),
+            Ok(s) if s.success()
+        )
     }
 
     /// WP-#106: write `exec <profile>` to the AppArmor exec attr (aa_change_onexec
