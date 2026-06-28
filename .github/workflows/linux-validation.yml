@@ -755,6 +755,26 @@ jobs:
           [ "$TFVZ_EXIT" = 2 ] || { echo "FAIL: vz --tmpfs did not honest-error with exit 2 (got $TFVZ_EXIT)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "ADDHOST_TMPFS=PASS"; else echo "ADDHOST_TMPFS=FAIL"; exit 1; fi  # gate for real
 
+      - name: "#114 PROBE: subuid/newuidmap availability on this rootless runner"
+        run: |
+          # WP-#114 feasibility gate: real non-root --user on the rootless ns engine
+          # needs a subuid RANGE map written by the setuid-root newuidmap/newgidmap
+          # helpers, which read /etc/subuid + /etc/subgid for the CALLING user. This
+          # step is a pure diagnostic (never fails the job) — it tells us empirically
+          # whether THIS runner can host (and therefore CI can prove) the feature.
+          set +e
+          echo "=== identity (rootless context) ==="; id
+          echo "=== /etc/subuid ==="; cat /etc/subuid 2>&1
+          echo "=== /etc/subgid ==="; cat /etc/subgid 2>&1
+          echo "=== helpers on PATH ==="
+          for h in newuidmap newgidmap getsubids; do printf '%s: ' "$h"; command -v "$h" || echo "MISSING"; done
+          echo "=== getsubids for runner ==="; getsubids "$(id -un)" 2>&1; getsubids -g "$(id -un)" 2>&1
+          echo "=== unprivileged userns sysctls ==="
+          for s in kernel.unprivileged_userns_clone user.max_user_namespaces kernel.apparmor_restrict_unprivileged_userns; do
+            printf '%s = ' "$s"; sysctl -n "$s" 2>&1
+          done
+          echo "#114_PROBE=DONE"
+
       - name: Prove --user is honest (root no-op runs; non-root fails closed, never silent-root) (WP-#113)
         run: |
           # WP-#113 v1: the rootless ns userns uses a SINGLE-uid map ("0 <outer> 1") +
