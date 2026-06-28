@@ -128,7 +128,7 @@ fn desired_caps(
 #[cfg(target_os = "linux")]
 mod ns_impl {
     use super::super::seccomp;
-    use super::super::spec::BindMount;
+    use super::super::spec::{BindMount, TmpfsMount};
     use super::{desired_caps, Engine, ExecSpec, CAP_LAST_CAP};
     use lightr_core::{LightrError, Result};
     use std::ffi::CString;
@@ -198,6 +198,12 @@ mod ns_impl {
             let bind_mounts: Vec<BindMount> = spec.bind_mounts.to_vec();
             let resolv_conf: Option<String> = spec.resolv_conf.map(|s| s.to_owned());
             let hostname: Option<String> = spec.hostname.map(|s| s.to_owned());
+            // `--add-host` (Docker parity): (hostname, ip) pairs appended to the
+            // container's /etc/hosts before pivot. `--tmpfs` (Docker parity): tmpfs
+            // targets mounted after the /dev/shm setup. Both captured (cloned) pre-fork
+            // like the CRI fields above so PID 1 owns its copies. Empty ⇒ unchanged.
+            let add_host: Vec<(String, String)> = spec.add_host.to_vec();
+            let tmpfs: Vec<TmpfsMount> = spec.tmpfs.to_vec();
 
             // WP-#95: fork the SETUP process. NOTE (corrected from a wrong pre-#95
             // comment): this child does NOT become PID 1 — `unshare(CLONE_NEWPID)`
@@ -234,6 +240,8 @@ mod ns_impl {
                         &bind_mounts,
                         resolv_conf.as_deref(),
                         hostname.as_deref(),
+                        &add_host,
+                        &tmpfs,
                     );
                     std::process::exit(rc);
                 }
@@ -299,6 +307,11 @@ mod ns_impl {
         bind_mounts: &[BindMount],
         resolv_conf: Option<&str>,
         hostname: Option<&str>,
+        // `--add-host`: (hostname, ip) pairs appended to <rootfs>/etc/hosts BEFORE
+        // pivot (alongside resolv.conf/hostname). `--tmpfs`: tmpfs targets mounted
+        // AFTER /dev/shm. Empty ⇒ the pre-feature path is unchanged.
+        add_host: &[(String, String)],
+        tmpfs: &[TmpfsMount],
     ) -> i32 {
         // WP-#99: JOIN the pod's existing netns BEFORE `unshare(CLONE_NEWUSER)`.
         // THE ordering rule: we must `setns(CLONE_NEWNET)` while still real root in
@@ -575,6 +588,30 @@ mod ns_impl {
                 }
             }
 
+            // 3c2. `--add-host` (Docker parity): APPEND each `(hostname, ip)` entry to
+            // <rootfs>/etc/hosts as a `"<ip>\t<hostname>"` line, BEFORE pivot_root
+            // (Docker/runc write the container's /etc/hosts host-side). APPEND — we
+            // preserve any /etc/hosts the image carried (e.g. the default
+            // `127.0.0.1 localhost`); the file (and /etc) is created if missing.
+            // Mirrors the resolv.conf/hostname writes above but uses an APPEND helper.
+            // Empty ⇒ skip (image /etc/hosts untouched). Fail-closed: a requested
+            // host mapping that cannot be written is a real error (silently dropping
+            // it would be a parity lie).
+            if !add_host.is_empty() {
+                let mut block = Vec::new();
+                for (host, ip) in add_host {
+                    block.extend_from_slice(ip.as_bytes());
+                    block.push(b'\t');
+                    block.extend_from_slice(host.as_bytes());
+                    block.push(b'\n');
+                }
+                if let Err(e) = append_rootfs_file(rootfs, "etc/hosts", &block) {
+                    eprintln!("lightr-engine ns: write /etc/hosts failed: {e}");
+                    signal_setup_failed(exec_ready_fd, "write /etc/hosts failed");
+                    unsafe { libc::_exit(1) };
+                }
+            }
+
             // 3d. WP-#107 (CRI GAP 1, "starting container with volume"): apply the CRI
             // volume bind mounts. MUST be done BEFORE pivot_root: the `host_path` is a
             // HOST path, only reachable while the host fs is still mounted — after
@@ -678,6 +715,22 @@ mod ns_impl {
                 eprintln!("lightr-engine ns: /dev/shm mount failed: {e}");
                 signal_setup_failed(exec_ready_fd, "/dev/shm mount failed"); // WP-#104
                 unsafe { libc::_exit(1) };
+            }
+
+            // `--tmpfs` (Docker parity): mount a fresh tmpfs at each requested target.
+            // Done AFTER /dev/shm and BEFORE the rootfs read-only remount, so each
+            // tmpfs is an independent submount (the NON-recursive RO remount of `/`
+            // leaves it writable — same property as /dev/shm). We are POST-pivot, so a
+            // target is `/<target>` in the new root (mirrors the bind/shm targets).
+            // `MS_NOSUID|MS_NODEV` matches Docker's `--tmpfs` default (exec ALLOWED — no
+            // MS_NOEXEC). Fail-closed: a requested tmpfs that cannot be mounted
+            // `_exit`s rather than exec without it. Empty ⇒ no-op (pre-feature path).
+            for t in tmpfs {
+                if let Err(e) = setup_tmpfs(t) {
+                    eprintln!("lightr-engine ns: tmpfs {:?} mount failed: {e}", t.target);
+                    signal_setup_failed(exec_ready_fd, "tmpfs mount failed");
+                    unsafe { libc::_exit(1) };
+                }
             }
 
             // Unmount put_old (AFTER /dev binds + the proc mount are established;
@@ -1337,6 +1390,49 @@ mod ns_impl {
         Ok(())
     }
 
+    /// `--tmpfs` (Docker parity): mount a fresh tmpfs at `t.target` (POST-pivot, so
+    /// `/<target>` in the new root). Mirrors `setup_shm`'s `libc::mount` shape: same
+    /// `MS_NOSUID|MS_NODEV` flags (exec ALLOWED — Docker's `--tmpfs` default; NO
+    /// MS_NOEXEC) and the same `mode=...,size=...` option string (size omitted when
+    /// `None` ⇒ the kernel default). `mkdir -p`s the target first (the image may lack
+    /// it). Fail-closed: any error is returned so the caller `_exit`s (a requested
+    /// tmpfs silently dropped would be a parity lie).
+    fn setup_tmpfs(t: &TmpfsMount) -> std::io::Result<()> {
+        use std::ffi::CString;
+        // Strip a leading '/' so a POST-pivot absolute target stays the in-root path
+        // when joined to "/" (an empty/relative target falls back to the verbatim
+        // value); the mount target itself is the absolute container path.
+        let target = &t.target;
+        std::fs::create_dir_all(target)?;
+        // Mode is always present (defaulted to 1777 by the CLI); size only when set.
+        let opts = match t.size {
+            Some(bytes) => format!("mode={},size={}", t.mode, bytes),
+            None => format!("mode={}", t.mode),
+        };
+        let (src, tgt, fstype, opts_c) = match (
+            CString::new("tmpfs"),
+            CString::new(target.as_bytes()),
+            CString::new("tmpfs"),
+            CString::new(opts),
+        ) {
+            (Ok(a), Ok(b), Ok(c), Ok(d)) => (a, b, c, d),
+            _ => return Err(std::io::Error::other("bad tmpfs mount arg")),
+        };
+        let r = unsafe {
+            libc::mount(
+                src.as_ptr(),
+                tgt.as_ptr(),
+                fstype.as_ptr(),
+                libc::MS_NOSUID | libc::MS_NODEV,
+                opts_c.as_ptr() as *const libc::c_void,
+            )
+        };
+        if r != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// WP-#107 (CRI GAP 2/3): write `content` to `<rootfs>/<rel>` (e.g.
     /// `etc/resolv.conf`, `etc/hostname`) from PID 1 BEFORE pivot_root. `mkdir -p`s
     /// the parent (`etc/`) first — the CAS rootfs may lack it. Returns an honest
@@ -1353,6 +1449,28 @@ mod ns_impl {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&target, content)
+    }
+
+    /// `--add-host`: APPEND `content` to `<rootfs>/<rel>` (e.g. `etc/hosts`) from PID
+    /// 1 BEFORE pivot_root, preserving any existing content (the image's
+    /// `127.0.0.1 localhost`). `mkdir -p`s the parent (`etc/`) and CREATEs the file
+    /// if missing — mirrors `write_rootfs_file` but opens append-or-create instead of
+    /// truncating. Returns an honest `io::Error` so the caller fails closed.
+    fn append_rootfs_file(
+        rootfs: &std::path::Path,
+        rel: &str,
+        content: &[u8],
+    ) -> std::io::Result<()> {
+        use std::io::Write;
+        let target = rootfs.join(rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&target)?;
+        f.write_all(content)
     }
 
     /// WP-#107 (CRI GAP 1): bind-mount one CRI volume into the rootfs BEFORE

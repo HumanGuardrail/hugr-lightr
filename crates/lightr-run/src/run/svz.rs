@@ -194,6 +194,7 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         // WP-#107: no CRI volume mounts / DNS / hostname here.
                         bind_mounts: &[],
                         resolv_conf: None,
+                        tmpfs: &[],
                     };
                     engine.run(&spec).unwrap_or(255)
                 }

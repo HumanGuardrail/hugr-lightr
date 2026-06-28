@@ -138,6 +138,7 @@ fn boot_vm(
         // WP-#107: no CRI volume mounts / DNS / hostname here.
         bind_mounts: &[],
         resolv_conf: None,
+        tmpfs: &[],
     };
     let code = engine
         .run(&spec)

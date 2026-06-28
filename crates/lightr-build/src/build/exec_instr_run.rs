@@ -98,6 +98,7 @@ pub(in crate::build) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
         // WP-#107: no CRI volume mounts / DNS / hostname here.
         bind_mounts: &[],
         resolv_conf: None,
+        tmpfs: &[],
     };
     let code = eng.run(&spec)?;
     if code != 0 {

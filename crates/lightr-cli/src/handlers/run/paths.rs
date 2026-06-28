@@ -8,7 +8,7 @@
 use std::io::Write;
 
 use lightr_core::ResourceLimits;
-use lightr_engine::{engine_for, EngineKind, ExecSpec};
+use lightr_engine::{engine_for, EngineKind, ExecSpec, TmpfsMount};
 use lightr_index;
 use lightr_run::healthcheck::Healthcheck;
 use lightr_run::{
@@ -91,6 +91,13 @@ pub(super) fn run_engine(
     // (before pivot) and installs it right before exec (fail-closed). native/vz are
     // honest-errored at the handler, so this arrives `None` there. RUNTIME-ONLY.
     seccomp: Option<&str>,
+    // `--add-host HOST:IP` ⇒ the ns engine appends `(ip, hostname)` lines to the
+    // container's /etc/hosts before pivot. native is honest-errored at the handler.
+    // RUNTIME-ONLY; never part of the memo key.
+    add_host: &[(String, String)],
+    // `--tmpfs DST[:size=..,mode=..]` ⇒ the ns engine mounts a tmpfs at each target
+    // after /dev/shm. native/vz are honest-errored at the handler. RUNTIME-ONLY.
+    tmpfs: &[TmpfsMount],
 ) -> i32 {
     // Hydrate rootfs ref into a temp dir if provided
     let rootfs_tmp: Option<tempfile::TempDir>;
@@ -161,7 +168,9 @@ pub(super) fn run_engine(
         workdir: None,
         user: eff_user,
         hostname: None,
-        add_host: &[],
+        // `--add-host`: the ns engine appends `(ip, hostname)` lines to the
+        // container's /etc/hosts before pivot. Empty ⇒ unchanged.
+        add_host,
         dns: &[],
         mesh_ip: None,
         // WP-#92: `--read-only` / `--shm-size` reach the ns engine here (the only
@@ -199,6 +208,9 @@ pub(super) fn run_engine(
         // CLI `lightr run` path never sets them — defaults preserve today's behaviour.
         bind_mounts: &[],
         resolv_conf: None,
+        // `--tmpfs`: the ns engine mounts a tmpfs at each target after /dev/shm.
+        // Empty ⇒ unchanged.
+        tmpfs,
     };
 
     let code = match engine.run(&spec) {

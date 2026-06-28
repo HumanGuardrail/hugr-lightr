@@ -683,6 +683,43 @@ jobs:
           [ "$SC_FC_EXIT" != 0 ]  || { echo "FAIL: an unloadable --seccomp profile ran anyway (NOT fail-closed — ran unfiltered)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "SECCOMP=PASS"; else echo "SECCOMP=FAIL"; exit 1; fi  # gate for real
 
+      - name: Prove --add-host writes /etc/hosts + --tmpfs mounts a real tmpfs (WP-#112)
+        run: |
+          # WP-#112 (Docker parity): prove the `ns` engine ACTUALLY (1) appends an
+          # --add-host entry to the container's /etc/hosts, and (2) mounts a REAL
+          # tmpfs at --tmpfs targets (writable + visible in /proc/mounts as tmpfs).
+          # Reuses the alpine-aa rootfs from the apparmor/seccomp probes above.
+          set +e
+          BIN="$PWD/target/release/lightr"
+
+          echo "=== --add-host: write myhost.local:10.9.8.7 → expect the line in /etc/hosts ==="
+          "$BIN" run --engine ns --add-host myhost.local:10.9.8.7 --rootfs alpine-aa -- /bin/busybox sh -c 'grep myhost.local /etc/hosts' >/tmp/ah.txt 2>&1
+          AH_EXIT=$?; echo "ah_exit=$AH_EXIT"; tail -3 /tmp/ah.txt
+
+          echo "=== --add-host preserves the image's default 127.0.0.1 localhost (APPEND, not truncate) ==="
+          "$BIN" run --engine ns --add-host myhost.local:10.9.8.7 --rootfs alpine-aa -- /bin/busybox sh -c 'grep -c localhost /etc/hosts' >/tmp/ah2.txt 2>&1
+          AH2_EXIT=$?; echo "ah2_exit=$AH2_EXIT"; tail -1 /tmp/ah2.txt
+
+          echo "=== --tmpfs /scratch: write a file + confirm /scratch is a tmpfs in /proc/mounts ==="
+          "$BIN" run --engine ns --tmpfs /scratch --rootfs alpine-aa -- /bin/busybox sh -c 'echo hi > /scratch/f && cat /scratch/f && grep " /scratch tmpfs" /proc/mounts' >/tmp/tf.txt 2>&1
+          TF_EXIT=$?; echo "tf_exit=$TF_EXIT"; tail -4 /tmp/tf.txt
+
+          echo "=== --tmpfs vz → expect honest exit 2 (no silent drop) ==="
+          "$BIN" run --engine vz --tmpfs /scratch --rootfs alpine-aa -- /bin/true >/tmp/tfvz.txt 2>&1
+          TFVZ_EXIT=$?; echo "tfvz_exit=$TFVZ_EXIT"; tail -2 /tmp/tfvz.txt
+
+          # ── GATE ────────────────────────────────────────────────────────────────
+          FAIL=0
+          [ "$AH_EXIT" = 0 ] || { echo "FAIL: --add-host entry not found in /etc/hosts (exit $AH_EXIT)"; FAIL=1; }
+          grep -q "10.9.8.7" /tmp/ah.txt || { echo "FAIL: /etc/hosts line missing the IP 10.9.8.7"; FAIL=1; }
+          # APPEND (not truncate): the image's default localhost line must survive.
+          [ "$AH2_EXIT" = 0 ] && [ "$(tail -1 /tmp/ah2.txt)" -ge 1 ] 2>/dev/null || { echo "FAIL: --add-host clobbered the image /etc/hosts (no localhost line left)"; FAIL=1; }
+          [ "$TF_EXIT" = 0 ] || { echo "FAIL: --tmpfs write/mount check failed (exit $TF_EXIT)"; FAIL=1; }
+          grep -q "^hi$" /tmp/tf.txt || { echo "FAIL: --tmpfs target was not writable (no 'hi' read back)"; FAIL=1; }
+          grep -q " /scratch tmpfs" /tmp/tf.txt || { echo "FAIL: /scratch is not a tmpfs in /proc/mounts (mount did not happen)"; FAIL=1; }
+          [ "$TFVZ_EXIT" = 2 ] || { echo "FAIL: vz --tmpfs did not honest-error with exit 2 (got $TFVZ_EXIT)"; FAIL=1; }
+          if [ "$FAIL" = 0 ]; then echo "ADDHOST_TMPFS=PASS"; else echo "ADDHOST_TMPFS=FAIL"; exit 1; fi  # gate for real
+
   cri-serve-smoke:
     # WP-#98: prove the COMPOSED CRI server (the REAL LightrBackend wired into the
     # sibling lightr-cri shell via crates/lightr-cri-serve) BUILDS and ANSWERS

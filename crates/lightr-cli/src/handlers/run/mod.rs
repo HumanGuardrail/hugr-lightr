@@ -20,7 +20,7 @@
 //! detached, vz without rootfs) are NOT memoized and take the plain engine path.
 
 use lightr_core::ResourceLimits;
-use lightr_engine::EngineKind;
+use lightr_engine::{EngineKind, TmpfsMount};
 use lightr_run::{spawn_detached_engine, Mount, PortMap, RunSpec, StoreFile};
 use lightr_store::Store;
 
@@ -200,6 +200,22 @@ pub fn run(
             "lightr: --seccomp (seccomp-bpf enforcement) is implemented only on the \
              rootless ns engine (--engine ns); native is no sandbox and vz seccomp lives \
              inside the guest — refusing to run rather than give false security"
+        );
+        return 2;
+    }
+
+    // `--tmpfs`: the `ns` engine mounts a REAL tmpfs in the container mount ns; the
+    // `native` engine has its own pre-existing model (a fresh empty scratch DIR per
+    // run via `materialize_tmpfs` — native is reproducibility, not a mount sandbox).
+    // Only `vz` has NO handling (tmpfs would live inside the guest, not managed by
+    // this shim), so honest-error `vz`+`--tmpfs` (exit 2) BEFORE provisioning rather
+    // than silently drop the mount. Mirrors the `--seccomp`/`--apparmor` guards but
+    // scoped to vz (native is NOT a silent no-op — it materializes a scratch dir).
+    if engine_kind == EngineKind::Vz && !runflags.tmpfs.is_empty() {
+        eprintln!(
+            "lightr: --tmpfs is not supported on the vz engine (tmpfs mounts live \
+             inside the guest, not managed by this shim); use --engine ns for a real \
+             tmpfs mount or --engine native for a scratch directory"
         );
         return 2;
     }
@@ -438,6 +454,25 @@ pub fn run(
     }
 
     if use_engine_path {
+        // `--add-host HOST:IP` ⇒ `(hostname, ip)` pairs for the ns engine's
+        // /etc/hosts write. Already value-validated as `HOST:IP` in
+        // `RawRunFlags::resolve` (a malformed entry was an exit 2 there), so the
+        // split is infallible here; a stray bad entry is defensively skipped.
+        let add_host_pairs: Vec<(String, String)> = runflags
+            .add_host
+            .iter()
+            .filter_map(|raw| {
+                raw.split_once(':')
+                    .map(|(h, ip)| (h.to_string(), ip.to_string()))
+            })
+            .collect();
+        // `--tmpfs DST[:opts]` ⇒ the ns engine's tmpfs mounts. Minimal grammar:
+        // `target` with an optional `:size=<bytes|N[kmg]>,mode=<octal>` suffix
+        // (Docker's tmpfs option shape). Bad options are an honest exit 2.
+        let tmpfs_mounts = match parse_tmpfs(&runflags.tmpfs) {
+            Ok(v) => v,
+            Err(code) => return code,
+        };
         // WP-DF-IMGCFG: run_engine honors the rootfs image config (CLI > image).
         // WP-IMG-ENVUSER: also consumes the image ENV + USER, with the CLI
         // `-e`/`--env-file` (`env_explicit`) and `-u`/`--user` overriding per
@@ -475,6 +510,12 @@ pub fn run(
             // right before exec after apparmor). native/vz never get here with it set —
             // the engine-aware guard above honest-errors them first. RUNTIME-ONLY.
             rc.seccomp.as_deref(),
+            // `--add-host` ⇒ the ns engine appends `(ip, hostname)` lines to the
+            // container's /etc/hosts before pivot. native is honest-errored above.
+            &add_host_pairs,
+            // `--tmpfs` ⇒ the ns engine mounts a tmpfs at each target after /dev/shm.
+            // native/vz are honest-errored above. RUNTIME-ONLY.
+            &tmpfs_mounts,
         );
     }
 
@@ -505,6 +546,76 @@ pub fn run(
         // WP-RUNFLAGS: the resolved `-v`/`--tmpfs`/`--name`/`--rm`/`--entrypoint`.
         runflags,
     })
+}
+
+/// Parse the raw `--tmpfs` strings (Docker shape `DST[:opt[,opt...]]`) into the
+/// engine's [`TmpfsMount`] list. Supported options (Docker parity): `size=<bytes
+/// | N[kKmMgG]>` (an optional byte cap) and `mode=<octal>` (defaults to `1777`,
+/// the sticky world-writable scratch mode). Exec is ALWAYS allowed (no MS_NOEXEC),
+/// matching Docker's `--tmpfs` default of `nosuid,nodev`. A missing/empty target or
+/// an unparseable option is an honest `Err(2)` (fail-closed — never a silent drop).
+fn parse_tmpfs(raw: &[String]) -> Result<Vec<TmpfsMount>, i32> {
+    let mut out = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let (target, opts) = match entry.split_once(':') {
+            Some((t, o)) => (t, Some(o)),
+            None => (entry.as_str(), None),
+        };
+        if target.is_empty() {
+            eprintln!("lightr: --tmpfs {entry}: empty target path");
+            return Err(2);
+        }
+        let mut size: Option<u64> = None;
+        let mut mode = "1777".to_string();
+        if let Some(opts) = opts {
+            for opt in opts.split(',').filter(|s| !s.is_empty()) {
+                match opt.split_once('=') {
+                    Some(("size", v)) => match parse_size(v) {
+                        Some(b) => size = Some(b),
+                        None => {
+                            eprintln!("lightr: --tmpfs {entry}: bad size '{v}'");
+                            return Err(2);
+                        }
+                    },
+                    Some(("mode", v)) => {
+                        // Validate it is octal so the mount option is well-formed.
+                        if v.is_empty() || u32::from_str_radix(v, 8).is_err() {
+                            eprintln!("lightr: --tmpfs {entry}: bad mode '{v}' (expected octal)");
+                            return Err(2);
+                        }
+                        mode = v.to_string();
+                    }
+                    _ => {
+                        eprintln!("lightr: --tmpfs {entry}: unknown option '{opt}'");
+                        return Err(2);
+                    }
+                }
+            }
+        }
+        out.push(TmpfsMount {
+            target: target.to_string(),
+            size,
+            mode,
+        });
+    }
+    Ok(out)
+}
+
+/// Parse a `size=` value: a plain byte count or an `N[kKmMgG]` suffix (Docker/
+/// runc shape). Returns `None` on a malformed value (fail-closed at the caller).
+fn parse_size(v: &str) -> Option<u64> {
+    let v = v.trim();
+    if v.is_empty() {
+        return None;
+    }
+    let (num, mult) = match v.chars().last().unwrap() {
+        'k' | 'K' => (&v[..v.len() - 1], 1024u64),
+        'm' | 'M' => (&v[..v.len() - 1], 1024 * 1024),
+        'g' | 'G' => (&v[..v.len() - 1], 1024 * 1024 * 1024),
+        '0'..='9' => (v, 1),
+        _ => return None,
+    };
+    num.parse::<u64>().ok().map(|n| n * mult)
 }
 
 #[cfg(test)]
