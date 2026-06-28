@@ -17,7 +17,7 @@ pub use lightr_init::GUEST_PATH;
 // ── Flat re-exports (API-identical paths) ────────────────────────────────────
 
 pub use engine::{
-    engine_for, pack_status, probe, Engine, EngineCaps, EngineKind, ExecSpec, MountKind,
+    engine_for, pack_status, probe, BindMount, Engine, EngineCaps, EngineKind, ExecSpec, MountKind,
     NativeEngine, ResolvedMount,
 };
 
@@ -202,6 +202,9 @@ mod tests {
             exec_ready_fd: None,
             // WP-#106: no AppArmor profile (native engine test). None.
             apparmor: None,
+            // WP-#107: no CRI volume mounts / DNS / hostname (native engine test).
+            bind_mounts: &[],
+            resolv_conf: None,
         };
         let code = engine.run(&spec).expect("echo should not fail");
         assert_eq!(code, 0, "echo exits 0");
@@ -245,6 +248,9 @@ mod tests {
             exec_ready_fd: None,
             // WP-#106: no AppArmor profile (native engine test). None.
             apparmor: None,
+            // WP-#107: no CRI volume mounts / DNS / hostname (native engine test).
+            bind_mounts: &[],
+            resolv_conf: None,
         };
         let code = engine.run(&spec).expect("sh should not fail to launch");
         assert_eq!(code, 5, "exit code must be 5, got {code}");
@@ -285,6 +291,9 @@ mod tests {
             exec_ready_fd: None,
             // WP-#106: no AppArmor profile (native engine test). None.
             apparmor: None,
+            // WP-#107: no CRI volume mounts / DNS / hostname (native engine test).
+            bind_mounts: &[],
+            resolv_conf: None,
         };
         let err = engine.run(&spec).unwrap_err();
         let msg = err.to_string();

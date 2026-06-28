@@ -68,6 +68,37 @@ pub struct RunDescriptor {
     /// old descriptors deserializing as `None`.
     #[serde(default)]
     pub apparmor: Option<String>,
+    /// WP-#107 (CRI GAP 1, "starting container with volume"): the CRI
+    /// `ContainerConfig.mounts`, host-side already realpath'd in `build_ns_plan` (the
+    /// symlink-host-path spec resolves `host_path` BEFORE it reaches here — a host
+    /// concern). Becomes `ExecSpec.bind_mounts`; the ns engine `mkdir -p`s each target
+    /// under the rootfs and bind-mounts the host source onto it (RO when `readonly`),
+    /// fail-closed. `#[serde(default)]` ⇒ old descriptors deserialize as empty.
+    #[serde(default)]
+    pub mounts: Vec<NsBindMount>,
+    /// WP-#107 (CRI GAP 2, "DNS config"): the full `/etc/resolv.conf` CONTENT,
+    /// synthesized from the sandbox `DnsConfig` in `build_ns_plan` (nameserver/search/
+    /// options lines). Becomes `ExecSpec.resolv_conf`; the ns engine writes it into
+    /// `<rootfs>/etc/resolv.conf` before pivot. `None` ⇒ no DNS config (image untouched).
+    #[serde(default)]
+    pub resolv_conf: Option<String>,
+    /// WP-#107 (CRI GAP 3, "set hostname"): the sandbox hostname. Becomes
+    /// `ExecSpec.hostname`; the ns engine unshares a UTS ns, `sethostname`s it, and
+    /// writes `<rootfs>/etc/hostname`. `None`/empty ⇒ no UTS ns (unchanged behavior).
+    #[serde(default)]
+    pub hostname: Option<String>,
+}
+
+/// WP-#107 (CRI GAP 1): one CRI volume mount carried on the descriptor — mirrors
+/// `lightr_engine::BindMount` (the engine type can't derive serde without pulling
+/// serde into `lightr-engine`, so we carry this serde twin and map at the shim, the
+/// SAME pattern the descriptor uses for every other field). `host_path` is the
+/// already-realpath'd HOST source; `container_path` the in-container destination.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NsBindMount {
+    pub host_path: String,
+    pub container_path: String,
+    pub readonly: bool,
 }
 
 /// Entry point for the `__ns-run` re-exec shim: read a [`RunDescriptor`] (JSON)
@@ -107,6 +138,17 @@ pub fn run_shim() -> ! {
     // Borrows held alive for the ExecSpec.
     let cwd = std::path::PathBuf::from(&desc.cwd);
     let netns_path = desc.netns_path.as_ref().map(std::path::PathBuf::from);
+    // WP-#107 (CRI GAP 1): map the serde-twin mounts to the engine's BindMount type
+    // (held alive for the ExecSpec borrow, like `cwd`/`netns_path`).
+    let bind_mounts: Vec<lightr_engine::BindMount> = desc
+        .mounts
+        .iter()
+        .map(|m| lightr_engine::BindMount {
+            host_path: m.host_path.clone(),
+            container_path: m.container_path.clone(),
+            readonly: m.readonly,
+        })
+        .collect();
 
     let spec = lightr_engine::ExecSpec {
         cwd: &cwd,
@@ -121,7 +163,9 @@ pub fn run_shim() -> ! {
         env: &desc.env,
         workdir: None,
         user: None,
-        hostname: None,
+        // WP-#107 (CRI GAP 3): the sandbox hostname — drives a UTS unshare +
+        // sethostname + /etc/hostname in the ns engine. `None` ⇒ unchanged.
+        hostname: desc.hostname.as_deref(),
         add_host: &[],
         dns: &[],
         mesh_ip: None,
@@ -140,6 +184,13 @@ pub fn run_shim() -> ! {
         // the cross-repo seam #89; `None` today). The ns engine applies it via
         // aa_change_onexec right before the container's execv (fail-closed).
         apparmor: desc.apparmor.as_deref(),
+        // WP-#107 (CRI GAP 1): the CRI volume bind mounts (host_path already
+        // realpath'd in build_ns_plan). The ns engine binds each into the rootfs
+        // before pivot, fail-closed. Empty ⇒ unchanged.
+        bind_mounts: &bind_mounts,
+        // WP-#107 (CRI GAP 2): the synthesized /etc/resolv.conf content. The ns
+        // engine writes it into the rootfs before pivot. `None` ⇒ image untouched.
+        resolv_conf: desc.resolv_conf.as_deref(),
     };
 
     match engine.run(&spec) {

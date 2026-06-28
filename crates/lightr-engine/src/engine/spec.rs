@@ -42,6 +42,28 @@ pub struct ResolvedMount {
     pub readonly: bool,
 }
 
+// ── CRI bind mount (WP-#107, GAP 1) ─────────────────────────────────────────
+//
+// A single CRI `ContainerConfig.mounts` entry AFTER host-side resolution — the
+// `host_path` is already `realpath`'d in `build_ns_plan` (the symlink-host-path
+// critest spec creates a symlink to the real dir; resolving host-side keeps the
+// engine a pure bind-mounter). DISTINCT from `ResolvedMount` above: that type is
+// the full Docker `-v` volume model carried by `ExecSpec.mounts` for the vz/run
+// paths (kinds: CasRef/HostBind/NamedVolume/AnonVolume/Tmpfs) and is NOT consumed
+// by the `ns` engine. `BindMount` is the minimal CRI-bind surface the `ns` engine
+// applies in PID 1 (mirrors `join_netns`/`cgroup_name` — a dedicated CRI carry-slot,
+// not a re-use of the richer volume model). RUNTIME-ONLY (never a memo key).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BindMount {
+    /// Already-resolved (realpath'd) HOST source directory/file to bind in.
+    pub host_path: String,
+    /// In-container destination (absolute, e.g. `/data`). The `ns` engine
+    /// `mkdir -p`s `<rootfs>/<container_path>` then bind-mounts onto it.
+    pub container_path: String,
+    /// `true` ⇒ a second `MS_BIND|MS_REMOUNT|MS_RDONLY` makes the bind read-only.
+    pub readonly: bool,
+}
+
 // ── ExecSpec ──────────────────────────────────────────────────────────────────
 
 pub struct ExecSpec<'a> {
@@ -201,4 +223,24 @@ pub struct ExecSpec<'a> {
     /// honest-errored at the handler; vz LSM lives inside the guest). RUNTIME-ONLY —
     /// NEVER a memo key (like `read_only`/`cap_drop`/`cap_add`). Default None.
     pub apparmor: Option<&'a str>,
+
+    /// WP-#107 (CRI GAP 1): CRI volume mounts (`ContainerConfig.mounts`) to
+    /// bind-mount into the container before exec. ONLY the `ns` engine honors them:
+    /// in PID 1, AFTER pivot_root + the /dev/proc/shm setup and BEFORE the workload
+    /// `execv`, for each entry it `mkdir -p`s the target under the new root and
+    /// bind-mounts the (host-side already-realpath'd) `host_path` onto it
+    /// (`MS_BIND|MS_REC`), plus a `MS_BIND|MS_REMOUNT|MS_RDONLY` second mount when
+    /// `readonly`. FAIL-CLOSED: a requested mount that cannot be applied aborts the
+    /// run (a missing volume is a real error, never silently skipped). native/vz
+    /// ignore it (native has no rootfs; vz volumes live inside the guest). RUNTIME-ONLY
+    /// — NEVER a memo key. Default `&[]` ⇒ byte-identical to the pre-#107 path.
+    pub bind_mounts: &'a [BindMount],
+    /// WP-#107 (CRI GAP 2): the full `/etc/resolv.conf` CONTENT synthesized from the
+    /// sandbox `DnsConfig` (servers/searches/options) in `build_ns_plan`. ONLY the
+    /// `ns` engine honors it: in PID 1, when `Some`, it `mkdir -p`s `/etc` and writes
+    /// this content to `<rootfs>/etc/resolv.conf` (overwriting whatever the image had),
+    /// BEFORE pivot_root — exactly what Docker/runc do. `None` ⇒ leave the image's
+    /// resolv.conf untouched (no DNS config on the sandbox). native/vz ignore it.
+    /// RUNTIME-ONLY — NEVER a memo key. Default None ⇒ unchanged behavior.
+    pub resolv_conf: Option<&'a str>,
 }
