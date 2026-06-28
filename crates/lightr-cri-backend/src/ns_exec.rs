@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 pub struct ExecDescriptor {
     /// Host pid of the container's in-pidns PID 1 (resolved by
     /// `LightrBackend::container_pid1` via cgroup.procs + the NSpid==1 rule). The
-    /// shim opens `/proc/<pid1>/ns/{user,net,pid,mnt}` and `setns`es into them.
+    /// shim opens `/proc/<pid1>/ns/{user,net,pid,mnt,uts}` and `setns`es into them.
     pub pid1: u32,
     /// Full argv (program + args). argv[0] is the program; `execve` does NOT do a
     /// PATH search, so it should be an absolute path (slice 1 — matches how the
@@ -74,11 +74,16 @@ pub fn run_exec_shim() -> ! {
 /// vanish). Join **net FIRST** — the pod netns was created by the HOST (CNI) and is
 /// owned by the host INIT user namespace, so we must `setns` into it while still
 /// host root; once we enter the container userns we no longer hold CAP_SYS_ADMIN
-/// over a host-owned netns (this is the EPERM the first CI run caught). THEN join
-/// user (host root may enter a child userns), which grants full caps in it for the
-/// remaining joins; THEN pid and mnt — both are owned by the CONTAINER userns
-/// (the engine `unshare`d them after NEWUSER). mnt LAST (its swap erases host
-/// paths), then `fork` (setns(pid) only moves CHILDREN into the pid ns).
+/// over a host-owned netns (this is the EPERM the first CI run caught). Join **uts
+/// next, also before user** — when the sandbox set a hostname the UTS ns is owned
+/// by the container userns, but when it did NOT the container shares the HOST UTS
+/// ns (the engine unshares UTS only iff `hostname.is_some()`); joining it while
+/// host root works for BOTH and is a benign same-ns no-op in the no-hostname case,
+/// so an exec'd `hostname` reads the sandbox hostname (the critest "set hostname"
+/// fix). THEN join user (host root may enter a child userns), which grants full
+/// caps in it for the remaining joins; THEN pid and mnt — both are owned by the
+/// CONTAINER userns (the engine `unshare`d them after NEWUSER). mnt LAST (its swap
+/// erases host paths), then `fork` (setns(pid) only moves CHILDREN into the pid ns).
 #[cfg(target_os = "linux")]
 fn run_exec_shim_linux() -> ! {
     use std::ffi::CString;
@@ -104,8 +109,17 @@ fn run_exec_shim_linux() -> ! {
         unsafe { libc::_exit(127) }
     }
 
-    // 2. Open ALL ns fds FIRST (before any setns). Only the four ns.rs
-    //    establishes: user+mnt+pid unshared, net joined (no uts/ipc).
+    // 2. Open ALL ns fds FIRST (before any setns). user+mnt+pid the engine
+    //    unshares, net it joins; UTS it unshares ONLY when the sandbox set a
+    //    hostname (`ns.rs`: `CLONE_NEWUTS` iff `hostname.is_some()`). We MUST join
+    //    the UTS ns too — otherwise an exec'd `hostname` reads the HOST's hostname,
+    //    not the sandbox's (the critest "set hostname" failure: the container's own
+    //    PID 1 had the right hostname, but `ExecSync hostname` ran in the host UTS
+    //    ns → `strings.EqualFold` false at networking.go:206). When the sandbox set
+    //    NO hostname, `/proc/<pid1>/ns/uts` is the host UTS ns and the setns below
+    //    is a benign same-ns no-op (returns 0) — so this is behavior-preserving for
+    //    no-hostname containers. (We still skip ipc: the engine never unshares it,
+    //    so it is always the host ipc ns — joining it would be a pure no-op.)
     let base = format!("/proc/{}/ns", desc.pid1);
     let open_ns = |name: &str| -> std::fs::File {
         match std::fs::OpenOptions::new()
@@ -123,9 +137,10 @@ fn run_exec_shim_linux() -> ! {
     let net_ns = open_ns("net");
     let pid_ns = open_ns("pid");
     let mnt_ns = open_ns("mnt");
+    let uts_ns = open_ns("uts");
 
-    // 3. setns ORDER: net → user → pid → mnt (net while host-root over the
-    //    host-owned pod netns; mnt LAST). Fail-closed on any error.
+    // 3. setns ORDER: net → uts → user → pid → mnt (net + uts while host-root over
+    //    the possibly-host-owned netns/UTS ns; mnt LAST). Fail-closed on any error.
     let do_setns = |f: &std::fs::File, flag: libc::c_int, what: &str| {
         if unsafe { libc::setns(f.as_raw_fd(), flag) } != 0 {
             eprintln!(
@@ -136,6 +151,18 @@ fn run_exec_shim_linux() -> ! {
         }
     };
     do_setns(&net_ns, libc::CLONE_NEWNET, "net"); // FIRST: host-owned pod netns; need host caps
+    // UTS BEFORE user — same reason as net. When the sandbox set a hostname the UTS
+    // ns is owned by the container's child userns; when it did NOT, PID 1's UTS ns
+    // IS the host init UTS ns (the engine only unshares UTS iff hostname.is_some()).
+    // Joining it here, while still host-root (we hold CAP_SYS_ADMIN over BOTH the
+    // host init userns and any child userns), succeeds in BOTH cases. Joining it
+    // AFTER `setns(user)` would EPERM in the no-hostname case (a child userns holds
+    // no caps over the host-owned UTS ns) — that would regress every other exec
+    // spec. The hostname case still gets the container's UTS ns either way; this
+    // ordering is the one that is also benign (same-ns no-op) for no-hostname
+    // containers. Net effect: `hostname`/`uname -n` via exec now reads the sandbox
+    // hostname, fixing critest "set hostname" without disturbing any other spec.
+    do_setns(&uts_ns, libc::CLONE_NEWUTS, "uts");
     do_setns(&user_ns, libc::CLONE_NEWUSER, "user"); // then enter the container userns
     do_setns(&pid_ns, libc::CLONE_NEWPID, "pid"); // owned by the container userns
     do_setns(&mnt_ns, libc::CLONE_NEWNS, "mnt"); // LAST (swap erases host paths)
