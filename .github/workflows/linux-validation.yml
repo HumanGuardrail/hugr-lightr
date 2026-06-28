@@ -775,39 +775,55 @@ jobs:
           done
           echo "#114_PROBE=DONE"
 
-      - name: Prove --user is honest (root no-op runs; non-root fails closed, never silent-root) (WP-#113)
+      - name: Prove real non-root --user via rootless subuid RANGE map (WP-#114)
         run: |
-          # WP-#113 v1: the rootless ns userns uses a SINGLE-uid map ("0 <outer> 1") +
-          # setgroups=deny, so the ONLY in-container identity is container-root. A
-          # non-root --user CANNOT be honored (the target uid is unmapped) — but it
-          # must NEVER silently run as root (a security footgun). So: --user 0/root is a
-          # no-op that RUNS (as root); a non-root --user FAILS CLOSED with a clear
-          # error. Real non-root support needs a subuid RANGE mapping (tracked #115).
+          # WP-#114: with /etc/subuid + the newuidmap helpers present on this runner
+          # (proven by the probe above), a non-root --user is now HONORED FOR REAL. The
+          # ns engine forks a setup child, and the outside parent (the shim) installs a
+          # subuid RANGE map on it via newuidmap/newgidmap so the target uid/gid exists
+          # inside the userns; PID 1 then drops to it (setgroups→setgid→setuid). This
+          # REPLACES the #113 honest-error for in-range uids — but the fail-closed law
+          # still holds: an OUT-OF-RANGE uid (no mapping) must FAIL, never silent-root.
           set +e
           BIN="$PWD/target/release/lightr"
 
-          echo "=== --user 0 (root) → no-op, runs as uid 0 ==="
+          echo "=== --user 0 (root) → runs as uid 0 (single-uid path, unchanged) ==="
           "$BIN" run --engine ns --user 0 --rootfs alpine-aa -- /bin/busybox sh -c 'id -u' >/tmp/u_root.txt 2>&1
           U_ROOT_EXIT=$?; echo "u_root_exit=$U_ROOT_EXIT"; cat /tmp/u_root.txt
 
-          echo "=== --user 1000 (non-root) → FAIL CLOSED (never silent-root) ==="
-          "$BIN" run --engine ns --user 1000 --rootfs alpine-aa -- /bin/busybox sh -c 'id -u' >/tmp/u_nr.txt 2>&1
-          U_NR_EXIT=$?; echo "u_nr_exit=$U_NR_EXIT"; tail -3 /tmp/u_nr.txt
+          echo "=== --user 1000 → REAL non-root: uid 1000, gid 0 (Docker default) ==="
+          "$BIN" run --engine ns --user 1000 --rootfs alpine-aa -- /bin/busybox sh -c 'id -u; id -g' >/tmp/u_nr.txt 2>&1
+          U_NR_EXIT=$?; echo "u_nr_exit=$U_NR_EXIT"; cat /tmp/u_nr.txt
 
-          echo "=== --user 1000:1000 (non-root) → FAIL CLOSED ==="
-          "$BIN" run --engine ns --user 1000:1000 --rootfs alpine-aa -- /bin/true >/tmp/u_nr2.txt 2>&1
-          U_NR2_EXIT=$?; echo "u_nr2_exit=$U_NR2_EXIT"; tail -3 /tmp/u_nr2.txt
+          echo "=== --user 1000:1000 → uid 1000, gid 1000, supplementary groups dropped ==="
+          "$BIN" run --engine ns --user 1000:1000 --rootfs alpine-aa -- /bin/busybox sh -c 'id -u; id -g; id -G' >/tmp/u_nr2.txt 2>&1
+          U_NR2_EXIT=$?; echo "u_nr2_exit=$U_NR2_EXIT"; cat /tmp/u_nr2.txt
+
+          echo "=== --user 70000 (beyond the 65536-wide subuid range) → FAIL CLOSED ==="
+          "$BIN" run --engine ns --user 70000 --rootfs alpine-aa -- /bin/busybox sh -c 'id -u' >/tmp/u_oor.txt 2>&1
+          U_OOR_EXIT=$?; echo "u_oor_exit=$U_OOR_EXIT"; tail -3 /tmp/u_oor.txt
 
           # ── GATE ────────────────────────────────────────────────────────────────
           FAIL=0
-          [ "$U_ROOT_EXIT" = 0 ] || { echo "FAIL: --user 0 (root no-op) did not run (exit $U_ROOT_EXIT)"; FAIL=1; }
-          [ "$(sed -n 1p /tmp/u_root.txt)" = 0 ] || { echo "FAIL: --user 0 did not run as uid 0 (got '$(sed -n 1p /tmp/u_root.txt)')"; FAIL=1; }
-          # The CRITICAL security assertion: a non-root --user must FAIL, never silently run as root.
-          [ "$U_NR_EXIT" != 0 ] || { echo "FAIL: non-root --user 1000 RAN (exit 0) — silent run-as-root footgun NOT closed"; FAIL=1; }
-          # The workload must NOT have executed (no bare "0" line from `id -u` = no silent-root).
-          grep -qx "0" /tmp/u_nr.txt && { echo "FAIL: non-root --user 1000 executed and printed uid 0 (silent-root)"; FAIL=1; }
-          grep -qiE "subuid|not yet supported|non-root" /tmp/u_nr.txt || { echo "FAIL: non-root --user error lacks a clear reason"; FAIL=1; }
-          [ "$U_NR2_EXIT" != 0 ] || { echo "FAIL: non-root --user 1000:1000 RAN (exit 0) — footgun NOT closed"; FAIL=1; }
+          # root path unchanged
+          [ "$U_ROOT_EXIT" = 0 ] || { echo "FAIL: --user 0 did not run (exit $U_ROOT_EXIT)"; FAIL=1; }
+          [ "$(sed -n 1p /tmp/u_root.txt)" = 0 ] || { echo "FAIL: --user 0 not uid 0 (got '$(sed -n 1p /tmp/u_root.txt)')"; FAIL=1; }
+
+          # REAL non-root drop: --user 1000 ⇒ uid 1000, gid 0
+          [ "$U_NR_EXIT" = 0 ] || { echo "FAIL: --user 1000 did not run (exit $U_NR_EXIT) — subuid RANGE map failed"; FAIL=1; }
+          [ "$(sed -n 1p /tmp/u_nr.txt)" = 1000 ] || { echo "FAIL: --user 1000 ran as uid '$(sed -n 1p /tmp/u_nr.txt)', want 1000"; FAIL=1; }
+          [ "$(sed -n 2p /tmp/u_nr.txt)" = 0 ] || { echo "FAIL: --user 1000 gid '$(sed -n 2p /tmp/u_nr.txt)', want 0 (Docker default)"; FAIL=1; }
+
+          # --user 1000:1000 ⇒ uid 1000, gid 1000, supplementary groups = JUST the primary gid
+          [ "$U_NR2_EXIT" = 0 ] || { echo "FAIL: --user 1000:1000 did not run (exit $U_NR2_EXIT)"; FAIL=1; }
+          [ "$(sed -n 1p /tmp/u_nr2.txt)" = 1000 ] || { echo "FAIL: --user 1000:1000 uid '$(sed -n 1p /tmp/u_nr2.txt)', want 1000"; FAIL=1; }
+          [ "$(sed -n 2p /tmp/u_nr2.txt)" = 1000 ] || { echo "FAIL: --user 1000:1000 gid '$(sed -n 2p /tmp/u_nr2.txt)', want 1000"; FAIL=1; }
+          [ "$(sed -n 3p /tmp/u_nr2.txt)" = 1000 ] || { echo "FAIL: --user 1000:1000 supplementary groups '$(sed -n 3p /tmp/u_nr2.txt)', want '1000' (supp dropped)"; FAIL=1; }
+
+          # fail-closed law: out-of-range uid must NOT run, must NEVER print uid 0
+          [ "$U_OOR_EXIT" != 0 ] || { echo "FAIL: out-of-range --user 70000 RAN (exit 0) — silent-root footgun"; FAIL=1; }
+          grep -qx "0" /tmp/u_oor.txt && { echo "FAIL: out-of-range --user 70000 printed uid 0 (silent-root)"; FAIL=1; }
+
           if [ "$FAIL" = 0 ]; then echo "USER_NS=PASS"; else echo "USER_NS=FAIL"; exit 1; fi  # gate for real
 
       - name: Prove --ulimit applies real setrlimit caps on the ns engine (and vz honest-errors)

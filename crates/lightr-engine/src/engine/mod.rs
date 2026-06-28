@@ -10,6 +10,11 @@ pub mod probe;
 #[cfg(target_os = "linux")]
 pub(crate) mod seccomp;
 pub mod spec;
+// WP-#114: rootless subuid/subgid RANGE resolution (real non-root `--user`),
+// consumed by the `ns` engine. Pure std (parse + helper-find); Linux-only because
+// only the `ns` engine uses it (gating avoids dead-code on other targets).
+#[cfg(target_os = "linux")]
+pub(crate) mod subid;
 pub mod vz;
 pub mod wsl;
 
