@@ -170,48 +170,48 @@ fn compile(profile: &OciSeccomp) -> std::io::Result<CompiledSeccomp> {
     // No listed syscalls ⇒ a degenerate "default only" filter (still valid).
     let listed_ret = listed_ret.unwrap_or(default_ret);
 
-    // ── Build the flat cBPF program ──────────────────────────────────────────
-    // Layout (the DEFAULT-ret MUST come first — it is the FALL-THROUGH target):
-    //   [0] LD  arch
-    //   [1] JEQ arch == X86_64 ? -> [2] (load nr) : -> default-ret
-    //   [2] LD  nr
-    //   [3..3+N] JEQ nr == nrs[i] ? -> JUMP to listed-ret : fall through
-    //   [3+N]    RET default-ret   <- non-matching syscalls FALL THROUGH to here
-    //   [3+N+1]  RET listed-ret    <- matching JEQs JUMP past default to here
-    // All jt/jf are RELATIVE offsets counted from the instruction AFTER the jump.
+    // ── Build the cBPF program (OFFSET-SAFE for ANY number of syscalls) ───────
+    // EVERY conditional jump uses jt/jf of ONLY 0 or 1 — never a far jump — so the
+    // u8 jt/jf fields cannot overflow regardless of how many syscalls the profile
+    // lists. (The earlier "flat JEQ → far listed-RET" layout silently TRUNCATED the
+    // u8 offset once the listed-RET was >255 instructions away, i.e. for ~>252
+    // syscalls — producing a WRONG filter: early JEQs jumped to garbage. That latent
+    // #108 bug was exposed by the ~289-entry built-in default profile (#117): an
+    // early syscall like `arch_prctl` mapped wrong ⇒ the workload trapped. This
+    // inline-RET layout removes far jumps entirely.)
     //
-    // ORDER IS LOAD-BEARING: a flat JEQ chain falls through on no-match, so the
-    // block that immediately follows the JEQs is the no-match action — that MUST
-    // be the DEFAULT action. (WP-#108 first cut had these two ret blocks swapped,
-    // so EVERY non-listed syscall hit the listed ERRNO ⇒ the filter denied all
-    // syscalls ⇒ musl segfaulted. The `run_bpf` simulator tests below pin this.)
+    //   [0] LD  arch
+    //   [1] JEQ arch == X86_64 ? jt=1 (skip the foreign-RET) : jf=0 (fall into it)
+    //   [2] RET default            ; foreign/x32 arch → the default action (inline)
+    //   [3] LD  nr
+    //   per listed syscall (a 2-insn pair):
+    //     JEQ nr ? jt=0 (fall to its RET) : jf=1 (skip its RET, try the next)
+    //     RET listed-action
+    //   [last] RET default         ; no syscall matched → the default action
+    //
+    // The DEFAULT action is what a non-matching syscall reaches (the final RET); a
+    // MATCH falls into its own inline RET. (WP-#108's first cut inverted match vs
+    // default → deny-all → musl SIGSEGV; the `run_bpf` simulator tests below pin
+    // BOTH that selectivity AND — via a >256-entry profile — this no-overflow.)
     let n = nrs.len();
-    let default_ret_idx = 3 + n; // 0:ld arch, 1:jeq arch, 2:ld nr, then N jeqs
-    let listed_ret_idx = default_ret_idx + 1;
-
-    let mut prog: Vec<libc::sock_filter> = Vec::with_capacity(listed_ret_idx + 1);
+    let mut prog: Vec<libc::sock_filter> = Vec::with_capacity(4 + 2 * n + 1);
 
     // [0] LD arch
     prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARCH_OFFSET));
-    // [1] JEQ arch == X86_64 → continue (jt=0, next is LD nr); foreign arch →
-    // default ret. jf is the distance from the instruction AFTER this jump
-    // (index 2) to the default-ret block.
-    let jf_to_default = (default_ret_idx - 2) as u8;
-    prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, jf_to_default));
-    // [2] LD nr
-    prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR_OFFSET));
-    // [3..] one JEQ per listed syscall: match → JUMP to listed-ret; no match →
-    // fall through (eventually to the default-ret that sits right after the chain).
-    for (i, nr) in nrs.iter().enumerate() {
-        let here = 3 + i; // this instruction's index
-        // distance from the instruction AFTER this jump to the listed-ret block.
-        let jt = (listed_ret_idx - (here + 1)) as u8;
-        prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, *nr as u32, jt, 0));
-    }
-    // default-ret block FIRST (the fall-through target for non-matching syscalls)
+    // [1] JEQ arch == X86_64: match → skip the foreign-RET; foreign → fall into it.
+    prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0));
+    // [2] foreign/x32 arch → the default action (inline RET, no far jump).
     prog.push(stmt(BPF_RET | BPF_K, default_ret));
-    // listed-ret block (the JUMP target for matched syscalls)
-    prog.push(stmt(BPF_RET | BPF_K, listed_ret));
+    // [3] LD nr
+    prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR_OFFSET));
+    // one (JEQ nr, RET listed) pair per listed syscall — all jt/jf are 0 or 1.
+    for nr in &nrs {
+        // match → jt=0 (fall to the RET below); no match → jf=1 (skip it).
+        prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, *nr as u32, 0, 1));
+        prog.push(stmt(BPF_RET | BPF_K, listed_ret));
+    }
+    // no syscall matched → the default action.
+    prog.push(stmt(BPF_RET | BPF_K, default_ret));
 
     Ok(CompiledSeccomp { prog })
 }
@@ -654,8 +654,8 @@ mod tests {
                  "syscalls": [ { "names": ["mkdir","mkdirat"], "action": "SCMP_ACT_ERRNO", "errnoRet": 1 } ] }"#,
         )
         .expect("supported profile compiles");
-        // ld arch, jeq arch, ld nr, 2 jeqs, default-ret, listed-ret = 7.
-        assert_eq!(c.prog.len(), 7, "expected flat 7-insn program");
+        // ld arch, jeq arch, ret default, ld nr, 2×(jeq,ret), final ret = 4+2*2+1 = 9.
+        assert_eq!(c.prog.len(), 9, "expected inline-RET 9-insn program (offset-safe)");
         let nr = |n| syscall_nr(n).unwrap() as u32;
         assert_eq!(
             run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr("mkdir")),
@@ -773,6 +773,24 @@ mod tests {
             run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr("reboot")),
             SECCOMP_RET_ERRNO | 1,
             "a non-allow-listed syscall (reboot) must be ERRNO(EPERM)"
+        );
+        // OVERFLOW GUARD: the default profile has ~289 entries, so its cBPF program
+        // is >256 instructions. With the old far-jump layout the early JEQs' u8 jt
+        // overflowed → wrong mapping; these allow-listed syscalls span EARLY
+        // (arch_prctl above), MID, and LATE positions — all must still be ALLOW,
+        // proving the inline-RET layout has no positional truncation at any size.
+        for name in ["openat", "futex", "getrandom", "writev", "exit_group", "wait4"] {
+            assert_eq!(
+                run_bpf(&c.prog, AUDIT_ARCH_X86_64, nr(name)),
+                SECCOMP_RET_ALLOW,
+                "allow-listed syscall {name} must be ALLOW regardless of its position in a >256-entry profile"
+            );
+        }
+        // Foreign arch → the default action (inline foreign-RET, no far jump).
+        assert_eq!(
+            run_bpf(&c.prog, I386_ARCH, nr("read")),
+            SECCOMP_RET_ERRNO | 1,
+            "foreign arch resolves to the default action (ERRNO) in the default profile"
         );
     }
 
