@@ -186,6 +186,11 @@ pub(super) fn run_engine(
         // that enforces it; native/vz are honest-errored at the handler). Applied via
         // aa_change_onexec as the last step before exec. RUNTIME-ONLY; never keyed.
         apparmor,
+        // WP-#107: CRI volume mounts / DNS resolv.conf / hostname are CRI-backend
+        // concerns (built in build_ns_plan from the sandbox/container config). The
+        // CLI `lightr run` path never sets them — defaults preserve today's behaviour.
+        bind_mounts: &[],
+        resolv_conf: None,
     };
 
     let code = match engine.run(&spec) {

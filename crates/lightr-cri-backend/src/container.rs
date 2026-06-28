@@ -165,14 +165,23 @@ impl LightrBackend {
         rec: &ContainerRecord,
         argv: &[String],
     ) -> Result<crate::ns_run::RunDescriptor> {
-        let netns_path = self
-            .cache()
-            .sandboxes
-            .get(&rec.sandbox.0)
-            .and_then(|s| s.netns_path.clone())
-            .ok_or_else(|| {
-                BackendError::Internal("build_ns_plan called without a pod netns".to_string())
+        // Read the sandbox record ONCE (netns path + the v1.1 dns/hostname config
+        // for GAP 2/3). Clone the bits we need out so the cache lock is released
+        // before the (longer) hydrate below.
+        let (netns_path, sandbox_dns, sandbox_hostname) = {
+            let cache = self.cache();
+            let s = cache.sandboxes.get(&rec.sandbox.0).ok_or_else(|| {
+                BackendError::Internal("build_ns_plan called without a pod sandbox".to_string())
             })?;
+            (
+                s.netns_path.clone(),
+                s.config.dns.clone(),
+                s.config.hostname.clone(),
+            )
+        };
+        let netns_path = netns_path.ok_or_else(|| {
+            BackendError::Internal("build_ns_plan called without a pod netns".to_string())
+        })?;
 
         // The ns engine must be available (root + Linux). For an isolation-expecting
         // pod this is REQUIRED — an unavailable engine is a hard error, not a silent
@@ -224,6 +233,42 @@ impl LightrBackend {
                 crate::vocab::ProfileType::RuntimeDefault => None,
             });
 
+        // WP-#107 (CRI GAP 1, "starting container with volume" + symlink-host-path):
+        // map the CRI `ContainerConfig.mounts` to the descriptor. Resolve `host_path`
+        // HOST-SIDE here (the symlink-host-path spec creates a symlink to the real
+        // dir; the host path is a host concern, so the engine stays a pure
+        // bind-mounter) — `canonicalize` follows symlinks AND yields an absolute path.
+        // Fail-closed: a host_path that cannot be resolved (a missing volume) FAILS
+        // the start rather than binding a wrong/absent source.
+        let mut mounts: Vec<crate::ns_run::NsBindMount> = Vec::with_capacity(rec.config.mounts.len());
+        for m in &rec.config.mounts {
+            let resolved = std::fs::canonicalize(&m.host_path).map_err(|e| {
+                BackendError::Internal(format!(
+                    "resolve volume host_path {:?} for container {} failed: {e}",
+                    m.host_path, rec.id.0
+                ))
+            })?;
+            mounts.push(crate::ns_run::NsBindMount {
+                host_path: resolved.to_string_lossy().into_owned(),
+                container_path: m.container_path.clone(),
+                readonly: m.readonly,
+            });
+        }
+
+        // WP-#107 (CRI GAP 2, "DNS config"): synthesize the /etc/resolv.conf content
+        // from the sandbox `DnsConfig`. `None`/all-empty ⇒ `None` (leave the image's
+        // resolv.conf untouched). Standard resolv.conf format (nameserver/search/
+        // options lines), what Docker/runc write.
+        let resolv_conf = sandbox_dns.as_ref().and_then(synth_resolv_conf);
+
+        // WP-#107 (CRI GAP 3, "set hostname"): the sandbox hostname. Empty ⇒ `None`
+        // (no UTS ns / no sethostname — unchanged behavior).
+        let hostname = if sandbox_hostname.is_empty() {
+            None
+        } else {
+            Some(sandbox_hostname)
+        };
+
         Ok(crate::ns_run::RunDescriptor {
             rootfs,
             argv: argv.to_vec(),
@@ -249,6 +294,12 @@ impl LightrBackend {
             // the kubelet profile into rec.config.security). The ns engine applies it
             // via aa_change_onexec right before the container's execv (fail-closed).
             apparmor,
+            // WP-#107 (CRI GAP 1/2/3): the volume bind mounts (host-side realpath'd),
+            // the synthesized /etc/resolv.conf, and the sandbox hostname. The ns engine
+            // applies them in PID 1 (mounts + resolv.conf + hostname/UTS), fail-closed.
+            mounts,
+            resolv_conf,
+            hostname,
         })
     }
 
@@ -923,6 +974,36 @@ impl LightrBackend {
             procs_path.display()
         )))
     }
+}
+
+/// WP-#107 (CRI GAP 2, "DNS config"): synthesize `/etc/resolv.conf` content from a
+/// CRI `DnsConfig`. Standard resolv.conf format — one `nameserver <s>` line per
+/// server, a single `search <a b c>` line, a single `options <a b c>` line (what
+/// Docker/runc write). Returns `None` when ALL three lists are empty (so a
+/// `DnsConfig::default()` leaves the image's resolv.conf untouched rather than
+/// truncating it to an empty file). The trailing newline keeps it a well-formed file.
+#[cfg(target_os = "linux")]
+fn synth_resolv_conf(dns: &crate::vocab::DnsConfig) -> Option<String> {
+    if dns.servers.is_empty() && dns.searches.is_empty() && dns.options.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for s in &dns.servers {
+        out.push_str("nameserver ");
+        out.push_str(s);
+        out.push('\n');
+    }
+    if !dns.searches.is_empty() {
+        out.push_str("search ");
+        out.push_str(&dns.searches.join(" "));
+        out.push('\n');
+    }
+    if !dns.options.is_empty() {
+        out.push_str("options ");
+        out.push_str(&dns.options.join(" "));
+        out.push('\n');
+    }
+    Some(out)
 }
 
 /// True iff host `pid`'s `/proc/<pid>/status` `NSpid:` line has innermost (last)

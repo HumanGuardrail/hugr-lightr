@@ -127,6 +127,7 @@ fn desired_caps(
 
 #[cfg(target_os = "linux")]
 mod ns_impl {
+    use super::super::spec::BindMount;
     use super::{desired_caps, Engine, ExecSpec, CAP_LAST_CAP};
     use lightr_core::{LightrError, Result};
     use std::ffi::CString;
@@ -181,6 +182,14 @@ mod ns_impl {
             // step (after caps), fail-closed. `None` ⇒ byte-identical to the pre-#106
             // path (no attr write).
             let apparmor: Option<String> = spec.apparmor.map(|s| s.to_owned());
+            // WP-#107 (CRI GAP 1/2/3): CRI container/sandbox setup the ns engine must
+            // honor — volume bind mounts, the synthesized /etc/resolv.conf content, and
+            // the sandbox hostname (which also drives a CLONE_NEWUTS unshare). Captured
+            // (cloned/owned) pre-fork like `command`/`cap_*` so PID 1 owns its copies.
+            // All three default to empty/None ⇒ byte-identical to the pre-#107 path.
+            let bind_mounts: Vec<BindMount> = spec.bind_mounts.to_vec();
+            let resolv_conf: Option<String> = spec.resolv_conf.map(|s| s.to_owned());
+            let hostname: Option<String> = spec.hostname.map(|s| s.to_owned());
 
             // WP-#95: fork the SETUP process. NOTE (corrected from a wrong pre-#95
             // comment): this child does NOT become PID 1 — `unshare(CLONE_NEWPID)`
@@ -213,6 +222,9 @@ mod ns_impl {
                         cgroup_name.as_deref(),
                         exec_ready_fd,
                         apparmor.as_deref(),
+                        &bind_mounts,
+                        resolv_conf.as_deref(),
+                        hostname.as_deref(),
                     );
                     std::process::exit(rc);
                 }
@@ -267,6 +279,12 @@ mod ns_impl {
         cgroup_name: Option<&str>,
         exec_ready_fd: Option<libc::c_int>,
         apparmor: Option<&str>,
+        // WP-#107 (CRI GAP 1/2/3): CRI volume bind mounts, the synthesized
+        // /etc/resolv.conf content, and the sandbox hostname. Empty/None ⇒ the
+        // pre-#107 path is unchanged.
+        bind_mounts: &[BindMount],
+        resolv_conf: Option<&str>,
+        hostname: Option<&str>,
     ) -> i32 {
         // WP-#99: JOIN the pod's existing netns BEFORE `unshare(CLONE_NEWUSER)`.
         // THE ordering rule: we must `setns(CLONE_NEWNET)` while still real root in
@@ -302,6 +320,15 @@ mod ns_impl {
         // NOT also create a fresh one — `join_netns` wins over `net_isolate`.
         if net_isolate && join_netns.is_none() {
             flags |= libc::CLONE_NEWNET;
+        }
+        // WP-#107 (CRI GAP 3, "set hostname"): when the sandbox sets a hostname we
+        // must own a private UTS namespace so `sethostname` (in PID 1) changes ONLY
+        // the container's hostname, not the host's. Added to the SAME unshare set as
+        // USER/NS/PID — it does not disturb the netns-join/userns ordering (#99–#106:
+        // the netns join already happened via setns ABOVE; this is the fresh-unshare
+        // set). `None` ⇒ no UTS ns (unchanged behavior).
+        if hostname.is_some() {
+            flags |= libc::CLONE_NEWUTS;
         }
         if unsafe { libc::unshare(flags) } != 0 {
             eprintln!(
@@ -491,6 +518,69 @@ mod ns_impl {
             // 1 is in the new pid ns. Best-effort (log + continue), but it should now
             // succeed; the CI hard-requires it.
             mount_proc(&rootfs.join("proc"));
+
+            // 3b. WP-#107 (CRI GAP 2, "DNS config"): write the synthesized
+            // /etc/resolv.conf into the rootfs BEFORE pivot_root (Docker/runc do this),
+            // overwriting whatever the image carried. We write through the
+            // still-unpivoted rootfs path (`<rootfs>/etc/resolv.conf`). `None` ⇒ skip
+            // entirely (image resolv.conf untouched). Fail-closed: a requested DNS
+            // config that cannot be written is a real error (the kubelet asked for
+            // specific resolvers — silently dropping them is a conformance lie).
+            if let Some(content) = resolv_conf {
+                if let Err(e) = write_rootfs_file(rootfs, "etc/resolv.conf", content.as_bytes()) {
+                    eprintln!("lightr-engine ns: write /etc/resolv.conf failed: {e}");
+                    signal_setup_failed(exec_ready_fd, "write /etc/resolv.conf failed"); // WP-#107
+                    unsafe { libc::_exit(1) };
+                }
+            }
+
+            // 3c. WP-#107 (CRI GAP 3, "set hostname"): write /etc/hostname into the
+            // rootfs BEFORE pivot_root (runc writes BOTH the file and calls
+            // sethostname). The kernel-level `sethostname` is done just below (we are
+            // in the new UTS ns from the unshare). `None` ⇒ skip. Fail-closed: a
+            // requested hostname that cannot be written is a real error.
+            if let Some(name) = hostname {
+                let mut line = name.as_bytes().to_vec();
+                line.push(b'\n');
+                if let Err(e) = write_rootfs_file(rootfs, "etc/hostname", &line) {
+                    eprintln!("lightr-engine ns: write /etc/hostname failed: {e}");
+                    signal_setup_failed(exec_ready_fd, "write /etc/hostname failed"); // WP-#107
+                    unsafe { libc::_exit(1) };
+                }
+                // sethostname in the new UTS ns (we hold CAP_SYS_ADMIN in the userns).
+                // Fail-closed: a requested hostname that cannot be set is a real error.
+                let bytes = name.as_bytes();
+                let r = unsafe {
+                    libc::sethostname(bytes.as_ptr() as *const libc::c_char, bytes.len())
+                };
+                if r != 0 {
+                    let e = std::io::Error::last_os_error();
+                    eprintln!("lightr-engine ns: sethostname({name:?}) failed: {e}");
+                    signal_setup_failed(exec_ready_fd, "sethostname failed"); // WP-#107
+                    unsafe { libc::_exit(1) };
+                }
+            }
+
+            // 3d. WP-#107 (CRI GAP 1, "starting container with volume"): apply the CRI
+            // volume bind mounts. MUST be done BEFORE pivot_root: the `host_path` is a
+            // HOST path, only reachable while the host fs is still mounted — after
+            // pivot_root + the put_old MNT_DETACH it is gone (the same reason the /dev
+            // binds reference the old root pre-unmount). We bind into the rootfs at
+            // `<rootfs>/<container_path>` (still the pre-pivot path), `mkdir -p`ing the
+            // target first (the image may lack it). `host_path` is already realpath'd
+            // host-side in build_ns_plan (the symlink-host-path spec). Fail-closed: a
+            // volume that cannot be applied aborts the start (a missing volume is a real
+            // error). Empty ⇒ skipped (unchanged behavior).
+            for m in bind_mounts {
+                if let Err(e) = apply_bind_mount(rootfs, m) {
+                    eprintln!(
+                        "lightr-engine ns: bind mount {:?} -> {:?} failed: {e}",
+                        m.host_path, m.container_path
+                    );
+                    signal_setup_failed(exec_ready_fd, "volume bind mount failed"); // WP-#107
+                    unsafe { libc::_exit(1) };
+                }
+            }
 
             // 4. Create put_old dir inside rootfs, then pivot_root
             let put_old = rootfs.join(".put_old");
@@ -1176,6 +1266,76 @@ mod ns_impl {
             // Best-effort default: note it and continue (no /dev/shm is degraded,
             // not fatal, for a run that did not request a specific size).
             eprintln!("lightr-engine ns: default /dev/shm tmpfs mount failed (continuing): {e}");
+        }
+        Ok(())
+    }
+
+    /// WP-#107 (CRI GAP 2/3): write `content` to `<rootfs>/<rel>` (e.g.
+    /// `etc/resolv.conf`, `etc/hostname`) from PID 1 BEFORE pivot_root. `mkdir -p`s
+    /// the parent (`etc/`) first — the CAS rootfs may lack it. Returns an honest
+    /// `io::Error` so the caller fails closed. Uses std file I/O, consistent with the
+    /// other PID-1 setup steps (`create_dir_all`, `symlink`); the child is
+    /// single-threaded post-fork.
+    fn write_rootfs_file(
+        rootfs: &std::path::Path,
+        rel: &str,
+        content: &[u8],
+    ) -> std::io::Result<()> {
+        let target = rootfs.join(rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&target, content)
+    }
+
+    /// WP-#107 (CRI GAP 1): bind-mount one CRI volume into the rootfs BEFORE
+    /// pivot_root. The target is `<rootfs>/<container_path>` (leading `/` stripped so
+    /// `join` stays inside the rootfs); `mkdir -p` it first (the image may lack it).
+    /// The source `host_path` is already host-side realpath'd in build_ns_plan (the
+    /// symlink-host-path spec), so we bind it verbatim. `MS_BIND|MS_REC` mounts the
+    /// dir; when `readonly`, a second `MS_BIND|MS_REMOUNT|MS_RDONLY` makes it RO (the
+    /// canonical two-step). Returns an honest `io::Error` so the caller fails closed.
+    fn apply_bind_mount(
+        rootfs: &std::path::Path,
+        m: &BindMount,
+    ) -> std::io::Result<()> {
+        use std::ffi::CString;
+        // Strip a leading '/' so `container_path` joins INSIDE the rootfs.
+        let rel = m.container_path.trim_start_matches('/');
+        let target = rootfs.join(rel);
+        std::fs::create_dir_all(&target)?;
+
+        let src = CString::new(m.host_path.as_bytes())
+            .map_err(|_| std::io::Error::other("bind mount host_path has interior NUL"))?;
+        let tgt = CString::new(target.as_os_str().as_encoded_bytes())
+            .map_err(|_| std::io::Error::other("bind mount target has interior NUL"))?;
+
+        let r = unsafe {
+            libc::mount(
+                src.as_ptr(),
+                tgt.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND | libc::MS_REC,
+                std::ptr::null(),
+            )
+        };
+        if r != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        if m.readonly {
+            let r = unsafe {
+                libc::mount(
+                    std::ptr::null(),
+                    tgt.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
+                    std::ptr::null(),
+                )
+            };
+            if r != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
         }
         Ok(())
     }

@@ -133,6 +133,9 @@ fn boot_vm(
         exec_ready_fd: None,
         // WP-#106: vz example; no ns AppArmor profile. None.
         apparmor: None,
+        // WP-#107: no CRI volume mounts / DNS / hostname here.
+        bind_mounts: &[],
+        resolv_conf: None,
     };
     let code = engine
         .run(&spec)

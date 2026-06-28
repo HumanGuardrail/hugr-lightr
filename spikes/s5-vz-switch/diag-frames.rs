@@ -121,6 +121,9 @@ fn main() {
         exec_ready_fd: None,
         // WP-#106: stale spike (not a workspace member); kept for field-completeness.
         apparmor: None,
+        // WP-#107: no CRI volume mounts / DNS / hostname here.
+        bind_mounts: &[],
+        resolv_conf: None,
     };
     let code = engine.run(&spec).unwrap();
     let so = std::fs::read_to_string(rootfs_dir.join(".lightr-stdout")).unwrap_or_default();
