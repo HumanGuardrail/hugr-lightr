@@ -31,6 +31,12 @@ impl Engine for NativeEngine {
         // RLIMIT_DATA hook for memory_bytes; cpu_millis is unsupported on native
         // (returns honest Err). No-op when limits are unlimited; Err on macOS cap.
         crate::limits::apply_native(&mut cmd, &spec.limits)?;
+        // `--ulimit`: install a `pre_exec` `setrlimit` hook for each requested
+        // per-process limit (the same idiom as `apply_native`'s memory RLIMIT
+        // hook). Empty ⇒ no hook installed (byte-identical to before). Fail-closed:
+        // a failing `setrlimit` (e.g. a rootless hard-limit raise ⇒ EPERM) aborts
+        // the exec from the pre_exec closure (the spawn surfaces the io::Error).
+        crate::limits::apply_native_ulimits(&mut cmd, spec.ulimits);
         let status = cmd.status().map_err(LightrError::Io)?;
         Ok(exit_code(status))
     }

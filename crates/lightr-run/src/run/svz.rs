@@ -195,6 +195,8 @@ pub(super) fn supervise_vz(dir: &std::path::Path, spec: &SpecOnDisk, store: &Sto
                         bind_mounts: &[],
                         resolv_conf: None,
                         tmpfs: &[],
+                        // --ulimit: vz is its own VM; no ns setrlimit here.
+                        ulimits: &[],
                     };
                     engine.run(&spec).unwrap_or(255)
                 }

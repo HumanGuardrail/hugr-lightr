@@ -99,6 +99,8 @@ pub(in crate::build) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
         bind_mounts: &[],
         resolv_conf: None,
         tmpfs: &[],
+        // --ulimit: a build RUN step sets no per-process rlimits. Default.
+        ulimits: &[],
     };
     let code = eng.run(&spec)?;
     if code != 0 {

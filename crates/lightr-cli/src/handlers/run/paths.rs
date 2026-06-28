@@ -8,7 +8,7 @@
 use std::io::Write;
 
 use lightr_core::ResourceLimits;
-use lightr_engine::{engine_for, EngineKind, ExecSpec, TmpfsMount};
+use lightr_engine::{engine_for, EngineKind, ExecSpec, TmpfsMount, Ulimit};
 use lightr_index;
 use lightr_run::healthcheck::Healthcheck;
 use lightr_run::{
@@ -98,6 +98,10 @@ pub(super) fn run_engine(
     // `--tmpfs DST[:size=..,mode=..]` ⇒ the ns engine mounts a tmpfs at each target
     // after /dev/shm. native/vz are honest-errored at the handler. RUNTIME-ONLY.
     tmpfs: &[TmpfsMount],
+    // `--ulimit TYPE=SOFT[:HARD]` ⇒ per-process setrlimit caps. The native engine
+    // (pre_exec setrlimit) + the ns engine (setrlimit in PID 1) apply them; vz is
+    // honest-errored at the handler. RUNTIME-ONLY; never part of the memo key.
+    ulimits: &[Ulimit],
 ) -> i32 {
     // Hydrate rootfs ref into a temp dir if provided
     let rootfs_tmp: Option<tempfile::TempDir>;
@@ -211,6 +215,9 @@ pub(super) fn run_engine(
         // `--tmpfs`: the ns engine mounts a tmpfs at each target after /dev/shm.
         // Empty ⇒ unchanged.
         tmpfs,
+        // `--ulimit`: native (pre_exec) + ns (PID 1) apply per-process setrlimit
+        // caps. Empty ⇒ unchanged.
+        ulimits,
     };
 
     let code = match engine.run(&spec) {

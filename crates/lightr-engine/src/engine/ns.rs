@@ -128,7 +128,7 @@ fn desired_caps(
 #[cfg(target_os = "linux")]
 mod ns_impl {
     use super::super::seccomp;
-    use super::super::spec::{BindMount, TmpfsMount};
+    use super::super::spec::{BindMount, TmpfsMount, Ulimit};
     use super::{desired_caps, Engine, ExecSpec, CAP_LAST_CAP};
     use lightr_core::{LightrError, Result};
     use std::ffi::CString;
@@ -212,6 +212,12 @@ mod ns_impl {
             // like the CRI fields above so PID 1 owns its copies. Empty ⇒ unchanged.
             let add_host: Vec<(String, String)> = spec.add_host.to_vec();
             let tmpfs: Vec<TmpfsMount> = spec.tmpfs.to_vec();
+            // `--ulimit` (Docker parity): per-process `setrlimit` caps. Captured
+            // (cloned) pre-fork like `tmpfs`/`cap_*` so PID 1 owns its copy; applied
+            // EARLY in PID 1 (before the caps/user/seccomp block — a hard-limit raise
+            // still holds CAP_SYS_RESOURCE there, a lowering always works). Empty ⇒
+            // no-op (byte-identical to the pre-feature path).
+            let ulimits: Vec<Ulimit> = spec.ulimits.to_vec();
 
             // WP-#95: fork the SETUP process. NOTE (corrected from a wrong pre-#95
             // comment): this child does NOT become PID 1 — `unshare(CLONE_NEWPID)`
@@ -251,6 +257,7 @@ mod ns_impl {
                         hostname.as_deref(),
                         &add_host,
                         &tmpfs,
+                        &ulimits,
                     );
                     std::process::exit(rc);
                 }
@@ -326,6 +333,9 @@ mod ns_impl {
         // AFTER /dev/shm. Empty ⇒ the pre-feature path is unchanged.
         add_host: &[(String, String)],
         tmpfs: &[TmpfsMount],
+        // `--ulimit`: per-process `setrlimit` caps applied in PID 1, EARLY (before
+        // the caps/user/seccomp block). Empty ⇒ the pre-feature path is unchanged.
+        ulimits: &[Ulimit],
     ) -> i32 {
         // WP-#99: JOIN the pod's existing netns BEFORE `unshare(CLONE_NEWUSER)`.
         // THE ordering rule: we must `setns(CLONE_NEWNET)` while still real root in
@@ -817,6 +827,10 @@ mod ns_impl {
                 }
                 if child == 0 {
                     // ── great-grandchild: the workload (PID 2) ──
+                    // `--ulimit`: apply per-process `setrlimit` caps EARLY — BEFORE
+                    // caps/user/seccomp, so a hard-limit RAISE still holds
+                    // CAP_SYS_RESOURCE (a lowering always works). Fail-closed.
+                    apply_ulimits_if_any(ulimits, exec_ready_fd);
                     // Caps applied LAST, in the execing process (fail-closed: a capset
                     // failure `_exit`s rather than exec with the WRONG set).
                     apply_caps_if_any(desired_caps_vec.as_deref(), exec_ready_fd);
@@ -856,8 +870,12 @@ mod ns_impl {
                 // PID 1 reaper loop — never returns (always `_exit`s).
                 reaper_loop(child);
             } else {
-                // No `--init`: the workload itself is PID 1. Caps LAST, in the execing
-                // process (fail-closed via `_exit`).
+                // No `--init`: the workload itself is PID 1.
+                // `--ulimit`: apply per-process `setrlimit` caps EARLY — BEFORE
+                // caps/user/seccomp (a hard-limit raise still holds CAP_SYS_RESOURCE;
+                // a lowering always works). Fail-closed.
+                apply_ulimits_if_any(ulimits, exec_ready_fd);
+                // Caps LAST, in the execing process (fail-closed via `_exit`).
                 apply_caps_if_any(desired_caps_vec.as_deref(), exec_ready_fd);
                 // WP-#106: apply the AppArmor profile LAST (after caps), right before
                 // execv (aa_change_onexec). Fail-closed: a profile that can't be
@@ -920,6 +938,41 @@ mod ns_impl {
     /// — otherwise the kernel-closed fd reads as EOF ⇒ a false `Running`. The fd is
     /// threaded in from the (only) two call sites, both in the PID-1 branch. `None`
     /// (non-CRI, or no pipe) ⇒ no-op.
+    /// `--ulimit`: apply each per-process `setrlimit` cap in the EXECing process,
+    /// EARLY (before caps/user/seccomp). For each entry build `libc::rlimit`
+    /// (mapping the `u64::MAX` sentinel → `libc::RLIM_INFINITY`) and `setrlimit`.
+    /// Empty ⇒ no-op (byte-identical to the pre-feature path). Called post-fork, so
+    /// a failing `setrlimit` is FAIL-CLOSED: it signals the exec-readiness pipe with
+    /// bytes (so the kernel-closed fd is NOT misread as EOF ⇒ a false `Running`) and
+    /// `_exit(1)`s rather than exec with the WRONG limits. A rootless hard-limit
+    /// RAISE beyond the inherited cap EPERMs here — an honest error, never a silent
+    /// drop. Mirrors `apply_caps_if_any`/`apply_user_if_any`.
+    fn apply_ulimits_if_any(ulimits: &[Ulimit], exec_ready_fd: Option<libc::c_int>) {
+        for u in ulimits {
+            let to_rlim = |v: u64| -> libc::rlim_t {
+                if v == u64::MAX {
+                    libc::RLIM_INFINITY
+                } else {
+                    v as libc::rlim_t
+                }
+            };
+            let rl = libc::rlimit {
+                rlim_cur: to_rlim(u.soft),
+                rlim_max: to_rlim(u.hard),
+            };
+            let r = unsafe { libc::setrlimit(u.resource as _, &rl) };
+            if r != 0 {
+                let e = std::io::Error::last_os_error();
+                eprintln!(
+                    "lightr-engine ns: --ulimit setrlimit(resource={}, soft={}, hard={}) failed: {e}",
+                    u.resource, u.soft, u.hard
+                );
+                signal_setup_failed(exec_ready_fd, "ulimit setrlimit failed");
+                unsafe { libc::_exit(1) };
+            }
+        }
+    }
+
     fn apply_caps_if_any(desired: Option<&[u32]>, exec_ready_fd: Option<libc::c_int>) {
         if let Some(d) = desired {
             if let Err(e) = apply_caps(d) {

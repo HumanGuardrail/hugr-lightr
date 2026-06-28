@@ -121,6 +121,8 @@ pub fn run(a: RunArgs, json: bool) -> i32 {
     let runflags = match (RawRunFlags {
         volume: a.volume,
         tmpfs: a.tmpfs,
+        // --ulimit: carried through; create has no native exec yet (recorded slot).
+        ulimit: a.ulimit,
         name: a.name,
         rm: a.rm,
         entrypoint: a.entrypoint,

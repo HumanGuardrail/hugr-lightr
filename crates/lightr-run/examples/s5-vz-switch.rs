@@ -139,6 +139,8 @@ fn boot_vm(
         bind_mounts: &[],
         resolv_conf: None,
         tmpfs: &[],
+        // --ulimit: vz example; no ns setrlimit here.
+        ulimits: &[],
     };
     let code = engine
         .run(&spec)

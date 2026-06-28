@@ -87,6 +87,30 @@ pub struct TmpfsMount {
     pub mode: String,
 }
 
+// ── ulimit (--ulimit) ───────────────────────────────────────────────────────
+//
+// One `--ulimit` request AFTER parsing. The `ns` engine applies it in PID 1 via
+// `setrlimit(resource, …)` BEFORE the caps/user/seccomp block (lowering always
+// works rootless; a hard-limit RAISE still has CAP_SYS_RESOURCE there); the
+// native engine applies it via a `pre_exec` `setrlimit` hook (mirrors
+// `limits::install_memory_rlimit`). `resource` is the libc `RLIMIT_*` integer.
+// `soft`/`hard` are absolute limit values in the resource's own unit; the
+// sentinel `u64::MAX` represents `RLIM_INFINITY` (`--ulimit nofile=-1`/
+// `unlimited`) and is mapped to `libc::RLIM_INFINITY` when building the
+// `libc::rlimit`. DISTINCT from the cgroup-backed `ResourceLimits` (memory/cpu/
+// pids) — these are per-process `setrlimit` caps. RUNTIME-ONLY (never a memo key).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ulimit {
+    /// The Linux `RLIMIT_*` resource integer (e.g. `RLIMIT_NOFILE`). Stored as a
+    /// `libc::c_int` numeric value so the CLI parser compiles host-side (macOS)
+    /// where some `libc::RLIMIT_*` constants differ; the engine applies it on Linux.
+    pub resource: libc::c_int,
+    /// Soft limit (`rlim_cur`). `u64::MAX` ⇒ `RLIM_INFINITY`.
+    pub soft: u64,
+    /// Hard limit (`rlim_max`). `u64::MAX` ⇒ `RLIM_INFINITY`.
+    pub hard: u64,
+}
+
 // ── ExecSpec ──────────────────────────────────────────────────────────────────
 
 pub struct ExecSpec<'a> {
@@ -293,4 +317,19 @@ pub struct ExecSpec<'a> {
     /// rootfs; vz mounts live inside the guest). RUNTIME-ONLY — NEVER a memo key.
     /// Default `&[]` ⇒ byte-identical to the pre-feature path.
     pub tmpfs: &'a [TmpfsMount],
+
+    /// `--ulimit` (Docker parity): per-process resource limits applied via
+    /// `setrlimit`. BOTH the `ns` and `native` engines enforce them: the `ns`
+    /// engine applies each in PID 1 EARLY (before the caps/user/seccomp block, so
+    /// a hard-limit raise still holds CAP_SYS_RESOURCE and a lowering always
+    /// works); the `native` engine installs a `pre_exec` `setrlimit` hook (the
+    /// same idiom as `limits::install_memory_rlimit` for `--memory`). For each
+    /// entry it builds `libc::rlimit { rlim_cur, rlim_max }` (mapping the
+    /// `u64::MAX` sentinel → `libc::RLIM_INFINITY`) and calls `setrlimit`.
+    /// FAIL-CLOSED: a non-zero `setrlimit` (e.g. a rootless hard-limit RAISE
+    /// beyond the inherited cap ⇒ EPERM) aborts the run rather than exec with the
+    /// WRONG limits (an honest error, never a silent drop). vz is honest-errored at
+    /// the handler (its limits live inside the guest). RUNTIME-ONLY — NEVER a memo
+    /// key. Default `&[]` ⇒ byte-identical to the pre-feature path.
+    pub ulimits: &'a [Ulimit],
 }

@@ -138,6 +138,13 @@ pub(crate) struct RunArgs {
     /// Mount a tmpfs directory (docker --tmpfs, repeatable)
     #[arg(long)]
     pub(crate) tmpfs: Vec<String>,
+    /// Set a per-process resource limit (docker --ulimit, repeatable):
+    /// `TYPE=SOFT[:HARD]`. TYPE is e.g. nofile/nproc/core/fsize/cpu/memlock/
+    /// stack/as/data/rss/nice/rtprio/sigpending/msgqueue/locks. `-1`/`unlimited`
+    /// ⇒ RLIM_INFINITY; HARD omitted ⇒ HARD=SOFT. Enforced on native + ns (vz
+    /// honest-errors — limits live in the guest).
+    #[arg(long, value_name = "TYPE=SOFT[:HARD]")]
+    pub(crate) ulimit: Vec<String>,
     // ── WP-CLI-TRIO / RC-FLAGS: 11 run-config flags, WIRED to RunSpec carry-
     // fields (off the WP-RUNFLAGS stub guard). RUNTIME-ONLY (never keyed).
     // `hostname` + `label` already declared above; the rest are added here. ─────
