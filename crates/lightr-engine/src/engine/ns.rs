@@ -677,8 +677,11 @@ mod ns_impl {
             // closed: an unreadable/unparseable/unsupported profile `_exit`s rather
             // than exec unfiltered (the same discipline as #106 AppArmor). `None` ⇒
             // byte-identical to the pre-#108 path.
+            // `default` ⇒ the BUILT-IN curated allow-list (compile_default,
+            // embedded). `unconfined` ⇒ no filter. Anything else is a PATH to an
+            // OCI profile. `None` ⇒ byte-identical to the pre-#108 path.
             let compiled_seccomp: Option<seccomp::CompiledSeccomp> = match seccomp {
-                Some(p) if p != "unconfined" => match seccomp::compile_from_path(p) {
+                Some("default") => match seccomp::compile_default() {
                     Ok(c) => Some(c),
                     Err(e) => {
                         eprintln!("lightr-engine ns: seccomp: {e}");
@@ -686,7 +689,15 @@ mod ns_impl {
                         unsafe { libc::_exit(1) };
                     }
                 },
-                _ => None,
+                Some("unconfined") | None => None,
+                Some(p) => match seccomp::compile_from_path(p) {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        eprintln!("lightr-engine ns: seccomp: {e}");
+                        signal_setup_failed(exec_ready_fd, &format!("seccomp: {e}"));
+                        unsafe { libc::_exit(1) };
+                    }
+                },
             };
 
             // 4. Create put_old dir inside rootfs, then pivot_root

@@ -683,6 +683,38 @@ jobs:
           [ "$SC_FC_EXIT" != 0 ]  || { echo "FAIL: an unloadable --seccomp profile ran anyway (NOT fail-closed — ran unfiltered)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "SECCOMP=PASS"; else echo "SECCOMP=FAIL"; exit 1; fi  # gate for real
 
+      - name: Prove --seccomp default installs the built-in curated profile + runs a normal workload (WP-#111+)
+        run: |
+          # Prove the BUILT-IN `--seccomp default` profile (vendored allow-list,
+          # default-deny) is ACTUALLY installed as a filter (Seccomp: 2 ==
+          # SECCOMP_MODE_FILTER in /proc/self/status) AND that the allow-list is
+          # COMPLETE enough to let a normal busybox workload run to completion
+          # (RAN_OK) — i.e. the curated list is not so tight it breaks the C
+          # runtime / shell. Control: WITHOUT --seccomp the same probe shows
+          # Seccomp: 0 (no filter). Robustly parse the numeric value with awk.
+          set +e
+          BIN="$PWD/target/release/lightr"
+
+          echo "=== enforced: --seccomp default → expect Seccomp:2 (filter) + RAN_OK ==="
+          "$BIN" run --engine ns --seccomp default --rootfs alpine-aa -- /bin/busybox sh -c 'grep Seccomp /proc/self/status; echo RAN_OK' >/tmp/scd_enf.txt 2>&1
+          SCD_ENF_EXIT=$?; echo "scd_enf_exit=$SCD_ENF_EXIT"; cat /tmp/scd_enf.txt
+
+          echo "=== control: NO --seccomp → expect Seccomp:0 (no filter) ==="
+          "$BIN" run --engine ns --rootfs alpine-aa -- /bin/busybox sh -c 'grep Seccomp /proc/self/status' >/tmp/scd_ctl.txt 2>&1
+          SCD_CTL_EXIT=$?; echo "scd_ctl_exit=$SCD_CTL_EXIT"; cat /tmp/scd_ctl.txt
+
+          ENF_VAL=$(awk '/^Seccomp:/{print $2}' /tmp/scd_enf.txt | tail -1)
+          CTL_VAL=$(awk '/^Seccomp:/{print $2}' /tmp/scd_ctl.txt | tail -1)
+          echo "enforced Seccomp=$ENF_VAL  control Seccomp=$CTL_VAL"
+
+          # ── GATE ─────────────────────────────────────────────────────────────────
+          FAIL=0
+          [ "$SCD_ENF_EXIT" = 0 ] || { echo "FAIL: --seccomp default run failed (exit $SCD_ENF_EXIT) — the curated allow-list may be incomplete"; FAIL=1; }
+          [ "$ENF_VAL" = 2 ] || { echo "FAIL: --seccomp default did NOT install a filter (Seccomp=$ENF_VAL, want 2)"; FAIL=1; }
+          grep -q RAN_OK /tmp/scd_enf.txt || { echo "FAIL: busybox workload did NOT reach RAN_OK under --seccomp default — allow-list breaks a normal workload"; FAIL=1; }
+          [ "$CTL_VAL" = 0 ] || { echo "FAIL: control (no --seccomp) shows a filter (Seccomp=$CTL_VAL, want 0) — baseline wrong"; FAIL=1; }
+          if [ "$FAIL" = 0 ]; then echo "SECCOMP_DEFAULT=PASS"; else echo "SECCOMP_DEFAULT=FAIL"; exit 1; fi
+
       - name: Prove --add-host writes /etc/hosts + --tmpfs mounts a real tmpfs (WP-#112)
         run: |
           # WP-#112 (Docker parity): prove the `ns` engine ACTUALLY (1) appends an
