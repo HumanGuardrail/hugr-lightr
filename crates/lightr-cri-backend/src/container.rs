@@ -385,8 +385,9 @@ impl LightrBackend {
 
         // WP-#99 (CRI slice 1): decide the execution path. The NS path runs the
         // REAL image rootfs under the `ns` engine, joined into the pod's netns,
-        // by re-exec'ing THIS binary as `__ns-run` with a `RunDescriptor` piped on
-        // stdin. It is taken ONLY when (linux + the pod has a pinned netns + the
+        // by re-exec'ing THIS binary as `__ns-run` with a `RunDescriptor` in the
+        // LIGHTR_NSRUN_DESC env (off stdin, so the workload's stdin is free for
+        // attach). It is taken ONLY when (linux + the pod has a pinned netns + the
         // ns engine is available + the image hydrates). EVERY other case falls
         // back to today's host-process path (behavior-preserving) — `ns_descriptor`
         // is `None` there, including on non-linux (so the macOS gate is untouched).
@@ -443,8 +444,8 @@ impl LightrBackend {
             readiness_rd = Some(rd);
         }
 
-        let mut cmd = if ns_descriptor.is_some() {
-            // ── NS path: re-exec `<current_exe> __ns-run`; descriptor on stdin. ──
+        let mut cmd = if let Some(desc) = &ns_descriptor {
+            // ── NS path: re-exec `<current_exe> __ns-run`; descriptor in env. ──
             // current_exe is required to re-exec; if it somehow fails we cannot take
             // the ns path — but `try_build_ns_plan` already hydrated, so prefer an
             // honest spawn error over a silent rootfs-less host run.
@@ -453,11 +454,29 @@ impl LightrBackend {
             })?;
             let mut c = std::process::Command::new(exe);
             c.arg("__ns-run");
-            // stdin carries the descriptor (we write it post-spawn, then close);
-            // stdout/stderr are the container's, teed to the CRI log.
-            c.stdin(std::process::Stdio::piped());
+            // The RunDescriptor travels in an ENV var (mirrors `__ns-exec`'s
+            // LIGHTR_NSEXEC_DESC), so the shim's STDIN stays FREE for the workload.
+            // The shim `remove_var`s it before `engine.run`, so it never reaches the
+            // container. A serialize failure here is fatal — fail closed rather than
+            // spawn a shim that will exit with "env unset".
+            let desc_json = serde_json::to_string(desc).map_err(|e| {
+                BackendError::Internal(format!("serialize ns descriptor: {e}"))
+            })?;
+            c.env(crate::ns_run::NSRUN_DESC_ENV, desc_json);
+            // stdout/stderr are the container's, teed to the CRI log. stdin is the
+            // container's own stdin now (the descriptor moved to env): a backend-held
+            // pipe when the container requested it (so `open_attach` can WRITE to the
+            // live workload — the critest attach test's interactive `/bin/sh`), else
+            // /dev/null so a non-interactive workload gets a benign EOF (byte-identical
+            // outcome to slice 1's post-write stdin close, but WITHOUT the descriptor
+            // bytes). `register_io_and_tee` adopts the piped stdin into the io-table.
             c.stdout(std::process::Stdio::piped());
             c.stderr(std::process::Stdio::piped());
+            c.stdin(if rec.config.stdin {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            });
             c
         } else {
             // ── HOST path: today's exact behavior (unchanged). ──
@@ -539,8 +558,8 @@ impl LightrBackend {
         // the backend kept it open, the read end would never see EOF (the backend
         // itself would be a lingering writer) — so we would block until the container
         // exits instead of until its workload `execv`'s (THE #1 risk). The descriptor
-        // still carries the fd NUMBER (sent over stdin below) — the shim's INHERITED
-        // copy is what reaches PID 1, unaffected by this close.
+        // still carries the fd NUMBER (in the LIGHTR_NSRUN_DESC env set on `cmd`) —
+        // the shim's INHERITED copy is what reaches PID 1, unaffected by this close.
         #[cfg(target_os = "linux")]
         if let Some(desc) = &ns_descriptor {
             if let Some(wr) = desc.exec_ready_fd {
@@ -548,25 +567,12 @@ impl LightrBackend {
             }
         }
 
-        // WP-#99 (NS path): hand the `RunDescriptor` to the `__ns-run` shim over
-        // its stdin, then CLOSE stdin (drop) so the shim's `read_to_end` returns
-        // and it proceeds to run the ns engine. Done BEFORE `register_io_and_tee`
-        // so the tee never tries to adopt this stdin as an attach sink (it takes
-        // `child.stdin`, now already gone — so ns containers have no attach-stdin
-        // in slice 1, acceptable). A write failure here means the shim will EOF on
-        // empty stdin and fail closed (exit 1), which the reaper records honestly.
-        if let Some(desc) = &ns_descriptor {
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                match serde_json::to_vec(desc) {
-                    Ok(bytes) => {
-                        let _ = stdin.write_all(&bytes);
-                    }
-                    Err(e) => eprintln!("lightr-cri: serialize ns descriptor: {e}"),
-                }
-                // `stdin` drops here → EOF for the shim.
-            }
-        }
+        // WP-#99 → attach fix: the `RunDescriptor` now travels in the
+        // `LIGHTR_NSRUN_DESC` env var (set on `cmd` above), NOT on stdin — so the
+        // shim's STDIN is the container's own stdin. We must NOT take/write it here:
+        // `register_io_and_tee` (below) adopts the piped stdin write-end into the
+        // io-table so `open_attach` can feed the live workload, exactly like the host
+        // path. For a non-stdin container the shim's stdin is /dev/null (benign EOF).
 
         // Tee stdout/stderr to the CRI log and (on unix) register the live stdio
         // in the io-table for `open_attach` (WP-CRI-STREAM) — the SAME single

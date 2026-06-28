@@ -6,9 +6,22 @@
 //! never drift in field order/spelling (a copy-paste of the struct on each side
 //! is exactly the silent-drift bug this avoids).
 //!
-//! Transport: JSON over the shim child's STDIN (the backend writes it; the shim
-//! reads stdin to EOF and `serde_json::from_slice`s it). No temp file, no env —
-//! the descriptor never touches disk, and stdin is private to the parent/child.
+//! Transport: JSON in the env var `LIGHTR_NSRUN_DESC` (the backend sets it on the
+//! shim child; the shim reads + `serde_json::from_str`s it, then `remove_var`s it
+//! BEFORE running the engine so it never leaks into the container). This mirrors
+//! `__ns-exec`'s `LIGHTR_NSEXEC_DESC` and — crucially — leaves the shim child's
+//! STDIN FREE so an attachable container (`ContainerConfig.stdin == true`, e.g.
+//! the critest attach test's interactive `/bin/sh`) inherits a live stdin the
+//! backend can write to via `open_attach`. The descriptor never touches disk and
+//! carries no secrets.
+//!
+//! HISTORY: slice 1 (#99) transported the descriptor on the shim's STDIN. But the
+//! ns engine `execv`s with the shim's INHERITED stdio (it does not redirect fds
+//! 0/1/2), so a stdin-descriptor left the workload's fd 0 at EOF — a bare
+//! interactive `/bin/sh` (the cri-tools "should support attach" container, started
+//! with `Stdin: true, StdinOnce: true`) read EOF and exited BEFORE attach could
+//! connect → `container ... is not Running (state=Exited)`. Moving the descriptor
+//! off stdin (the proven `__ns-exec` pattern) frees fd 0 for the workload/attach.
 
 use serde::{Deserialize, Serialize};
 
@@ -101,25 +114,38 @@ pub struct NsBindMount {
     pub readonly: bool,
 }
 
+/// Env var carrying the [`RunDescriptor`] JSON to the `__ns-run` shim. Mirrors
+/// `__ns-exec`'s `LIGHTR_NSEXEC_DESC`. Off-stdin so the workload's stdin (fd 0) is
+/// FREE for attach (see the module doc). Removed by the shim before `engine.run`
+/// so it does not leak into the container (the ns engine `execv`s with inherited
+/// env).
+pub const NSRUN_DESC_ENV: &str = "LIGHTR_NSRUN_DESC";
+
 /// Entry point for the `__ns-run` re-exec shim: read a [`RunDescriptor`] (JSON)
-/// from STDIN to EOF, build an `ExecSpec`, run it under the `ns` engine joined
-/// into the pod's netns, and `exit` with the workload's code. NEVER returns.
+/// from the `LIGHTR_NSRUN_DESC` env var, build an `ExecSpec`, run it under the
+/// `ns` engine joined into the pod's netns, and `exit` with the workload's code.
+/// NEVER returns.
 ///
 /// This lives in `lightr-cri-backend` (not in `lightr-cri-serve`) so the shim
 /// reuses THIS crate's `lightr-engine` + `serde_json` deps — `lightr-cri-serve`
 /// is its own isolated workspace and only forwards `__ns-run` here. The ns engine
-/// inherits this process's stdio (so the container's stdout/stderr flow to the
-/// pipes the backend wired into the CRI log tee), and blocks until the workload
-/// exits. Fail-closed: any setup error exits non-zero.
+/// inherits this process's stdio (so the container's stdin/stdout/stderr are the
+/// fds the backend wired: stdin = the attach pipe when `config.stdin`, else
+/// /dev/null; stdout/stderr = the CRI-log tee pipes), and blocks until the
+/// workload exits. Fail-closed: any setup error exits non-zero.
 pub fn run_shim() -> ! {
-    use std::io::Read;
-
-    let mut buf = Vec::new();
-    if let Err(e) = std::io::stdin().read_to_end(&mut buf) {
-        eprintln!("lightr-cri ns-run: read descriptor from stdin failed: {e}");
-        std::process::exit(1);
-    }
-    let desc: RunDescriptor = match serde_json::from_slice(&buf) {
+    // Descriptor from the env var (JSON), then REMOVE it immediately so the ns
+    // engine's `execv` (which inherits this process's env) never carries it into
+    // the container. The shim is single-threaded here, so remove_var is sound.
+    let json = match std::env::var(NSRUN_DESC_ENV) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("lightr-cri ns-run: {NSRUN_DESC_ENV} unset: {e}");
+            std::process::exit(1);
+        }
+    };
+    std::env::remove_var(NSRUN_DESC_ENV);
+    let desc: RunDescriptor = match serde_json::from_str(&json) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("lightr-cri ns-run: bad descriptor JSON: {e}");
