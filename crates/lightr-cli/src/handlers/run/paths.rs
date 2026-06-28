@@ -102,6 +102,11 @@ pub(super) fn run_engine(
     // (pre_exec setrlimit) + the ns engine (setrlimit in PID 1) apply them; vz is
     // honest-errored at the handler. RUNTIME-ONLY; never part of the memo key.
     ulimits: &[Ulimit],
+    // `--oom-score-adj` ⇒ the ns engine writes /proc/self/oom_score_adj in PID 1
+    // (fail-closed). The native engine has its OWN apply path (apply_cfg on the
+    // memo path), so it ignores this ExecSpec field; vz's OOM tuning lives in the
+    // guest. RUNTIME-ONLY; never part of the memo key.
+    oom_score_adj: Option<i32>,
 ) -> i32 {
     // Hydrate rootfs ref into a temp dir if provided
     let rootfs_tmp: Option<tempfile::TempDir>;
@@ -218,6 +223,10 @@ pub(super) fn run_engine(
         // `--ulimit`: native (pre_exec) + ns (PID 1) apply per-process setrlimit
         // caps. Empty ⇒ unchanged.
         ulimits,
+        // `--oom-score-adj`: the ns engine writes /proc/self/oom_score_adj in PID 1.
+        // native ignores this field (it applies oom-score-adj via apply_cfg on the
+        // memo path — no double-apply); vz's OOM tuning lives in the guest.
+        oom_score_adj,
     };
 
     let code = match engine.run(&spec) {

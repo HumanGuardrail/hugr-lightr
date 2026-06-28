@@ -807,6 +807,26 @@ jobs:
           [ "$UL_VZ_EXIT" = 2 ] || { echo "FAIL: vz + --ulimit exit '$UL_VZ_EXIT' (expected 2 honest-error)"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "ULIMIT=PASS"; else echo "ULIMIT=FAIL"; exit 1; fi  # gate for real
 
+      - name: Prove --oom-score-adj applies on the ns engine (no longer a silent no-op)
+        run: |
+          # --oom-score-adj N → the ns engine writes N to /proc/self/oom_score_adj in
+          # PID 1, EARLY (before caps/user/seccomp). Before this WP it was a SILENT
+          # no-op on the ns engine (honored only natively). Proven by reading the
+          # workload's own /proc/self/oom_score_adj: 500 is a POSITIVE raise (always
+          # allowed rootless). Reuses alpine-aa.
+          set +e
+          BIN="$PWD/target/release/lightr"
+
+          echo "=== enforced: --oom-score-adj 500 → /proc/self/oom_score_adj == 500 ==="
+          "$BIN" run --engine ns --oom-score-adj 500 --rootfs alpine-aa -- /bin/busybox sh -c 'cat /proc/self/oom_score_adj' >/tmp/oom_500.txt 2>&1
+          OOM_EXIT=$?; GOT=$(sed -n 1p /tmp/oom_500.txt); echo "oom_exit=$OOM_EXIT got=$GOT"; cat /tmp/oom_500.txt
+
+          # ── GATE ────────────────────────────────────────────────────────────────
+          FAIL=0
+          [ "$OOM_EXIT" = 0 ] || { echo "FAIL: --oom-score-adj 500 run failed (exit $OOM_EXIT)"; FAIL=1; }
+          [ "$GOT" = 500 ] || { echo "FAIL: ns engine did NOT apply --oom-score-adj 500 (got '$GOT') — silent no-op on the ns engine"; FAIL=1; }
+          if [ "$FAIL" = 0 ]; then echo "OOM_ADJ=PASS"; else echo "OOM_ADJ=FAIL"; exit 1; fi  # gate for real
+
   cri-serve-smoke:
     # WP-#98: prove the COMPOSED CRI server (the REAL LightrBackend wired into the
     # sibling lightr-cri shell via crates/lightr-cri-serve) BUILDS and ANSWERS

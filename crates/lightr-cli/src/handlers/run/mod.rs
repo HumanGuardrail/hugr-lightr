@@ -549,6 +549,11 @@ pub fn run(
             // (setrlimit in PID 1) apply per-process resource caps. vz is
             // honest-errored above. RUNTIME-ONLY.
             &ulimits,
+            // `--oom-score-adj` ⇒ the ns engine writes /proc/self/oom_score_adj in
+            // PID 1 (fail-closed). native applies it via apply_cfg on the memo path
+            // (so this ExecSpec field is ignored there — no double-apply); vz's OOM
+            // tuning lives in the guest. RUNTIME-ONLY; never part of the memo key.
+            rc.oom_score_adj,
         );
     }
 

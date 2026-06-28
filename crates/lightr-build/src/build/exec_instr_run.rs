@@ -101,6 +101,8 @@ pub(in crate::build) fn run(ctx: &mut BuildCtx, form: &CmdForm) -> Result<()> {
         tmpfs: &[],
         // --ulimit: a build RUN step sets no per-process rlimits. Default.
         ulimits: &[],
+        // --oom-score-adj: a build RUN step sets no OOM score. Default.
+        oom_score_adj: None,
     };
     let code = eng.run(&spec)?;
     if code != 0 {
