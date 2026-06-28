@@ -106,6 +106,8 @@ pub(crate) fn run_vz_memo(
             bind_mounts: &[],
             resolv_conf: None,
             tmpfs: &[],
+            // --ulimit: the vz-memo path is its own VM; no ns setrlimit here.
+            ulimits: &[],
         };
         // Suppress the guest CONSOLE (boot log + exit marker) from the host's
         // stdout on a memo MISS: real stdout/stderr come from the capture files

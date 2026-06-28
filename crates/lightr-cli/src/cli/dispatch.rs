@@ -142,6 +142,8 @@ pub(crate) fn dispatch(json: bool, explain: bool, events: bool, verb: &str, cmd:
                     handlers::run::RawRunFlags {
                         volume: a.volume,
                         tmpfs: a.tmpfs,
+                        // --ulimit: parsed in the handler (parse_ulimits), like tmpfs.
+                        ulimit: a.ulimit,
                         name: a.name,
                         rm: a.rm,
                         entrypoint: a.entrypoint,

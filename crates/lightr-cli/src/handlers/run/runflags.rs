@@ -26,6 +26,9 @@ use lightr_run::{parse_v, MountKind, VolumeBind};
 pub struct RawRunFlags {
     pub volume: Vec<String>,
     pub tmpfs: Vec<String>,
+    /// `--ulimit TYPE=SOFT[:HARD]` (raw clap strings; parsed in the handler via
+    /// `parse_ulimits`, mirroring how `tmpfs` is parsed via `parse_tmpfs`).
+    pub ulimit: Vec<String>,
     pub name: Option<String>,
     pub rm: bool,
     pub entrypoint: Option<String>,
@@ -42,6 +45,9 @@ pub struct RawRunFlags {
 pub struct RunFlags {
     pub volumes: Vec<VolumeBind>,
     pub tmpfs: Vec<String>,
+    /// `--ulimit` raw strings, carried through (parsed in the handler via
+    /// `parse_ulimits`, mirroring `tmpfs`).
+    pub ulimit: Vec<String>,
     pub name: Option<String>,
     pub rm: bool,
     pub entrypoint: Option<Vec<String>>,
@@ -142,6 +148,7 @@ impl RawRunFlags {
         Ok(RunFlags {
             volumes,
             tmpfs: self.tmpfs,
+            ulimit: self.ulimit,
             name: self.name,
             rm: self.rm,
             entrypoint,

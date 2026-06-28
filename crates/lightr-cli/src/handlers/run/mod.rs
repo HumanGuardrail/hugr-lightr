@@ -20,7 +20,7 @@
 //! detached, vz without rootfs) are NOT memoized and take the plain engine path.
 
 use lightr_core::ResourceLimits;
-use lightr_engine::{EngineKind, TmpfsMount};
+use lightr_engine::{EngineKind, TmpfsMount, Ulimit};
 use lightr_run::{spawn_detached_engine, Mount, PortMap, RunSpec, StoreFile};
 use lightr_store::Store;
 
@@ -221,6 +221,20 @@ pub fn run(
             "lightr: --tmpfs is not supported on the vz engine (tmpfs mounts live \
              inside the guest, not managed by this shim); use --engine ns for a real \
              tmpfs mount or --engine native for a scratch directory"
+        );
+        return 2;
+    }
+
+    // `--ulimit`: per-process `setrlimit` caps are enforced on BOTH the `native`
+    // and `ns` engines (each applies them via setrlimit at exec). Only `vz` has no
+    // handling (the limits would live inside the guest, not managed by this shim),
+    // so honest-error `vz`+`--ulimit` (exit 2) BEFORE provisioning rather than
+    // silently drop them. Mirrors the `--tmpfs` vz guard above.
+    if engine_kind == EngineKind::Vz && !runflags.ulimit.is_empty() {
+        eprintln!(
+            "lightr: --ulimit is not supported on the vz engine (process resource \
+             limits live inside the guest, not managed by this shim); use --engine ns \
+             or --engine native"
         );
         return 2;
     }
@@ -478,6 +492,13 @@ pub fn run(
             Ok(v) => v,
             Err(code) => return code,
         };
+        // `--ulimit TYPE=SOFT[:HARD]` ⇒ the engine's per-process setrlimit caps.
+        // Enforced on native (pre_exec setrlimit) + ns (setrlimit in PID 1); vz is
+        // honest-errored at the handler above. Bad input is an honest exit 2.
+        let ulimits = match parse_ulimits(&runflags.ulimit) {
+            Ok(v) => v,
+            Err(code) => return code,
+        };
         // WP-DF-IMGCFG: run_engine honors the rootfs image config (CLI > image).
         // WP-IMG-ENVUSER: also consumes the image ENV + USER, with the CLI
         // `-e`/`--env-file` (`env_explicit`) and `-u`/`--user` overriding per
@@ -521,6 +542,10 @@ pub fn run(
             // `--tmpfs` ⇒ the ns engine mounts a tmpfs at each target after /dev/shm.
             // native/vz are honest-errored above. RUNTIME-ONLY.
             &tmpfs_mounts,
+            // `--ulimit` ⇒ the native engine (pre_exec setrlimit) + ns engine
+            // (setrlimit in PID 1) apply per-process resource caps. vz is
+            // honest-errored above. RUNTIME-ONLY.
+            &ulimits,
         );
     }
 
@@ -604,6 +629,107 @@ fn parse_tmpfs(raw: &[String]) -> Result<Vec<TmpfsMount>, i32> {
         });
     }
     Ok(out)
+}
+
+/// Parse the raw `--ulimit` strings (Docker shape `TYPE=SOFT[:HARD]`) into the
+/// engine's [`Ulimit`] list (mirrors [`parse_tmpfs`]'s shape + fail-closed
+/// `Err(2)`). Grammar:
+///   * split on the FIRST `=` → (type, vals); vals split on `:` → soft[, hard].
+///   * TYPE → resource: the libc `RLIMIT_*` integer (stored as NUMERIC constants
+///     valid on Linux so this fn compiles identically host-side on macOS, where
+///     some `libc::RLIMIT_*` differ — verified against Linux `<bits/resource.h>`).
+///   * value: `unlimited` / `-1` ⇒ `u64::MAX` (RLIM_INFINITY); else a `u64`.
+///     HARD omitted ⇒ `hard = soft` (Docker). A bad value/type ⇒ honest `Err(2)`.
+fn parse_ulimits(raw: &[String]) -> Result<Vec<Ulimit>, i32> {
+    let mut out = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let (ty, vals) = match entry.split_once('=') {
+            Some((t, v)) => (t.trim(), v.trim()),
+            None => {
+                eprintln!("lightr: --ulimit {entry}: expected TYPE=SOFT[:HARD]");
+                return Err(2);
+            }
+        };
+        let resource = match ulimit_resource(ty) {
+            Some(r) => r,
+            None => {
+                eprintln!("lightr: --ulimit {entry}: unknown ulimit type '{ty}'");
+                return Err(2);
+            }
+        };
+        let (soft_s, hard_s) = match vals.split_once(':') {
+            Some((s, h)) => (s.trim(), Some(h.trim())),
+            None => (vals, None),
+        };
+        let soft = match parse_ulimit_value(soft_s) {
+            Some(v) => v,
+            None => {
+                eprintln!("lightr: --ulimit {entry}: bad soft value '{soft_s}'");
+                return Err(2);
+            }
+        };
+        let hard = match hard_s {
+            None => soft, // HARD omitted ⇒ hard = soft (Docker).
+            Some(h) => match parse_ulimit_value(h) {
+                Some(v) => v,
+                None => {
+                    eprintln!("lightr: --ulimit {entry}: bad hard value '{h}'");
+                    return Err(2);
+                }
+            },
+        };
+        out.push(Ulimit {
+            resource,
+            soft,
+            hard,
+        });
+    }
+    Ok(out)
+}
+
+/// Parse a single `--ulimit` value: `unlimited`/`-1` ⇒ `u64::MAX` (RLIM_INFINITY),
+/// else a plain `u64`. `None` on a malformed value (fail-closed at the caller).
+fn parse_ulimit_value(v: &str) -> Option<u64> {
+    let v = v.trim();
+    if v.is_empty() {
+        return None;
+    }
+    if v.eq_ignore_ascii_case("unlimited") || v == "-1" {
+        return Some(u64::MAX);
+    }
+    v.parse::<u64>().ok()
+}
+
+/// Map a Docker `--ulimit` TYPE name to its Linux `RLIMIT_*` resource integer.
+/// NUMERIC constants (NOT `libc::RLIMIT_*`) so this compiles identically host-side
+/// on macOS, where several `RLIMIT_*` numbers/symbols differ. These are the
+/// `asm-generic/resource.h` values used by glibc on the COMMON Linux arches
+/// (x86_64/aarch64/arm/… — the ns engine + CI target). Verified against the libc
+/// crate's `linux_like/linux/gnu` table (NOFILE=7, NPROC=6, AS=9, RSS=5,
+/// MEMLOCK=8). NOTE (honest caveat): a few legacy arches (mips/sparc/alpha) use a
+/// DIFFERENT numbering for nofile/nproc/as/rss/memlock; this map targets the
+/// generic/x86_64 family the ns engine actually runs on — a mips/sparc port would
+/// need an arch-gated table (tracked, not in scope here).
+fn ulimit_resource(ty: &str) -> Option<libc::c_int> {
+    let n: libc::c_int = match ty.to_ascii_lowercase().as_str() {
+        "cpu" => 0,        // RLIMIT_CPU
+        "fsize" => 1,      // RLIMIT_FSIZE
+        "data" => 2,       // RLIMIT_DATA
+        "stack" => 3,      // RLIMIT_STACK
+        "core" => 4,       // RLIMIT_CORE
+        "rss" => 5,        // RLIMIT_RSS
+        "nproc" => 6,      // RLIMIT_NPROC
+        "nofile" => 7,     // RLIMIT_NOFILE
+        "memlock" => 8,    // RLIMIT_MEMLOCK
+        "as" => 9,         // RLIMIT_AS
+        "locks" => 10,     // RLIMIT_LOCKS
+        "sigpending" => 11, // RLIMIT_SIGPENDING
+        "msgqueue" => 12,  // RLIMIT_MSGQUEUE
+        "nice" => 13,      // RLIMIT_NICE
+        "rtprio" => 14,    // RLIMIT_RTPRIO
+        _ => return None,
+    };
+    Some(n)
 }
 
 /// Parse a `size=` value: a plain byte count or an `N[kKmMgG]` suffix (Docker/

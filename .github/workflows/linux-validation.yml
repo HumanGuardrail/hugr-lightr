@@ -758,6 +758,43 @@ jobs:
           [ "$U_NR2_EXIT" != 0 ] || { echo "FAIL: non-root --user 1000:1000 RAN (exit 0) — footgun NOT closed"; FAIL=1; }
           if [ "$FAIL" = 0 ]; then echo "USER_NS=PASS"; else echo "USER_NS=FAIL"; exit 1; fi  # gate for real
 
+      - name: Prove --ulimit applies real setrlimit caps on the ns engine (and vz honest-errors)
+        run: |
+          # --ulimit TYPE=SOFT[:HARD] → per-process setrlimit caps. Enforced on the
+          # ns engine (setrlimit in PID 1, before caps/user/seccomp). Proven by
+          # busybox `ulimit`: a control run reports the BASE nofile; an enforced run
+          # with --ulimit nofile=64 reports 64 (and != BASE); a soft:hard split is
+          # reported by `ulimit -Sn`/`-Hn`. vz honest-errors (exit 2). Reuses alpine-aa.
+          set +e
+          BIN="$PWD/target/release/lightr"
+
+          echo "=== control: BASE soft nofile (no --ulimit) ==="
+          "$BIN" run --engine ns --rootfs alpine-aa -- /bin/busybox sh -c 'ulimit -n' >/tmp/ul_base.txt 2>&1
+          UL_BASE_EXIT=$?; BASE=$(sed -n 1p /tmp/ul_base.txt); echo "base_exit=$UL_BASE_EXIT base=$BASE"; cat /tmp/ul_base.txt
+
+          echo "=== enforced: --ulimit nofile=64 → soft nofile == 64 ==="
+          "$BIN" run --engine ns --ulimit nofile=64 --rootfs alpine-aa -- /bin/busybox sh -c 'ulimit -n' >/tmp/ul_64.txt 2>&1
+          UL_64_EXIT=$?; GOT64=$(sed -n 1p /tmp/ul_64.txt); echo "u64_exit=$UL_64_EXIT got=$GOT64"; cat /tmp/ul_64.txt
+
+          echo "=== enforced: --ulimit nofile=32:128 → soft==32 AND hard==128 ==="
+          "$BIN" run --engine ns --ulimit nofile=32:128 --rootfs alpine-aa -- /bin/busybox sh -c 'echo "S=$(ulimit -Sn) H=$(ulimit -Hn)"' >/tmp/ul_sh.txt 2>&1
+          UL_SH_EXIT=$?; echo "ush_exit=$UL_SH_EXIT"; cat /tmp/ul_sh.txt
+
+          echo "=== vz + --ulimit → honest exit 2 (limits live in the guest) ==="
+          "$BIN" run --engine vz --ulimit nofile=64 --rootfs alpine-aa -- /bin/true >/tmp/ul_vz.txt 2>&1
+          UL_VZ_EXIT=$?; echo "uvz_exit=$UL_VZ_EXIT"; tail -3 /tmp/ul_vz.txt
+
+          # ── GATE ────────────────────────────────────────────────────────────────
+          FAIL=0
+          [ "$UL_BASE_EXIT" = 0 ] || { echo "FAIL: control run failed (exit $UL_BASE_EXIT)"; FAIL=1; }
+          [ "$UL_64_EXIT" = 0 ] || { echo "FAIL: --ulimit nofile=64 run failed (exit $UL_64_EXIT)"; FAIL=1; }
+          [ "$GOT64" = 64 ] || { echo "FAIL: --ulimit nofile=64 → soft nofile '$GOT64' (expected 64)"; FAIL=1; }
+          [ "$GOT64" != "$BASE" ] || { echo "FAIL: enforced nofile ($GOT64) == BASE ($BASE) — cap not applied"; FAIL=1; }
+          [ "$UL_SH_EXIT" = 0 ] || { echo "FAIL: --ulimit nofile=32:128 run failed (exit $UL_SH_EXIT)"; FAIL=1; }
+          grep -qx "S=32 H=128" /tmp/ul_sh.txt || { echo "FAIL: soft:hard split wrong (got '$(sed -n 1p /tmp/ul_sh.txt)', expected 'S=32 H=128')"; FAIL=1; }
+          [ "$UL_VZ_EXIT" = 2 ] || { echo "FAIL: vz + --ulimit exit '$UL_VZ_EXIT' (expected 2 honest-error)"; FAIL=1; }
+          if [ "$FAIL" = 0 ]; then echo "ULIMIT=PASS"; else echo "ULIMIT=FAIL"; exit 1; fi  # gate for real
+
   cri-serve-smoke:
     # WP-#98: prove the COMPOSED CRI server (the REAL LightrBackend wired into the
     # sibling lightr-cri shell via crates/lightr-cri-serve) BUILDS and ANSWERS

@@ -99,6 +99,60 @@ fn install_memory_rlimit(cmd: &mut std::process::Command, memory_bytes: u64) {
     }
 }
 
+/// Apply `--ulimit` per-process limits to a not-yet-spawned native `Command` via
+/// a `pre_exec` `setrlimit` hook (the same idiom as [`install_memory_rlimit`]).
+/// Empty ⇒ no hook installed (byte-identical to the pre-feature path). The hook
+/// runs in the forked child before `execvp`; a failing `setrlimit` aborts the
+/// exec (the spawn surfaces the `io::Error`) — fail-closed, never a silent drop.
+///
+/// `unix` only: `pre_exec`/`setrlimit` are POSIX. The CLI honest-errors vz; the
+/// native + ns engines are unix. `RLIM_INFINITY` is built from the `u64::MAX`
+/// sentinel.
+#[cfg(unix)]
+pub fn apply_native_ulimits(cmd: &mut std::process::Command, ulimits: &[crate::Ulimit]) {
+    use std::os::unix::process::CommandExt;
+    if ulimits.is_empty() {
+        return;
+    }
+    // Capture an owned copy so the closure is `'static` (no borrow of the slice).
+    let ulimits: Vec<crate::Ulimit> = ulimits.to_vec();
+    // SAFETY: the hook runs in the forked child before `execvp`. It calls only the
+    // async-signal-safe `setrlimit` and touches captured `Copy` data — no
+    // allocation beyond the pre-built Vec (moved in), no shared locks.
+    unsafe {
+        cmd.pre_exec(move || {
+            for u in &ulimits {
+                let rl = libc::rlimit {
+                    rlim_cur: rlim_from_u64(u.soft),
+                    rlim_max: rlim_from_u64(u.hard),
+                };
+                if libc::setrlimit(u.resource as _, &rl) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Non-unix: `setrlimit` is POSIX-only; a `--ulimit` request never reaches a
+/// non-unix native engine (the symbol exists only so callers resolve everywhere).
+#[cfg(not(unix))]
+pub fn apply_native_ulimits(cmd: &mut std::process::Command, ulimits: &[crate::Ulimit]) {
+    let _ = (cmd, ulimits);
+}
+
+/// Map a `u64` limit value to a `libc::rlim_t`, sending the `u64::MAX` sentinel to
+/// `libc::RLIM_INFINITY` (per the [`crate::Ulimit`] contract).
+#[cfg(unix)]
+fn rlim_from_u64(v: u64) -> libc::rlim_t {
+    if v == u64::MAX {
+        libc::RLIM_INFINITY
+    } else {
+        v as libc::rlim_t
+    }
+}
+
 /// Apply resource caps via cgroup v2 (the `ns` engine, Linux).
 ///
 /// Writes a transient cgroup under the caller's delegated cgroup-v2 subtree:

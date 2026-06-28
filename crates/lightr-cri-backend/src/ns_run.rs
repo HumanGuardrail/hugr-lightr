@@ -234,6 +234,8 @@ pub fn run_shim() -> ! {
         resolv_conf: desc.resolv_conf.as_deref(),
         // `--tmpfs` is a Docker-run flag; the CRI path has no tmpfs source today.
         tmpfs: &[],
+        // `--ulimit` is a Docker-run flag; the CRI path has no ulimit source today.
+        ulimits: &[],
     };
 
     match engine.run(&spec) {
