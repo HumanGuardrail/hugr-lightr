@@ -16,6 +16,15 @@ name: linux-validation
 #                       AS ROOT — crictl runp/create/start → container RUNNING,
 #                       then clean teardown — plus a lightr cold-start datum +
 #                       serve idle-RSS (containerd A/B is best-effort, non-fatal).
+#   critest-conformance — CAPSTONE: run the kubernetes-sigs `critest` suite (pinned
+#                       cri-tools v1.33.0) against the REAL composed CRI server
+#                       (lightr-cri-serve = real LightrBackend behind the canonical
+#                       CriBackend). Proves the WHOLE CRI surface conforms on the
+#                       real backend (smoke=Version; kpi3=one lifecycle; THIS=all of
+#                       it). Skip-list VENDORED at ci/critest-skips.txt (synced from
+#                       lightr-cri) + AppArmor pending #89. Real gate: critest exit
+#                       code; prints passed/failed/skipped + failing-spec list. This
+#                       is the FIRST real-backend critest run — may surface gaps.
 #   security-flags    — WP-#92/#94: prove `ns`-engine --read-only (rootfs EROFS,
 #                       /dev/shm still writable) + --shm-size enforcement, REAL
 #                       --cap-drop/--cap-add enforcement (CAP_CHOWN held→dropped→
@@ -1195,3 +1204,214 @@ jobs:
           fi
 
           echo "KPI3=PASS"
+
+  critest-conformance:
+    # CAPSTONE: run the kubernetes-sigs `critest` conformance suite against the
+    # REAL composed CRI server — lightr-cri-serve = the real LightrBackend behind
+    # the canonical CriBackend (the SAME binary cri-serve-smoke / cri-kpi3 build).
+    # cri-serve-smoke proves Version answers; cri-kpi3 proves ONE lifecycle + exec
+    # + apparmor. THIS proves the WHOLE CRI surface conforms on the real backend.
+    #
+    # The lightr-cri TL confirmed this run is OURS: their firewall forbids linking
+    # LightrBackend in lightr-cri CI, so the fake-vs-critest gate lives there and
+    # the REAL-backend critest gate lives here.
+    #
+    # HARNESS replicated from lightr-cri ci/critest-gate.sh + ci/ci.yml:
+    #   - critest pinned to cri-tools v1.33.0 (sha256-verified) — SAME version the
+    #     sibling pins in its critest-gate (kubelet 1.33 matrix).
+    #   - invocation: critest --runtime-endpoint unix://<sock> --ginkgo.skip <re>
+    #       --ginkgo.v --ginkgo.json-report <json>   (mirrors critest-gate.sh).
+    #   - skip regex is BUILT from our VENDORED ci/critest-skips.txt (synced from
+    #     lightr-cri @ 219b686; self-contained — no CI-time dep on the sibling),
+    #     same strip-comments / join-by-'|' transform as critest-gate.sh.
+    #
+    # GATE FOR REAL: critest's exit code is the gate (set +e ONLY to capture the
+    # code + print the summary; we then `exit 1` on any non-zero). We ALSO fail
+    # if zero specs passed (fail-closed: a dead runtime or a missing JSON report
+    # is RED, never green) — same law as critest-gate.sh.
+    #
+    # HONEST: this is the FIRST full critest run against the REAL backend. It MAY
+    # surface conformance gaps (specs that pass on the fake but not the real
+    # backend). That is the POINT — failures are NOT masked; the summary lists the
+    # failing specs for the lead to triage (fix the backend, or add a justified
+    # skip with a tracked reason). No false-green.
+    #
+    # Same private-sibling auth + manifest-path build as cri-serve-smoke/cri-kpi3.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --no-self-update && rustup default 1.96.0
+      - name: Auth git for the private sibling (cargo git-dep)
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.LIGHTR_CRI_CI_TOKEN }}@github.com/".insteadOf "https://github.com/"
+      - name: Build lightr-cri-serve (real backend + sibling shell, git-deps)
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+        run: cargo build --release --manifest-path crates/lightr-cri-serve/Cargo.toml -j2
+      - name: Build lightr (release) — for the pre-seed image fallback
+        run: cargo build -p lightr-cli --release -j2
+      - name: Install jq (critest JSON-report parsing)
+        run: |
+          set -e -x
+          command -v jq >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
+          jq --version
+      - name: Install crictl + critest (pinned cri-tools v1.33.0, sha256-verified)
+        run: |
+          set -euo pipefail
+          # Pinned to MATCH lightr-cri ci/critest-gate.sh (kubelet 1.33 matrix).
+          # sha256s are the upstream release checksums (same values the sibling pins).
+          CRICTL_SHA256="8307399e714626e69d1213a4cd18c8dec3d0201ecdac009b1802115df8973f0f"
+          CRITEST_SHA256="31baec20eda89276b3466ec24cfdfc54258baf27651997db7b5d4205f60ea61b"
+          BASE="https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.33.0"
+
+          curl -fsSL -o /tmp/crictl.tar.gz "${BASE}/crictl-v1.33.0-linux-amd64.tar.gz"
+          echo "${CRICTL_SHA256}  /tmp/crictl.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/crictl.tar.gz -C /tmp
+          sudo mv /tmp/crictl /usr/local/bin/crictl
+          sudo chmod +x /usr/local/bin/crictl
+
+          curl -fsSL -o /tmp/critest.tar.gz "${BASE}/critest-v1.33.0-linux-amd64.tar.gz"
+          echo "${CRITEST_SHA256}  /tmp/critest.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/critest.tar.gz -C /tmp
+          sudo mv /tmp/critest /usr/local/bin/critest
+          sudo chmod +x /usr/local/bin/critest
+
+          crictl --version
+          critest --version
+      - name: Install CNI plugins + a bridge conflist (same as cri-kpi3)
+        run: |
+          set -e -x
+          sudo mkdir -p /opt/cni/bin /etc/cni/net.d /run/netns
+          curl -sL https://github.com/containernetworking/plugins/releases/download/v1.5.1/cni-plugins-linux-amd64-v1.5.1.tgz \
+            | sudo tar -xz -C /opt/cni/bin
+          ls /opt/cni/bin | head
+          sudo tee /etc/cni/net.d/10-lightr-bridge.conflist >/dev/null <<'JSON'
+          { "cniVersion":"1.0.0","name":"lightrnet","plugins":[
+            {"type":"bridge","bridge":"lightr0","isGateway":true,"ipMasq":true,
+             "ipam":{"type":"host-local","subnet":"10.88.0.0/16","routes":[{"dst":"0.0.0.0/0"}]}} ]}
+          JSON
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+      - name: critest conformance against the REAL composed CRI server (HARD GATE)
+        run: |
+          set +e
+          export LIGHTR_CNI_CONF=/etc/cni/net.d LIGHTR_CNI_BIN=/opt/cni/bin
+          SOCK=/tmp/lightr-critest.sock
+          STATE=/tmp/lightr-critest-state
+          SERVE="crates/lightr-cri-serve/target/release/lightr-cri-serve"
+          LIGHTR="$PWD/target/release/lightr"
+          SKIPS_FILE="ci/critest-skips.txt"
+          REPORT_DIR=/tmp/critest-report
+          CRITEST_JSON="$REPORT_DIR/critest-report.json"
+          CRITEST_OUT="$REPORT_DIR/critest.out"
+          sudo rm -rf "$STATE" "$SOCK" "$REPORT_DIR"
+          sudo mkdir -p "$REPORT_DIR" /run/netns
+
+          # crictl helper bound to the lightr serve socket (root: socket is root-owned).
+          CR() { sudo crictl --runtime-endpoint "unix://$SOCK" --image-endpoint "unix://$SOCK" "$@"; }
+
+          # ── Start the COMPOSED CRI server AS ROOT (netns + CNI ADD need privilege),
+          # with the CNI env the real backend probes (same bring-up as cri-kpi3). ──────
+          sudo -E env "PATH=$PATH" LIGHTR_CNI_CONF="$LIGHTR_CNI_CONF" LIGHTR_CNI_BIN="$LIGHTR_CNI_BIN" \
+            "$SERVE" --socket "$SOCK" --state "$STATE" >/tmp/serve.log 2>&1 &
+          for i in $(seq 1 40); do [ -S "$SOCK" ] && break; sleep 0.5; done
+          if [ ! -S "$SOCK" ]; then echo "CRITEST=FAIL (serve socket never appeared)"; sudo cat /tmp/serve.log; exit 1; fi
+          CR version >/tmp/ver.txt 2>&1 || { echo "CRITEST=FAIL (Version RPC failed — serve not answering)"; cat /tmp/ver.txt; sudo cat /tmp/serve.log; sudo pkill -f lightr-cri-serve; exit 1; }
+          echo "=== serve answers crictl ==="; cat /tmp/ver.txt
+
+          # ── Pre-seed the images critest needs. critest's --test-images-file is not
+          # used here; the suite pulls its default images via the CRI pull path
+          # (crictl pull → LightrBackend.pull_image → lightr_oci::pull). We PRIME the
+          # workhorse images so a transient registry hiccup doesn't masquerade as a
+          # conformance failure; the suite still exercises pull/list/remove itself.
+          # FALLBACK = pre-seed the SAME state store via the `lightr` bin so the
+          # hydrate lookup hits (store name == sanitize_ref). Non-fatal: if a seed
+          # fails, critest's own pull specs still drive the path. ───────────────────────
+          for IMG in alpine:latest registry.k8s.io/pause:3.10 busybox:1.36; do
+            if CR pull "$IMG" >/tmp/pull.log 2>&1; then
+              echo "CRITEST_SEED ok via crictl-pull: $IMG"
+            else
+              echo "CRITEST_SEED crictl pull failed for $IMG — trying lightr pre-seed:"; cat /tmp/pull.log
+              SAFE="$(echo "$IMG" | sed 's#[/:]#-#g')"
+              sudo -E env LIGHTR_HOME="$STATE" "$LIGHTR" oci pull "$IMG" --name "$SAFE" >/tmp/seed.log 2>&1 \
+                && echo "CRITEST_SEED ok via lightr pre-seed: $IMG ($SAFE)" \
+                || { echo "CRITEST_SEED WARN: could not seed $IMG (non-fatal — critest's own pull specs drive the path)"; cat /tmp/seed.log; }
+            fi
+          done
+          CR images 2>/dev/null || true
+
+          # ── Build the ginkgo skip regex from the VENDORED skip-list — SAME transform
+          # as lightr-cri ci/critest-gate.sh: drop comment lines (^#), drop blanks,
+          # take the part before the first '#', trim trailing ws, join non-empty by '|'.
+          if [ ! -f "$SKIPS_FILE" ]; then echo "CRITEST=FAIL (skip-list $SKIPS_FILE missing)"; sudo pkill -f lightr-cri-serve; exit 1; fi
+          SKIP_REGEX=$(grep -v '^\s*#' "$SKIPS_FILE" | grep -v '^\s*$' \
+            | sed 's/#.*//' | sed 's/[[:space:]]*$//' | grep -v '^$' \
+            | paste -sd '|' -)
+          echo "=== critest skip regex (from $SKIPS_FILE, synced from lightr-cri @ 219b686; + AppArmor pending #89) ==="
+          echo "$SKIP_REGEX"
+
+          # ── Run critest against OUR socket. Mirror critest-gate.sh flags exactly.
+          # set +e is active ONLY to capture the exit code + print the summary; we
+          # re-gate on it below. NO swallowing — the real exit decides pass/fail. ───────
+          echo "=== running critest (cri-tools v1.33.0) against the REAL composed CRI server ==="
+          sudo -E env "PATH=$PATH" critest \
+            --runtime-endpoint "unix://$SOCK" \
+            --ginkgo.skip "$SKIP_REGEX" \
+            --ginkgo.v \
+            --ginkgo.json-report "$CRITEST_JSON" \
+            2>&1 | tee "$CRITEST_OUT"
+          CRITEST_EXIT=${PIPESTATUS[0]}
+          echo "critest_exit=$CRITEST_EXIT"
+
+          # ── Teardown the serve (the gate logic below uses only the captured report). ─
+          sudo pkill -f lightr-cri-serve 2>/dev/null
+
+          # ── Summarize from the JSON report (passed/failed/skipped counts + the
+          # failing-spec list). Same SpecReports[].State extraction style as
+          # critest-gate.sh. ───────────────────────────────────────────────────────────
+          PASSED=0; FAILED=0; SKIPPED=0
+          if [ -f "$CRITEST_JSON" ]; then
+            PASSED=$(jq -r '[.[].SpecReports[]? | select(.State=="passed")] | length' "$CRITEST_JSON" 2>/dev/null || echo 0)
+            FAILED=$(jq -r '[.[].SpecReports[]? | select(.State=="failed" or .State=="panicked" or .State=="timedout" or .State=="interrupted" or .State=="aborted")] | length' "$CRITEST_JSON" 2>/dev/null || echo 0)
+            SKIPPED=$(jq -r '[.[].SpecReports[]? | select(.State=="skipped")] | length' "$CRITEST_JSON" 2>/dev/null || echo 0)
+          fi
+          echo "=== CRITEST SUMMARY (real LightrBackend) ==="
+          echo "CRITEST_PASSED=$PASSED"
+          echo "CRITEST_FAILED=$FAILED"
+          echo "CRITEST_SKIPPED=$SKIPPED"
+
+          if [ -f "$CRITEST_JSON" ]; then
+            echo "=== FAILING SPECS (triage list — fix the backend or add a justified skip) ==="
+            jq -r '
+              .[].SpecReports[]?
+              | select(.State=="failed" or .State=="panicked" or .State=="timedout" or .State=="interrupted" or .State=="aborted")
+              | "[" + .State + "] " + ((.ContainerHierarchyTexts // []) | join(" ")) + " " + (.LeafNodeText // "")
+            ' "$CRITEST_JSON" 2>/dev/null | sed 's/[[:space:]]*$//' | sort -u | sed 's/^/FAIL_SPEC: /' || true
+          fi
+
+          # ── REAL GATE (fail-closed, no false-green) ──────────────────────────────────
+          # 1) Zero passed = RED (dead runtime or missing/broken JSON report) — same
+          #    fail-closed law as critest-gate.sh. This also catches a never-produced
+          #    report (e.g. critest crashed before writing it).
+          if [ "$PASSED" -eq 0 ]; then
+            echo "CRITEST=FAIL (zero specs passed — runtime failed everything OR the JSON report is missing/malformed; report at $CRITEST_JSON)"
+            echo "=== serve.log ==="; sudo cat /tmp/serve.log 2>/dev/null | tail -80
+            exit 1
+          fi
+          # 2) critest's own exit code is THE gate — any non-skipped spec failure ⇒ exit 1.
+          if [ "$CRITEST_EXIT" -ne 0 ]; then
+            echo "CRITEST=FAIL (critest exited $CRITEST_EXIT — $FAILED non-skipped spec(s) failed; see FAIL_SPEC list above)"
+            echo "    NOTE: first full critest run on the REAL backend — surfaced gaps are expected."
+            echo "    Triage each: fix the LightrBackend, or add a JUSTIFIED skip to ci/critest-skips.txt with a tracked reason."
+            echo "=== serve.log (tail) ==="; sudo cat /tmp/serve.log 2>/dev/null | tail -80
+            exit 1
+          fi
+          echo "CRITEST=PASS ($PASSED passed, $FAILED failed, $SKIPPED skipped — full critest conformance GREEN on the real LightrBackend)"
+      - name: Upload critest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: critest-conformance-report
+          path: /tmp/critest-report
+          if-no-files-found: warn
