@@ -786,7 +786,9 @@ jobs:
           # EXCLUDES limits, so the `# umemo-uniq` comment makes the command unique to
           # force a cache MISS (else a prior `ulimit -n` output could be served stale).
           "$BIN" run --ulimit nofile=48 -- /bin/sh -c 'ulimit -n # umemo-uniq' >/tmp/ul_memo.txt 2>&1
-          UL_MEMO_EXIT=$?; GOTM=$(sed -n 1p /tmp/ul_memo.txt); echo "umemo_exit=$UL_MEMO_EXIT got=$GOTM"; cat /tmp/ul_memo.txt
+          # The memo path prints a `lightr: memo MISS key=...` diagnostic to stdout, so
+          # extract the bare-number line (the actual `ulimit -n` output), not line 1.
+          UL_MEMO_EXIT=$?; GOTM=$(grep -xE '[0-9]+' /tmp/ul_memo.txt | head -1); echo "umemo_exit=$UL_MEMO_EXIT got=$GOTM"; cat /tmp/ul_memo.txt
 
           echo "=== vz + --ulimit → honest exit 2 (limits live in the guest) ==="
           "$BIN" run --engine vz --ulimit nofile=64 --rootfs alpine-aa -- /bin/true >/tmp/ul_vz.txt 2>&1
