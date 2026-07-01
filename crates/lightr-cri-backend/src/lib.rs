@@ -40,6 +40,9 @@ pub mod ns_exec;
 // (WP-CRI-SANDBOX).
 mod container;
 mod container_query;
+mod container_setup;
+mod container_start;
+mod container_wait;
 mod exec;
 mod images;
 mod sandbox;
