@@ -20,8 +20,8 @@
 //! detached, vz without rootfs) are NOT memoized and take the plain engine path.
 
 use lightr_core::ResourceLimits;
-use lightr_engine::{EngineKind, TmpfsMount, Ulimit};
-use lightr_run::{spawn_detached_engine, Mount, PortMap, RunSpec, StoreFile};
+use lightr_engine::EngineKind;
+use lightr_run::spawn_detached_engine;
 use lightr_store::Store;
 
 use crate::exit::die_lightr;
@@ -29,13 +29,17 @@ use crate::exit::die_lightr;
 mod env;
 mod flags;
 mod helpers;
+mod parse;
 mod paths;
+mod policy;
 mod runflags;
 
+// Value parsers (`--tmpfs`/`--ulimit`/`size=`) split to `parse.rs` (godfile cap).
+use parse::{parse_tmpfs, parse_ulimits};
+
 // Handler helpers split to `helpers.rs` (godfile cap). `claim_name_and_print` is
-// also used by `paths.rs` via `super::`; `expose_port_maps` feeds the `-P` branch.
+// also used by `paths.rs` via `super::` (re-exported here).
 pub(super) use helpers::claim_name_and_print;
-use helpers::expose_port_maps;
 
 // Flag parsing + value types live in `flags.rs` (skeleton-split for headroom).
 // Re-exported at the `run` module root so sibling files + tests reach them via
@@ -67,8 +71,7 @@ pub fn run(
     explain: bool,
     detach: bool,
     publish_raw: &[String],
-    // WP-B2: `-P/--publish-all` — auto-publish the rootfs image's EXPOSE list
-    // (TCP) alongside any `-p`. `false` ⇒ no auto-publish (byte-identical).
+    // WP-B2: `-P/--publish-all` — auto-publish the image's EXPOSE list; `false` ⇒ none.
     publish_all: bool,
     mounts_raw: &[String],
     engine_str: &str,
@@ -80,29 +83,25 @@ pub fn run(
     cpus: Option<&str>,
     secrets_raw: &[String],
     configs_raw: &[String],
-    // WP-RC-1: `-e`/`--env-file` → KEYED `env_explicit` (R-KEY); long `--env` = `env_keys` discovery.
+    // WP-RC-1: `-e`/`--env-file` → KEYED `env_explicit`; long `--env` = `env_keys` discovery.
     env_set: &[String],
     env_file: Option<&str>,
-    // RUNTIME-ONLY docker-parity flags (never keyed; `None` ⇒ today's behaviour).
-    // WP-RC-WORKDIR `-w` (Docker WORKDIR; `None` ⇒ `dir`; CLI > image WORKDIR — WP-DF-IMGCFG).
+    // RUNTIME-ONLY docker-parity flags below (never keyed; `None` ⇒ today's behaviour):
+    // WP-RC-WORKDIR `-w` (Docker WORKDIR; `None` ⇒ `dir`; CLI > image).
     workdir: Option<&str>,
     // WP-RC-USER `-u` (`None` ⇒ current user): native child uid/gid (cfg(unix)).
     user: Option<&str>,
-    // WP-RC-RESTART `--restart` (`None` ⇒ `no`): supervisor re-spawn loop; pre-validated.
+    // WP-RC-RESTART `--restart` (`None` ⇒ `no`): supervisor re-spawn loop.
     restart: Option<&str>,
-    // WP-RC-STOPSIGNAL `--stop-signal` (`None` ⇒ SIGTERM): `lightr stop`; pre-validated.
+    // WP-RC-STOPSIGNAL `--stop-signal` (`None` ⇒ SIGTERM): `lightr stop`.
     stop_signal: Option<&str>,
-    // WP-RC-4: healthcheck flags, WIRED — lowered to a Healthcheck run by the
-    // supervisor's watchdog. Never a memo-key input (runtime probe, §0).
+    // WP-RC-4: healthcheck flags, WIRED — lowered to a Healthcheck (supervisor watchdog). Never keyed.
     health: &HealthFlags,
-    // WP-RC-FLAGS: the 11 run-config flags (raw clap values). Resolved (labels
-    // KEY=VAL parsed, shm-size parsed) then lowered into RunSpec carry-fields.
-    // RUNTIME-ONLY — none enters the memo key. All-default ⇒ no-op carry.
+    // WP-RC-FLAGS: the 11 run-config flags (raw clap); resolved + lowered to RunSpec
+    // carry-fields. RUNTIME-ONLY — never keyed; all-default ⇒ no-op.
     rc: RawRcFlags,
-    // WP-RUNFLAGS: `-v/--volume`, `--tmpfs`, `--name`, `--rm`, `--entrypoint` (+
-    // honest Phase-2 networking flags). Resolved (binds parsed, entrypoint split,
-    // network flags honest-errored) then lowered into RunSpec carry-fields.
-    // RUNTIME-ONLY — none enters the memo key. All-default ⇒ no-op carry.
+    // WP-RUNFLAGS: `-v`/`--tmpfs`/`--name`/`--rm`/`--entrypoint` (+ honest Phase-2 net
+    // flags); resolved + lowered to carry-fields. RUNTIME-ONLY — never keyed.
     runflags: RawRunFlags,
 ) -> i32 {
     // WP-RC-FLAGS: parse `--label`/`--shm-size` (fail-closed: bad value ⇒ exit 2).
@@ -111,29 +110,13 @@ pub fn run(
         Err(code) => return code,
     };
 
-    // WP-#92: SECURITY flags the rootless `ns` engine cannot honestly enforce are
-    // HONEST-ERRORED here (exit 2) BEFORE any provisioning — never silently
-    // recorded. A silent no-op on a security flag is worse than an error: the user
-    // believes they are sandboxed and isn't. This fires for EVERY engine (native =
-    // no sandbox by design; the ns userns already BOUNDS the capability set but
-    // full capset management is a separate tracked WP; vz is tracked). Mirrors the
-    // lead's vz+pids honest-error guard below.
-    if rc.privileged {
-        eprintln!(
-            "lightr: --privileged is not supported on the rootless ns engine (no real \
-             privilege in an unprivileged user namespace); tracked for --engine vz"
-        );
-        return 2;
+    // WP-#92: `--privileged` is honest-errored (exit 2) BEFORE provisioning — the
+    // rootless ns engine can't enforce it (a silent no-op = false security). See
+    // `policy::rc_privileged_policy`. WP-#94 `--cap-*` + WP-#95 `--init` are REAL on
+    // `ns`; their engine-aware guard/note fires AFTER `engine_kind` is parsed below.
+    if let Some(code) = policy::rc_privileged_policy(&rc) {
+        return code;
     }
-    // WP-#94: `--cap-add`/`--cap-drop` are REAL on the `ns` engine (it drops the
-    // bounding set + capsets the desired set as the last step before exec). The
-    // engine-aware guard fires AFTER `engine_kind` is parsed below; native/vz keep
-    // the honest exit-2 (native = no sandbox; vz caps live inside the guest, not
-    // managed by the shim).
-    // WP-#95: `--init` is now ENFORCED on the `ns` engine (a real PID-1 reaper inside
-    // the new pid namespace — see ExecSpec.init). The engine-aware honest note for
-    // OTHER engines (native/vz, where it stays a recorded-only carry-slot) fires
-    // AFTER `engine_kind` is parsed below.
 
     // WP-RUNFLAGS: parse `-v`/`--entrypoint` + honest-error the networking flags
     // (fail-closed: bad value / Phase-2 flag ⇒ exit 2).
@@ -141,17 +124,10 @@ pub fn run(
         Ok(f) => f,
         Err(code) => return code,
     };
-    // WP-RUNFLAGS: `--name` + `--rm` need a run dir/id, which only the DETACHED
-    // path creates (a foreground run is stateless — just the Action Cache). So
-    // they are detached-only; using them without `-d` is an honest exit 2, never
-    // a silent no-op.
-    if runflags.name.is_some() && !detach {
-        eprintln!("lightr: --name requires -d (a named run is a detached container)");
-        return 2;
-    }
-    if runflags.rm && !detach {
-        eprintln!("lightr: --rm requires -d (a foreground run leaves no run dir to remove)");
-        return 2;
+    // WP-RUNFLAGS: `--name`/`--rm` are detached-only (they need a run dir the
+    // detached path creates) — honest exit 2 without `-d` (see policy fn).
+    if let Some(code) = policy::detached_only_flags_policy(&runflags, detach) {
+        return code;
     }
     // Parse engine kind — bad value ⇒ exit 2
     let engine_kind = match engine_str.parse::<EngineKind>() {
@@ -159,96 +135,24 @@ pub fn run(
         Err(e) => return die_lightr(&e),
     };
 
-    // WP-#94: capability enforcement is REAL only on the `ns` engine. For any
-    // OTHER engine, `--cap-add`/`--cap-drop` are HONEST-ERRORED (exit 2) BEFORE
-    // provisioning rather than silently recorded — native is no sandbox by design,
-    // and vz capabilities live inside the guest (not managed by this shim). The ns
-    // engine does NOT error here: it enforces the requested set in `run_engine`
-    // (the desired set = full userns set − cap_drop + cap_add, applied as the last
-    // step before exec). A silent no-op on a security flag would give false
-    // security — the exact failure WP-#92 refused.
-    if engine_kind != EngineKind::Ns && (!rc.cap_add.is_empty() || !rc.cap_drop.is_empty()) {
-        eprintln!(
-            "lightr: --cap-add/--cap-drop capability enforcement is implemented only on \
-             the rootless ns engine (--engine ns); native is no sandbox and vz caps live \
-             inside the guest — refusing to run rather than give false security"
-        );
-        return 2;
-    }
-
-    // WP-#106: `--apparmor` is REAL only on the `ns` engine (it applies the profile
-    // via aa_change_onexec right before exec). For any OTHER engine it is
-    // HONEST-ERRORED (exit 2) BEFORE provisioning — native is no sandbox by design,
-    // and the vz LSM lives inside the guest (not managed by this shim). A silent
-    // no-op on a security flag would give false security (the failure WP-#92 refused).
-    if engine_kind != EngineKind::Ns && rc.apparmor.is_some() {
-        eprintln!(
-            "lightr: --apparmor (AppArmor LSM enforcement) is implemented only on the \
-             rootless ns engine (--engine ns); native is no sandbox and the vz LSM lives \
-             inside the guest — refusing to run rather than give false security"
-        );
-        return 2;
-    }
-
-    // WP-#108: `--seccomp` is REAL only on the `ns` engine (it compiles the OCI
-    // profile to cBPF and installs it via seccomp(2)/prctl right before exec). For
-    // any OTHER engine it is HONEST-ERRORED (exit 2) BEFORE provisioning — native is
-    // no sandbox by design, and vz's seccomp lives inside the guest (not managed by
-    // this shim). A silent no-op on a security flag would give false security.
-    if engine_kind != EngineKind::Ns && rc.seccomp.is_some() {
-        eprintln!(
-            "lightr: --seccomp (seccomp-bpf enforcement) is implemented only on the \
-             rootless ns engine (--engine ns); native is no sandbox and vz seccomp lives \
-             inside the guest — refusing to run rather than give false security"
-        );
-        return 2;
+    // WP-#94/#106/#108: `--cap-*`/`--apparmor`/`--seccomp` enforce only on `ns`;
+    // other engines are honest-errored here BEFORE provisioning (see policy fn).
+    if let Some(code) = policy::engine_capability_policy(engine_kind, &rc) {
+        return code;
     }
 
     // NOTE (`--user` on ns): a non-root `--user` is honest-errored by the ns ENGINE
-    // itself (its single-uid userns maps only container-root; a subuid RANGE mapping is
-    // required — tracked #115). No handler-side guard is needed: the engine is the
-    // single choke point covering CLI `-u`, image USER, and CRI RunAsUser uniformly.
+    // itself (single-uid userns; subuid RANGE mapping tracked #115) — no handler guard.
 
-    // `--tmpfs`: the `ns` engine mounts a REAL tmpfs in the container mount ns; the
-    // `native` engine has its own pre-existing model (a fresh empty scratch DIR per
-    // run via `materialize_tmpfs` — native is reproducibility, not a mount sandbox).
-    // Only `vz` has NO handling (tmpfs would live inside the guest, not managed by
-    // this shim), so honest-error `vz`+`--tmpfs` (exit 2) BEFORE provisioning rather
-    // than silently drop the mount. Mirrors the `--seccomp`/`--apparmor` guards but
-    // scoped to vz (native is NOT a silent no-op — it materializes a scratch dir).
-    if engine_kind == EngineKind::Vz && !runflags.tmpfs.is_empty() {
-        eprintln!(
-            "lightr: --tmpfs is not supported on the vz engine (tmpfs mounts live \
-             inside the guest, not managed by this shim); use --engine ns for a real \
-             tmpfs mount or --engine native for a scratch directory"
-        );
-        return 2;
+    // `--tmpfs`/`--ulimit` on `vz` are honest-errored BEFORE provisioning (they'd
+    // live inside the guest); ns/native handle them (see policy fn).
+    if let Some(code) = policy::vz_mount_policy(engine_kind, &runflags) {
+        return code;
     }
 
-    // `--ulimit`: per-process `setrlimit` caps are enforced on BOTH the `native`
-    // and `ns` engines (each applies them via setrlimit at exec). Only `vz` has no
-    // handling (the limits would live inside the guest, not managed by this shim),
-    // so honest-error `vz`+`--ulimit` (exit 2) BEFORE provisioning rather than
-    // silently drop them. Mirrors the `--tmpfs` vz guard above.
-    if engine_kind == EngineKind::Vz && !runflags.ulimit.is_empty() {
-        eprintln!(
-            "lightr: --ulimit is not supported on the vz engine (process resource \
-             limits live inside the guest, not managed by this shim); use --engine ns \
-             or --engine native"
-        );
-        return 2;
-    }
-
-    // WP-#95: `--init` is ENFORCED on the `ns` engine (real PID-1 reaper). On any
-    // OTHER engine it is a recorded-only carry-slot (native is a host process with no
-    // pid namespace; vz reaps via its own guest PID 1) — say so honestly rather than
-    // imply a reaper that won't run.
-    if rc.init && engine_kind != EngineKind::Ns {
-        eprintln!(
-            "lightr: note: --init runs a real PID-1 reaper only on the rootless ns \
-             engine (--engine ns); here it is recorded only (no pid namespace to reap in)"
-        );
-    }
+    // WP-#95: `--init` runs a real PID-1 reaper only on `ns`; elsewhere it is a
+    // recorded-only carry-slot — say so honestly.
+    policy::init_engine_note(rc.init, engine_kind);
 
     // WP-NET-ISO: parse `--net` + enforce `none` has a netns (fail-closed, exit 2).
     let is_pure_native = engine_kind == EngineKind::Native && rootfs_ref.is_none();
@@ -270,34 +174,21 @@ pub fn run(
         Err(e) => return die_lightr(&e),
     };
 
-    // WP-#90: a pids cap needs cgroup v2 `pids.max`, which only the `ns` engine
-    // owns. vz is a microVM (no delegated per-container cgroup via the shim) — so a
-    // `--pids-limit --engine vz` request is honest-errored HERE, before the VM
-    // boots, rather than silently dropped. native is honest-errored at the engine
-    // boundary (`check_native_support`); the carry-field stays recorded-only.
-    if engine_kind == EngineKind::Vz && limits.pids_max.is_some() {
-        eprintln!(
-            "lightr: vz engine cannot enforce a pids limit (no per-container cgroup \
-             in the microVM); use --engine ns"
-        );
-        return 2;
+    // WP-#90: a pids cap needs cgroup v2 `pids.max` (ns only); `--pids-limit
+    // --engine vz` is honest-errored HERE, before the VM boots (see policy fn).
+    if let Some(code) = policy::vz_pids_policy(engine_kind, &limits) {
+        return code;
     }
 
     // Parse secrets/configs (F-309) — split NAME=REF.
-    let mut secrets: Vec<StoreFile> = Vec::new();
-    for raw in secrets_raw {
-        match parse_store_file(raw, "secret") {
-            Ok(sf) => secrets.push(sf),
-            Err(code) => return code,
-        }
-    }
-    let mut configs: Vec<StoreFile> = Vec::new();
-    for raw in configs_raw {
-        match parse_store_file(raw, "config") {
-            Ok(sf) => configs.push(sf),
-            Err(code) => return code,
-        }
-    }
+    let secrets = match policy::resolve_store_files(secrets_raw, "secret") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let configs = match policy::resolve_store_files(configs_raw, "config") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
 
     // WP-RC-1: `-e`/`--env-file` → KEYED env_explicit (R-KEY); file then `-e` overrides; `KEY`-only inherits process env; empty ⇒ key byte-identical.
     let env_explicit = match env::resolve_env_explicit_from_process(env_set, env_file) {
@@ -313,35 +204,14 @@ pub fn run(
     // Healthcheck = supervisor watchdog (detached `-d` only); non-detached
     // `--health-cmd` is fail-loud supervisor-only, never silently dropped.
     let healthcheck = health.build();
-    if healthcheck.is_some() && !detach {
-        eprintln!(
-            "lightr: --health-cmd is wired for detached runs only (-d); the \
-             healthcheck watchdog is owned by the supervisor — running without it"
-        );
-    }
+    policy::healthcheck_detach_note(healthcheck.is_some(), detach);
 
     // ── Networking Phase 1 policy (frozen, honest — enforce in this order) ────
     // These guards run BEFORE the engine-path early return below, so an
     // `--engine vz/ns -p ...` invocation hits the honest Phase-2 error rather
     // than silently dropping the published port.
-    if !publish_raw.is_empty() {
-        // 1. A published service is a long-running server ⇒ it must be detached.
-        if !detach {
-            eprintln!("lightr: -p/--publish requires -d (a published service runs detached)");
-            return 2;
-        }
-        // 2. Publishing is wired for the native detached path + the vz detached
-        //    container path (WP-NET2: `--engine vz --rootfs <img>`); other engines
-        //    + vz-without-rootfs are Phase 2 — an honest error, never a dropped port.
-        let native = engine_kind == EngineKind::Native && rootfs_ref.is_none();
-        let vz_container = engine_kind == EngineKind::Vz && rootfs_ref.is_some();
-        if !native && !vz_container {
-            eprintln!(
-                "lightr: -p/--publish is wired for the native and `--engine vz --rootfs` \
-                 detached paths; other engines are Phase 2"
-            );
-            return 2;
-        }
+    if let Some(code) = policy::publish_policy(publish_raw, detach, engine_kind, rootfs_ref) {
+        return code;
     }
     // WP-B2: `-P/--publish-all` shape guard (detached vz container only; fail-closed).
     if publish_all {
@@ -356,109 +226,55 @@ pub fn run(
     };
 
     // Parse mounts
-    let mut mounts: Vec<Mount> = Vec::new();
-    for raw in mounts_raw {
-        match parse_mount(raw) {
-            Ok(m) => mounts.push(m),
-            Err(code) => return code,
-        }
-    }
+    let mounts = match policy::resolve_mounts(mounts_raw) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
 
     let cwd = std::path::PathBuf::from(dir);
 
     // ── DISPATCH ──────────────────────────────────────────────────────────────
 
     // ── vz-memo path (the product's core moat) ────────────────────────────────
-    // A `vz` container job with a rootfs that is NOT detached is MEMOIZABLE
-    // exactly like the native path: the 1st run boots the VM + captures
-    // {exit, stdout, stderr}; an identical 2nd run is a HIT that replays them
-    // from the Action Cache with NO VM boot. `-d`, non-rootfs, and non-vz cases
-    // fall through to the existing (non-memoized) engine path unchanged.
+    // A `vz`+rootfs job that is NOT detached is MEMOIZABLE like the native path: the
+    // 1st run boots the VM + captures {exit, stdout, stderr}; an identical 2nd run is
+    // a HIT replayed from the Action Cache with NO VM boot. Other cases fall through.
     if let (EngineKind::Vz, Some(ref_name), false) = (engine_kind, rootfs_ref, detach) {
         return paths::run_vz_memo(engine_kind, ref_name, command, &store, &cwd, limits, json);
     }
 
     // ── vz detached container path (WP-NET2) ──────────────────────────────────
-    // A `vz` run WITH a rootfs that IS detached boots a Linux container in a
-    // microVM under the supervisor, which forwards each published port to the
-    // guest's DHCP IP (`-p` for a Linux image — the flagship Docker-parity case).
-    // The non-detached vz+rootfs case is the memo path above; ns/native fall
-    // through. This runs the VM detached (the old engine path ignored `-d` and
-    // blocked synchronously) — `spawn_detached_engine` returns immediately.
+    // A `vz` run WITH a rootfs that IS detached boots a Linux container in a microVM
+    // under the supervisor, which forwards each published port to the guest's DHCP IP
+    // (`-p` — the flagship Docker-parity case). `spawn_detached_engine` returns at once.
     if let (EngineKind::Vz, Some(ref_name), true) = (engine_kind, rootfs_ref, detach) {
-        // WP-B2: consume the range-aware, host-ip-carrying parser so
-        // `-p 8000-8002:8000-8002` yields 3 PortMaps and `-p 127.0.0.1:H:C` binds
-        // loopback. Then (`-P`) auto-publish the image's EXPOSE list.
-        let mut ports: Vec<PortMap> = Vec::new();
-        for raw in publish_raw {
-            match flags::publish::parse_publish_spec(raw) {
-                Ok(mut maps) => ports.append(&mut maps),
-                Err(code) => return code,
-            }
-        }
-        // WP-B2: `-P/--publish-all` — auto-publish every port the rootfs image
-        // EXPOSEs (TCP), each bound on the default interface. The vz container
-        // path hydrates the rootfs, so load its image config sidecar to read the
-        // EXPOSE list. De-duplicated against explicit `-p` host ports so a port
-        // named by both `-p` and EXPOSE is bound once.
-        if publish_all {
-            for pm in expose_port_maps(ref_name, &store) {
-                if !ports.iter().any(|p| p.host == pm.host) {
-                    ports.push(pm);
-                }
-            }
-        }
-        let spec = RunSpec {
+        // WP-B2: range-aware `-p` (`8000-8002:8000-8002` ⇒ 3 maps; `127.0.0.1:H:C`
+        // ⇒ loopback) + `-P/--publish-all` (auto-publish the image's EXPOSE list,
+        // de-duplicated against explicit `-p` host ports). Fail-closed on a bad spec.
+        let ports = match policy::resolve_detached_ports(publish_raw, publish_all, ref_name, &store)
+        {
+            Ok(v) => v,
+            Err(code) => return code,
+        };
+        // Build the RunSpec persisted to spec.json (pure value builder — folds the
+        // parsed inputs + resolved rc/runflags carry-fields; byte-identical).
+        let spec = policy::build_detached_spec(
             cwd,
-            inputs: Vec::new(),
-            command: command.to_vec(),
-            env_keys: env_keys.to_vec(),
+            command,
+            env_keys,
             mounts,
             secrets,
             configs,
             ports,
             env_explicit,
-            // RUNTIME flags persisted to spec.json; the native supervisor honors them.
-            workdir: workdir.map(String::from),
-            user: user.map(String::from),
-            restart: restart.map(String::from),
-            stop_signal: stop_signal.map(String::from),
-            // WP-RESLIMITS: carry the parsed `--memory`/`--cpus` to spec.json so
-            // the vz supervisor reads them back (the VM applies a hard mem/vcpu
-            // cap — `vz_caps`). RUNTIME-ONLY, never keyed.
+            workdir,
+            user,
+            restart,
+            stop_signal,
             limits,
-            // WP-RC-FLAGS: the 11 run-config carry-fields (RUNTIME-ONLY, never
-            // keyed). Persisted to spec.json + honored by the apply seam where the
-            // native engine can; honest per-field note otherwise (see apply_cfg).
-            hostname: rc.hostname.clone(),
-            labels: rc.labels.clone(),
-            cap_add: rc.cap_add.clone(),
-            cap_drop: rc.cap_drop.clone(),
-            privileged: rc.privileged,
-            tty: rc.tty,
-            init: rc.init,
-            read_only: rc.read_only,
-            oom_score_adj: rc.oom_score_adj,
-            pids_limit: rc.pids_limit,
-            shm_size: rc.shm_size,
-            // WP-RUNFLAGS: `--name`/`--rm`/`--entrypoint` + `-v`/`--tmpfs` carry-
-            // fields. Persisted to spec.json; honored on the native supervisor
-            // path. RUNTIME-ONLY (never keyed). All-default ⇒ no-op.
-            volumes: runflags.volumes.clone(),
-            tmpfs: runflags.tmpfs.clone(),
-            entrypoint: runflags.entrypoint.clone(),
-            name: runflags.name.clone(),
-            rm: runflags.rm,
-            // WP-NET3: the vz container-networking carry-fields, off the C9 seam.
-            // RUNTIME-ONLY, never keyed. `--network Some(..)` ⇒ the vz supervisor
-            // (svz) create-or-opens the per-network registry, joins it, and
-            // attaches the shared cross-process L2 switch (mesh NIC eth1). All
-            // empty/None ⇒ the single-NAT-NIC path, byte-identical to before.
-            network: runflags.network.clone(),
-            network_alias: runflags.network_alias.clone(),
-            add_host: runflags.add_host.clone(),
-            dns: runflags.dns.clone(),
-        };
+            &rc,
+            &runflags,
+        );
         return match spawn_detached_engine(
             &spec,
             &store,
@@ -473,10 +289,8 @@ pub fn run(
     }
 
     // `--ulimit TYPE=SOFT[:HARD]` ⇒ per-process setrlimit caps. Parsed ONCE here
-    // (BEFORE the path split) because BOTH the engine path (ns: setrlimit in PID 1;
-    // native+rootfs: pre_exec) AND the native+no-rootfs memo path apply it — a
-    // `--ulimit` is enforceable natively, so it must never be a silent no-op on the
-    // default `lightr run` (memo-path honest-boundary law). Bad input ⇒ honest exit 2.
+    // (before the path split) because BOTH the engine path and the native memo path
+    // apply it — enforceable natively, so never a silent no-op. Bad input ⇒ exit 2.
     let ulimits = match parse_ulimits(&runflags.ulimit) {
         Ok(v) => v,
         Err(code) => return code,
@@ -484,17 +298,8 @@ pub fn run(
 
     if use_engine_path {
         // `--add-host HOST:IP` ⇒ `(hostname, ip)` pairs for the ns engine's
-        // /etc/hosts write. Already value-validated as `HOST:IP` in
-        // `RawRunFlags::resolve` (a malformed entry was an exit 2 there), so the
-        // split is infallible here; a stray bad entry is defensively skipped.
-        let add_host_pairs: Vec<(String, String)> = runflags
-            .add_host
-            .iter()
-            .filter_map(|raw| {
-                raw.split_once(':')
-                    .map(|(h, ip)| (h.to_string(), ip.to_string()))
-            })
-            .collect();
+        // /etc/hosts write (value-validated in `RawRunFlags::resolve`).
+        let add_host_pairs = policy::resolve_add_host_pairs(&runflags);
         // `--tmpfs DST[:opts]` ⇒ the ns engine's tmpfs mounts. Minimal grammar:
         // `target` with an optional `:size=<bytes|N[kmg]>,mode=<octal>` suffix
         // (Docker's tmpfs option shape). Bad options are an honest exit 2.
@@ -587,177 +392,6 @@ pub fn run(
         // spawn via a pre_exec hook (enforceable natively ⇒ never silently dropped).
         ulimits,
     })
-}
-
-/// Parse the raw `--tmpfs` strings (Docker shape `DST[:opt[,opt...]]`) into the
-/// engine's [`TmpfsMount`] list. Supported options (Docker parity): `size=<bytes
-/// | N[kKmMgG]>` (an optional byte cap) and `mode=<octal>` (defaults to `1777`,
-/// the sticky world-writable scratch mode). Exec is ALWAYS allowed (no MS_NOEXEC),
-/// matching Docker's `--tmpfs` default of `nosuid,nodev`. A missing/empty target or
-/// an unparseable option is an honest `Err(2)` (fail-closed — never a silent drop).
-fn parse_tmpfs(raw: &[String]) -> Result<Vec<TmpfsMount>, i32> {
-    let mut out = Vec::with_capacity(raw.len());
-    for entry in raw {
-        let (target, opts) = match entry.split_once(':') {
-            Some((t, o)) => (t, Some(o)),
-            None => (entry.as_str(), None),
-        };
-        if target.is_empty() {
-            eprintln!("lightr: --tmpfs {entry}: empty target path");
-            return Err(2);
-        }
-        let mut size: Option<u64> = None;
-        let mut mode = "1777".to_string();
-        if let Some(opts) = opts {
-            for opt in opts.split(',').filter(|s| !s.is_empty()) {
-                match opt.split_once('=') {
-                    Some(("size", v)) => match parse_size(v) {
-                        Some(b) => size = Some(b),
-                        None => {
-                            eprintln!("lightr: --tmpfs {entry}: bad size '{v}'");
-                            return Err(2);
-                        }
-                    },
-                    Some(("mode", v)) => {
-                        // Validate it is octal so the mount option is well-formed.
-                        if v.is_empty() || u32::from_str_radix(v, 8).is_err() {
-                            eprintln!("lightr: --tmpfs {entry}: bad mode '{v}' (expected octal)");
-                            return Err(2);
-                        }
-                        mode = v.to_string();
-                    }
-                    _ => {
-                        eprintln!("lightr: --tmpfs {entry}: unknown option '{opt}'");
-                        return Err(2);
-                    }
-                }
-            }
-        }
-        out.push(TmpfsMount {
-            target: target.to_string(),
-            size,
-            mode,
-        });
-    }
-    Ok(out)
-}
-
-/// Parse the raw `--ulimit` strings (Docker shape `TYPE=SOFT[:HARD]`) into the
-/// engine's [`Ulimit`] list (mirrors [`parse_tmpfs`]'s shape + fail-closed
-/// `Err(2)`). Grammar:
-///   * split on the FIRST `=` → (type, vals); vals split on `:` → soft[, hard].
-///   * TYPE → resource: the libc `RLIMIT_*` integer (stored as NUMERIC constants
-///     valid on Linux so this fn compiles identically host-side on macOS, where
-///     some `libc::RLIMIT_*` differ — verified against Linux `<bits/resource.h>`).
-///   * value: `unlimited` / `-1` ⇒ `u64::MAX` (RLIM_INFINITY); else a `u64`.
-///     HARD omitted ⇒ `hard = soft` (Docker). A bad value/type ⇒ honest `Err(2)`.
-fn parse_ulimits(raw: &[String]) -> Result<Vec<Ulimit>, i32> {
-    let mut out = Vec::with_capacity(raw.len());
-    for entry in raw {
-        let (ty, vals) = match entry.split_once('=') {
-            Some((t, v)) => (t.trim(), v.trim()),
-            None => {
-                eprintln!("lightr: --ulimit {entry}: expected TYPE=SOFT[:HARD]");
-                return Err(2);
-            }
-        };
-        let resource = match ulimit_resource(ty) {
-            Some(r) => r,
-            None => {
-                eprintln!("lightr: --ulimit {entry}: unknown ulimit type '{ty}'");
-                return Err(2);
-            }
-        };
-        let (soft_s, hard_s) = match vals.split_once(':') {
-            Some((s, h)) => (s.trim(), Some(h.trim())),
-            None => (vals, None),
-        };
-        let soft = match parse_ulimit_value(soft_s) {
-            Some(v) => v,
-            None => {
-                eprintln!("lightr: --ulimit {entry}: bad soft value '{soft_s}'");
-                return Err(2);
-            }
-        };
-        let hard = match hard_s {
-            None => soft, // HARD omitted ⇒ hard = soft (Docker).
-            Some(h) => match parse_ulimit_value(h) {
-                Some(v) => v,
-                None => {
-                    eprintln!("lightr: --ulimit {entry}: bad hard value '{h}'");
-                    return Err(2);
-                }
-            },
-        };
-        out.push(Ulimit {
-            resource,
-            soft,
-            hard,
-        });
-    }
-    Ok(out)
-}
-
-/// Parse a single `--ulimit` value: `unlimited`/`-1` ⇒ `u64::MAX` (RLIM_INFINITY),
-/// else a plain `u64`. `None` on a malformed value (fail-closed at the caller).
-fn parse_ulimit_value(v: &str) -> Option<u64> {
-    let v = v.trim();
-    if v.is_empty() {
-        return None;
-    }
-    if v.eq_ignore_ascii_case("unlimited") || v == "-1" {
-        return Some(u64::MAX);
-    }
-    v.parse::<u64>().ok()
-}
-
-/// Map a Docker `--ulimit` TYPE name to its Linux `RLIMIT_*` resource integer.
-/// NUMERIC constants (NOT `libc::RLIMIT_*`) so this compiles identically host-side
-/// on macOS, where several `RLIMIT_*` numbers/symbols differ. These are the
-/// `asm-generic/resource.h` values used by glibc on the COMMON Linux arches
-/// (x86_64/aarch64/arm/… — the ns engine + CI target). Verified against the libc
-/// crate's `linux_like/linux/gnu` table (NOFILE=7, NPROC=6, AS=9, RSS=5,
-/// MEMLOCK=8). NOTE (honest caveat): a few legacy arches (mips/sparc/alpha) use a
-/// DIFFERENT numbering for nofile/nproc/as/rss/memlock; this map targets the
-/// generic/x86_64 family the ns engine actually runs on — a mips/sparc port would
-/// need an arch-gated table (tracked, not in scope here).
-fn ulimit_resource(ty: &str) -> Option<libc::c_int> {
-    let n: libc::c_int = match ty.to_ascii_lowercase().as_str() {
-        "cpu" => 0,        // RLIMIT_CPU
-        "fsize" => 1,      // RLIMIT_FSIZE
-        "data" => 2,       // RLIMIT_DATA
-        "stack" => 3,      // RLIMIT_STACK
-        "core" => 4,       // RLIMIT_CORE
-        "rss" => 5,        // RLIMIT_RSS
-        "nproc" => 6,      // RLIMIT_NPROC
-        "nofile" => 7,     // RLIMIT_NOFILE
-        "memlock" => 8,    // RLIMIT_MEMLOCK
-        "as" => 9,         // RLIMIT_AS
-        "locks" => 10,     // RLIMIT_LOCKS
-        "sigpending" => 11, // RLIMIT_SIGPENDING
-        "msgqueue" => 12,  // RLIMIT_MSGQUEUE
-        "nice" => 13,      // RLIMIT_NICE
-        "rtprio" => 14,    // RLIMIT_RTPRIO
-        _ => return None,
-    };
-    Some(n)
-}
-
-/// Parse a `size=` value: a plain byte count or an `N[kKmMgG]` suffix (Docker/
-/// runc shape). Returns `None` on a malformed value (fail-closed at the caller).
-fn parse_size(v: &str) -> Option<u64> {
-    let v = v.trim();
-    if v.is_empty() {
-        return None;
-    }
-    let (num, mult) = match v.chars().last().unwrap() {
-        'k' | 'K' => (&v[..v.len() - 1], 1024u64),
-        'm' | 'M' => (&v[..v.len() - 1], 1024 * 1024),
-        'g' | 'G' => (&v[..v.len() - 1], 1024 * 1024 * 1024),
-        '0'..='9' => (v, 1),
-        _ => return None,
-    };
-    num.parse::<u64>().ok().map(|n| n * mult)
 }
 
 #[cfg(test)]
