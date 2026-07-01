@@ -113,6 +113,9 @@ fn cow_reflink(src: &Path, dst: &Path) -> std::io::Result<()> {
     // pass FICLONE through `try_into` (identity on glibc; checked u64→i32 on musl —
     // 0x40049409 fits in i32, so it never fails). Without this the musl target
     // fails to compile (a real pre-existing break; glibc CI was unaffected).
+    // clippy::useless_conversion fires on glibc (c_ulong→c_ulong is identity there),
+    // but the `try_into` is REQUIRED on musl (c_ulong→c_int, checked) — see above.
+    #[allow(clippy::useless_conversion)]
     let request = FICLONE
         .try_into()
         .expect("FICLONE constant fits the platform ioctl request type");
