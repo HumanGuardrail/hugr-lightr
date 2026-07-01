@@ -40,11 +40,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
-
-# WP-CLI-TRIO (pause/unpause): `pause`/`unpause` source the SIGSTOP/SIGCONT
-# signal numbers from `libc` (their values differ by platform — Linux 19/18,
-# macOS 17/19 — so a hardcoded number would be wrong on the other unix). Used
-# ONLY on unix (`#[cfg(unix)]`), so it is a unix-target dep — the windows build
-# never pulls it in and never sees an unused-dep.
-[target.'cfg(unix)'.dependencies]
+# `libc` is needed on ALL targets: the `--ulimit` parser (handlers/run/parse.rs)
+# names `libc::c_int` for the `Ulimit.resource` field (that type lives in
+# lightr-engine, which already depends on libc unconditionally), and it is parsed
+# cross-platform in the run handler. Separately, WP-CLI-TRIO's `pause`/`unpause`
+# source the SIGSTOP/SIGCONT signal numbers from `libc` (their values differ by
+# platform — Linux 19/18, macOS 17/19 — so a hardcoded number would be wrong on
+# the other unix); that use stays `#[cfg(unix)]`.
 libc = { workspace = true }
