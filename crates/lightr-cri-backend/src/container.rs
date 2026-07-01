@@ -22,7 +22,9 @@ use std::fs;
 #[cfg(target_os = "linux")]
 use crate::container_wait::pid_is_container_init;
 use crate::util::{atomic_write_json, now_nanos, pid_alive, ContainerRecord};
-use crate::vocab::{BackendError, ContainerConfig, ContainerId, ContainerState, Result, SandboxId};
+#[cfg(target_os = "linux")]
+use crate::vocab::BackendError;
+use crate::vocab::{ContainerConfig, ContainerId, ContainerState, Result, SandboxId};
 use crate::LightrBackend;
 
 /// In-memory cache (a view rebuilt from disk on open; crash-only law). Both
@@ -195,6 +197,7 @@ impl LightrBackend {
         }
     }
     #[cfg(not(unix))]
+    #[allow(dead_code)] // only called from cgroup_stop (cfg linux); a genuine stub on non-unix
     pub(crate) fn cgroup_force_kill(_leaf: &std::path::Path, _kill_file: &std::path::Path) {}
 
     // ── stop (SIGTERM→SIGKILL grace) ─────────────────────────────────────────

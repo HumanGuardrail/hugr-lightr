@@ -62,24 +62,24 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
-  # Cross-clippy to windows-gnu: the ONLY way (on a macOS runner) to catch
-  # windows-only cfg dead-code / unused-var regressions — exactly the class that
-  # bit DF-06 and STATS-TOP. Build + clippy only; windows runtime is a future
-  # ring (WSL), so lightr-acceptance (unix integration) is excluded.
-  # NOTE: still on the self-hosted Mac. Moving this to GitHub-hosted is tracked as a
-  # follow-up: with the gate long offline, windows-gnu -D-warnings drift accumulated
-  # (e.g. pathres X_OK — fixed; container.rs unused BackendError / dead cgroup_force_kill
-  # stub; likely more). Those must be fixed before this can go live green (windows/WSL
-  # is a future ring). godfile-guard (below) was safe to move now (shell-only, green).
+  # Cross-clippy to windows-gnu: catches windows-only cfg dead-code / unused-var
+  # regressions — exactly the class that bit DF-06 and STATS-TOP. Build + clippy
+  # only; windows runtime is a future ring (WSL), so lightr-acceptance (unix
+  # integration) is excluded. Moved to GitHub-hosted (ubuntu-latest) so it's
+  # enforced even when the self-hosted Mac is offline — no macOS needed for a cross
+  # target. The pinned toolchain comes from rust-toolchain.toml; mingw-w64 provides
+  # the C cross-compiler for the C-dep build scripts (xz2/bzip2) — clippy doesn't
+  # link, but those build scripts compile C.
   windows-cross:
     name: windows cross-clippy (cfg/dead-code catch)
-    runs-on: [self-hosted, macOS]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Toolchain on PATH (pinned bin — rustup-proxy-immune)
+      - name: Install mingw + windows-gnu target + clippy
         run: |
-          echo "$HOME/.rustup/toolchains/1.96.0-x86_64-apple-darwin/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+          rustup target add x86_64-pc-windows-gnu
+          rustup component add clippy
       - name: cargo clippy --target x86_64-pc-windows-gnu -D warnings
         run: cargo clippy --workspace --exclude lightr-acceptance --all-targets --target x86_64-pc-windows-gnu -- -D warnings
 
