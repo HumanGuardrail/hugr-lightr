@@ -107,7 +107,10 @@ fn resolve_threads_every_flag() {
     // WP-#106: `--apparmor` threads through unparsed (profile name passthrough).
     assert_eq!(cfg.apparmor.as_deref(), Some("lightr-test-deny"));
     // WP-#108: `--seccomp` threads through unparsed (profile path passthrough).
-    assert_eq!(cfg.seccomp.as_deref(), Some("/tmp/lightr-test-seccomp.json"));
+    assert_eq!(
+        cfg.seccomp.as_deref(),
+        Some("/tmp/lightr-test-seccomp.json")
+    );
 }
 
 /// A bad `--label` (or `--shm-size`) fails the whole resolve fail-closed (exit

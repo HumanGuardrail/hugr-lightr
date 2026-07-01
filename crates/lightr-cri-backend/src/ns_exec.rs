@@ -151,17 +151,17 @@ fn run_exec_shim_linux() -> ! {
         }
     };
     do_setns(&net_ns, libc::CLONE_NEWNET, "net"); // FIRST: host-owned pod netns; need host caps
-    // UTS BEFORE user — same reason as net. When the sandbox set a hostname the UTS
-    // ns is owned by the container's child userns; when it did NOT, PID 1's UTS ns
-    // IS the host init UTS ns (the engine only unshares UTS iff hostname.is_some()).
-    // Joining it here, while still host-root (we hold CAP_SYS_ADMIN over BOTH the
-    // host init userns and any child userns), succeeds in BOTH cases. Joining it
-    // AFTER `setns(user)` would EPERM in the no-hostname case (a child userns holds
-    // no caps over the host-owned UTS ns) — that would regress every other exec
-    // spec. The hostname case still gets the container's UTS ns either way; this
-    // ordering is the one that is also benign (same-ns no-op) for no-hostname
-    // containers. Net effect: `hostname`/`uname -n` via exec now reads the sandbox
-    // hostname, fixing critest "set hostname" without disturbing any other spec.
+                                                  // UTS BEFORE user — same reason as net. When the sandbox set a hostname the UTS
+                                                  // ns is owned by the container's child userns; when it did NOT, PID 1's UTS ns
+                                                  // IS the host init UTS ns (the engine only unshares UTS iff hostname.is_some()).
+                                                  // Joining it here, while still host-root (we hold CAP_SYS_ADMIN over BOTH the
+                                                  // host init userns and any child userns), succeeds in BOTH cases. Joining it
+                                                  // AFTER `setns(user)` would EPERM in the no-hostname case (a child userns holds
+                                                  // no caps over the host-owned UTS ns) — that would regress every other exec
+                                                  // spec. The hostname case still gets the container's UTS ns either way; this
+                                                  // ordering is the one that is also benign (same-ns no-op) for no-hostname
+                                                  // containers. Net effect: `hostname`/`uname -n` via exec now reads the sandbox
+                                                  // hostname, fixing critest "set hostname" without disturbing any other spec.
     do_setns(&uts_ns, libc::CLONE_NEWUTS, "uts");
     do_setns(&user_ns, libc::CLONE_NEWUSER, "user"); // then enter the container userns
     do_setns(&pid_ns, libc::CLONE_NEWPID, "pid"); // owned by the container userns

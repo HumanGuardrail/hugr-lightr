@@ -42,9 +42,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use lightr_cri_backend::{
-    ContainerConfig, CriBackend, LightrBackend, SandboxConfig,
-};
+use lightr_cri_backend::{ContainerConfig, CriBackend, LightrBackend, SandboxConfig};
 
 /// Conflist subnet the CI installs (10-lightr-bridge.conflist): 10.88.0.0/16,
 /// gateway 10.88.0.1 (bridge isGateway:true).
@@ -204,7 +202,9 @@ fn netns_cni_full_lifecycle_no_leak() {
                 "assertion 2: CNI ip {ip} is not in the conflist subnet 10.88.0.0/16"
             );
         }
-        std::net::IpAddr::V6(_) => panic!("assertion 2: expected an IPv4 from the bridge IPAM, got {ip}"),
+        std::net::IpAddr::V6(_) => {
+            panic!("assertion 2: expected an IPv4 from the bridge IPAM, got {ip}")
+        }
     }
 
     // ── 3. the netns has the WIRED interface + real connectivity ─────────────
@@ -225,7 +225,10 @@ fn netns_cni_full_lifecycle_no_leak() {
     // lo is UP inside the fresh netns (setup brought it up; in-ns 127.0.0.1 dials
     // would otherwise hang). UP flag lives in `ip link` output, not `ip addr`.
     let (l_code, lo_out, l_err) = run("nsenter", &[&netarg, "ip", "-o", "link", "show", "lo"]);
-    assert_eq!(l_code, 0, "assertion 3: `nsenter ip link show lo` failed: {l_err}");
+    assert_eq!(
+        l_code, 0,
+        "assertion 3: `nsenter ip link show lo` failed: {l_err}"
+    );
     assert!(
         lo_out.contains("UP"),
         "assertion 3: loopback `lo` is not UP inside the netns:\n{lo_out}"
@@ -235,8 +238,7 @@ fn netns_cni_full_lifecycle_no_leak() {
     // ping the bridge gateway from inside the netns. Prefer ping; if ping is
     // unavailable (nsenter exits 127) or fails, fall back to proving a default
     // route via the gateway exists.
-    let (ping_code, ping_out, ping_err) =
-        run("nsenter", &[&netarg, "ping", "-c1", "-W2", GW]);
+    let (ping_code, ping_out, ping_err) = run("nsenter", &[&netarg, "ping", "-c1", "-W2", GW]);
     if ping_code != 0 {
         let (r_code, route_out, r_err) = run("nsenter", &[&netarg, "ip", "route"]);
         assert_eq!(r_code, 0, "assertion 3: `nsenter ip route` failed: {r_err}");
@@ -257,7 +259,10 @@ fn netns_cni_full_lifecycle_no_leak() {
     // inode equality on a REAL hydrated container) now lives in the `cri-kpi3` CI
     // job, which runs an actual alpine container inside the pod netns.
     let cid = b
-        .create_container(&id, container_cfg("netns-probe", vec!["/bin/sh", "-c", "true"]))
+        .create_container(
+            &id,
+            container_cfg("netns-probe", vec!["/bin/sh", "-c", "true"]),
+        )
         .expect("create_container on a Ready netns'd sandbox");
     let start = b.start_container(&cid);
     assert!(
