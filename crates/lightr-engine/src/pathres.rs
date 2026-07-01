@@ -62,9 +62,16 @@ pub fn resolve_in_path(prog: &str, env_path: Option<&str>) -> Option<CString> {
             Ok(c) => c,
             Err(_) => continue, // interior NUL ⇒ skip this candidate
         };
-        // access(path, X_OK): exists AND is executable. Resolves against the
-        // CONTAINER rootfs because we are post-pivot / post-setns.
-        if unsafe { libc::access(c.as_ptr(), libc::X_OK) } == 0 {
+        // Executable check. On unix: `access(path, X_OK)` — exists AND is executable,
+        // resolved against the CONTAINER rootfs (post-pivot / post-setns). On non-unix
+        // — where this ns PATH-resolver is never actually invoked — a plain existence
+        // check keeps the crate compiling (the windows cross-clippy gate builds the
+        // whole workspace for x86_64-pc-windows-gnu, where `libc::X_OK` does not exist).
+        #[cfg(unix)]
+        let ok = unsafe { libc::access(c.as_ptr(), libc::X_OK) } == 0;
+        #[cfg(not(unix))]
+        let ok = std::path::Path::new(&candidate).is_file();
+        if ok {
             return Some(c);
         }
     }
