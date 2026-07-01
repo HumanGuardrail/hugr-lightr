@@ -1,0 +1,246 @@
+//! Native memoized path for `lightr run`, extracted from `paths.rs` via `#[path]`
+//! to keep that file under the 400-line godfile cap. Behaviour is identical to the
+//! inlined original — this is a pure code move.
+
+use std::io::Write;
+
+use lightr_core::ResourceLimits;
+use lightr_run::healthcheck::Healthcheck;
+use lightr_run::{
+    run_memoized_deep, run_memoized_with, spawn_detached, spawn_detached_with_health,
+    DeepMemoConfig, Mount, PortMap, RunSpec, StoreFile,
+};
+use lightr_store::Store;
+
+use crate::exit::die_lightr;
+
+use super::super::{RcConfig, RunJson};
+
+// ── Memoized path (native + no rootfs — unchanged R0/R1 behaviour) ────────────
+/// All already-parsed inputs the native memoized path needs, bundled into one
+/// struct (destructured at the top of [`run_native_memo`]) so the helper is a
+/// single-argument call. The body below is identical to the inlined original.
+pub(crate) struct NativeRun<'a> {
+    pub inputs: &'a [String],
+    pub publish_raw: &'a [String],
+    pub command: &'a [String],
+    pub env_keys: &'a [String],
+    pub mounts: Vec<Mount>,
+    pub secrets: Vec<StoreFile>,
+    pub configs: Vec<StoreFile>,
+    pub cwd: std::path::PathBuf,
+    pub detach: bool,
+    pub store: &'a Store,
+    pub explain: bool,
+    pub json: bool,
+    pub deep_memo: bool,
+    pub limits: ResourceLimits,
+    /// WP-RC-4: an optional healthcheck for the DETACHED native path. `None` for
+    /// every non-`-d` run (and when no `--health-cmd` is given), so the foreground
+    /// path is byte-identical to before; the supervisor owns the watchdog.
+    pub healthcheck: Option<Healthcheck>,
+    /// WP-RC-1 (R-KEY): user `-e`/`--env-file` env, resolved pairs — the ONLY env
+    /// in the run memo key. Empty for no-`-e` runs (key/behaviour unchanged).
+    pub env_explicit: Vec<(String, String)>,
+    /// WP-RC-WORKDIR: `-w`/`--workdir` — honored as the child cwd. RUNTIME ONLY.
+    pub workdir: Option<String>,
+    /// WP-RC-USER: `-u`/`--user` — honored as the child uid/gid (cfg unix). RUNTIME ONLY.
+    pub user: Option<String>,
+    /// WP-RC-RESTART: `--restart` — honored by the detached supervisor's re-spawn
+    /// loop. `None` ⇒ `no` (run once + exit). RUNTIME ONLY (never keyed).
+    pub restart: Option<String>,
+    /// WP-RC-STOPSIGNAL: `--stop-signal` — honored by `lightr stop`/restart-stop.
+    /// `None` ⇒ SIGTERM. RUNTIME ONLY (never keyed).
+    pub stop_signal: Option<String>,
+    /// WP-RC-FLAGS: the resolved 11 run-config flags (hostname/labels/caps/
+    /// privileged/tty/init/read-only/oom/pids/shm). Lowered into the RunSpec
+    /// carry-fields + honored by the apply seam (or honest per-field note).
+    /// RUNTIME ONLY (never keyed); all-default ⇒ no-op (behavior-preserving).
+    pub rc: RcConfig,
+    /// WP-RUNFLAGS: the resolved `-v/--volume` host binds, `--tmpfs` dirs,
+    /// `--name`, `--rm`, `--entrypoint`. RUNTIME ONLY (never keyed); all-default ⇒
+    /// no-op. Binds/tmpfs/entrypoint are honored on BOTH the synchronous memo exec
+    /// and the detached supervisor; `--name`/`--rm` are detached-only (a foreground
+    /// run has no run dir — guarded at the handler).
+    pub runflags: super::super::runflags::RunFlags,
+    /// `--ulimit` parsed per-process setrlimit caps. Applied on the memoized native
+    /// spawn via a `pre_exec` hook (a `--ulimit` is enforceable natively ⇒ never a
+    /// silent no-op on the default `lightr run`). RUNTIME-ONLY (excluded from the key).
+    pub ulimits: Vec<lightr_engine::Ulimit>,
+}
+
+pub(crate) fn run_native_memo(req: NativeRun) -> i32 {
+    let NativeRun {
+        inputs,
+        publish_raw,
+        command,
+        env_keys,
+        mounts,
+        secrets,
+        configs,
+        cwd,
+        detach,
+        store,
+        explain,
+        json,
+        deep_memo,
+        limits,
+        healthcheck,
+        env_explicit,
+        workdir,
+        user,
+        restart,
+        stop_signal,
+        rc,
+        runflags,
+        ulimits,
+    } = req;
+    let input_paths: Vec<std::path::PathBuf> = if inputs.is_empty() {
+        vec![cwd.clone()]
+    } else {
+        inputs.iter().map(std::path::PathBuf::from).collect()
+    };
+
+    // Parse published ports (Phase 1). Policy above already guaranteed this is
+    // the native detached path when `publish_raw` is non-empty. Empty ⇒ no-op,
+    // so the non-published path is byte-identical to before. WP-B2: consume the
+    // range-aware, host-ip-carrying parser so `-p 8000-8002:8000-8002` yields 3
+    // PortMaps and `-p 127.0.0.1:H:C` binds loopback. (`-P/--publish-all` has no
+    // EXPOSE source on the native path — no rootfs image — so it is a no-op here;
+    // it auto-publishes only on the rootfs-bearing vz container path.)
+    let mut ports: Vec<PortMap> = Vec::new();
+    for raw in publish_raw {
+        match super::super::flags::publish::parse_publish_spec(raw) {
+            Ok(mut maps) => ports.append(&mut maps),
+            Err(code) => return code,
+        }
+    }
+
+    let spec = RunSpec {
+        cwd,
+        inputs: input_paths,
+        command: command.to_vec(),
+        env_keys: env_keys.to_vec(),
+        mounts,
+        secrets,
+        configs,
+        ports,
+        env_explicit,
+        workdir,     // WP-RC-WORKDIR: honored as the child cwd (memo exec + supervisor).
+        user,        // WP-RC-USER: honored as the child uid/gid (cfg unix; memo + supervisor).
+        restart,     // WP-RC-RESTART: honored by the detached supervisor's re-spawn loop.
+        stop_signal, // WP-RC-STOPSIGNAL: honored by `lightr stop`/restart-stop.
+        limits,      // WP-RESLIMITS: caps → supervisor (RLIMIT_AS on Linux).
+        // WP-RC-FLAGS: the resolved 11 run-config carry-fields. RUNTIME-ONLY
+        // (never keyed). Honored by the apply seam (apply_cfg) on the native exec +
+        // the detached supervisor; shown by inspect. All-default ⇒ no-op.
+        hostname: rc.hostname,
+        labels: rc.labels,
+        cap_add: rc.cap_add,
+        cap_drop: rc.cap_drop,
+        privileged: rc.privileged,
+        tty: rc.tty,
+        init: rc.init,
+        read_only: rc.read_only,
+        oom_score_adj: rc.oom_score_adj,
+        pids_limit: rc.pids_limit,
+        shm_size: rc.shm_size,
+        // WP-RUNFLAGS: host binds / tmpfs / entrypoint / name / rm carry-fields.
+        // RUNTIME ONLY (never keyed). Binds + tmpfs force a memo MISS in
+        // `run_memoized_with`; all-default ⇒ no-op (behavior-preserving).
+        volumes: runflags.volumes,
+        tmpfs: runflags.tmpfs,
+        entrypoint: runflags.entrypoint,
+        name: runflags.name.clone(),
+        rm: runflags.rm,
+        // WP-C9 seam: the vz container-networking carry-fields (network /
+        // network_alias / add_host / dns). RUNTIME-ONLY, never keyed. The CLI
+        // flag surface (`--network` etc.) is NET3's job; until then they default
+        // to no-op, so this run path is byte-identical to before.
+        ..Default::default()
+    };
+
+    // Detach path: spawn detached and print the run id. WP-RC-4: when a
+    // healthcheck is configured, go through `spawn_detached_with_health` so the
+    // supervisor probes it; with no healthcheck this is the same call shape as
+    // before (`spawn_detached` == `_with_health(None)`), so the no-flags path is
+    // behavior-preserving.
+    if detach {
+        // WP-RESLIMITS: validate caps BEFORE forking (honest sync error).
+        if let Err(e) = lightr_run::limits::check_native_support(&limits) {
+            return die_lightr(&e);
+        }
+        let result = match healthcheck {
+            Some(ref hc) => spawn_detached_with_health(&spec, store, Some(hc)),
+            None => spawn_detached(&spec, store),
+        };
+        match result {
+            // WP-RUNFLAGS: claim `--name` (if any) for the spawned id, then print
+            // it. `None` ⇒ just print the id (byte-identical to before).
+            Ok(handle) => {
+                return super::super::claim_name_and_print(&handle, runflags.name.as_deref())
+            }
+            Err(e) => return die_lightr(&e),
+        }
+    }
+
+    if explain {
+        let os_arch = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        eprintln!(
+            "lightr: explain run: inputs={} argv={} env={} os-arch={}",
+            spec.inputs.len(),
+            spec.command.len(),
+            spec.env_keys.len(),
+            os_arch
+        );
+    }
+
+    // Deep-memo (opt-in): surface the honest capability note, then run.
+    // The fn falls back to whole-run memo when the shim can't attach.
+    let outcome = if deep_memo {
+        let (avail, reason) = lightr_run::deep_memo_available();
+        if !avail {
+            eprintln!("lightr: deep-memo unavailable ({reason}) — falling back to whole-run memo");
+        }
+        match run_memoized_deep(&spec, store, &DeepMemoConfig { enabled: true }) {
+            Ok(o) => o,
+            Err(e) => return die_lightr(&e),
+        }
+    } else {
+        match run_memoized_with(&spec, store, &limits, &ulimits) {
+            Ok(o) => o,
+            Err(e) => return die_lightr(&e),
+        }
+    };
+
+    let hex = outcome.key.to_hex();
+    let short = &hex[..16];
+    let hit_str = if outcome.hit { "HIT" } else { "MISS" };
+    eprintln!("lightr: memo {hit_str} key={short}");
+
+    // Stream stdout then stderr raw (lossless).
+    {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        out.write_all(&outcome.stdout).ok();
+    }
+    {
+        let stderr = std::io::stderr();
+        let mut err = stderr.lock();
+        err.write_all(&outcome.stderr).ok();
+    }
+
+    if json {
+        let obj = RunJson {
+            key: hex.clone(),
+            hit: outcome.hit,
+            exit_code: outcome.exit_code,
+        };
+        eprintln!(
+            "lightr-json: {}",
+            serde_json::to_string(&obj).expect("serialize run")
+        );
+    }
+
+    outcome.exit_code
+}
