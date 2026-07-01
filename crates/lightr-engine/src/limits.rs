@@ -168,10 +168,7 @@ fn rlim_from_u64(v: u64) -> libc::rlim_t {
 /// that leaf's `cgroup.kill`). When `None`, behavior is unchanged: an unlimited
 /// run is a no-op, a limited run uses the transient `lightr.<pid>` leaf.
 #[cfg(target_os = "linux")]
-pub fn apply_cgroup(
-    limits: &lightr_core::ResourceLimits,
-    cgroup_name: Option<&str>,
-) -> Result<()> {
+pub fn apply_cgroup(limits: &lightr_core::ResourceLimits, cgroup_name: Option<&str>) -> Result<()> {
     if cgroup_name.is_none() && limits.is_unlimited() {
         return Ok(());
     }
@@ -182,10 +179,7 @@ pub fn apply_cgroup(
 /// `Ok(())` when unlimited. (The `ns` engine itself is Linux-only — this arm
 /// only exists so the symbol resolves on every target.)
 #[cfg(not(target_os = "linux"))]
-pub fn apply_cgroup(
-    limits: &lightr_core::ResourceLimits,
-    cgroup_name: Option<&str>,
-) -> Result<()> {
+pub fn apply_cgroup(limits: &lightr_core::ResourceLimits, cgroup_name: Option<&str>) -> Result<()> {
     // An explicit leaf name is a Linux-only cgroup-v2 concept; off Linux it is
     // simply not honored (the ns engine itself is Linux-only). Unlimited + no
     // name ⇒ inert Ok; any cap or named leaf ⇒ honest Unsupported.
@@ -214,10 +208,7 @@ mod cgroup_v2 {
     /// can rebuild the path and `cgroup.kill` the whole
     /// subtree). `None` keeps the transient `lightr.<pid>` leaf (unique per
     /// process so concurrent runs don't collide).
-    pub fn apply(
-        limits: &lightr_core::ResourceLimits,
-        cgroup_name: Option<&str>,
-    ) -> Result<()> {
+    pub fn apply(limits: &lightr_core::ResourceLimits, cgroup_name: Option<&str>) -> Result<()> {
         // cgroup v2 presents a unified hierarchy with a `cgroup.controllers`
         // file at the root. Its absence ⇒ v1 / not mounted ⇒ honest Unsupported.
         let root = Path::new(CGROUP_ROOT);

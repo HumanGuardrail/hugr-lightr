@@ -98,7 +98,10 @@ mod tests {
         let c = "runner:165536:65536\n";
         assert_eq!(
             parse_subid(c, "runner", 1001),
-            Some(SubIdRange { base: 165536, count: 65536 })
+            Some(SubIdRange {
+                base: 165536,
+                count: 65536
+            })
         );
     }
 
@@ -108,14 +111,20 @@ mod tests {
         let c = "1001:100000:65536\n";
         assert_eq!(
             parse_subid(c, "someone", 1001),
-            Some(SubIdRange { base: 100000, count: 65536 })
+            Some(SubIdRange {
+                base: 100000,
+                count: 65536
+            })
         );
     }
 
     #[test]
     fn first_matching_range_wins() {
         let c = "runner:10:5\nrunner:999:7\n";
-        assert_eq!(parse_subid(c, "runner", 0), Some(SubIdRange { base: 10, count: 5 }));
+        assert_eq!(
+            parse_subid(c, "runner", 0),
+            Some(SubIdRange { base: 10, count: 5 })
+        );
     }
 
     #[test]
@@ -123,7 +132,13 @@ mod tests {
         let c = "# a comment\n\n  \nrunner:notanum:65536\nrunner:200:0\nrunner:300:9\n";
         // first runner line has a non-numeric base → skip; second has count 0 → skip;
         // third is the first usable range.
-        assert_eq!(parse_subid(c, "runner", 0), Some(SubIdRange { base: 300, count: 9 }));
+        assert_eq!(
+            parse_subid(c, "runner", 0),
+            Some(SubIdRange {
+                base: 300,
+                count: 9
+            })
+        );
     }
 
     #[test]
@@ -137,7 +152,10 @@ mod tests {
         let c = " runner : 5000 : 1000 : extra \n";
         assert_eq!(
             parse_subid(c, "runner", 0),
-            Some(SubIdRange { base: 5000, count: 1000 })
+            Some(SubIdRange {
+                base: 5000,
+                count: 1000
+            })
         );
     }
 }
