@@ -172,7 +172,7 @@ impl LightrBackend {
     /// returning `Ok`. Now: try `cgroup.kill`; if the write fails (missing file /
     /// error), FALL BACK to SIGKILL'ing every pid in `cgroup.procs` so the
     /// container is actually torn down rather than silently surviving.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     pub(crate) fn cgroup_force_kill(leaf: &std::path::Path, kill_file: &std::path::Path) {
         if fs::write(kill_file, b"1").is_ok() {
             return;
@@ -196,8 +196,8 @@ impl LightrBackend {
             ),
         }
     }
-    #[cfg(not(unix))]
-    #[allow(dead_code)] // only called from cgroup_stop (cfg linux); a genuine stub on non-unix
+    #[cfg(not(target_os = "linux"))]
+    #[allow(dead_code)] // only called from linux-cfg'd stop/wait paths; a genuine stub elsewhere
     pub(crate) fn cgroup_force_kill(_leaf: &std::path::Path, _kill_file: &std::path::Path) {}
 
     // ── stop (SIGTERM→SIGKILL grace) ─────────────────────────────────────────
