@@ -228,43 +228,10 @@ pub(super) fn setup_rootfs_and_pivot(
     // `default` ⇒ the BUILT-IN curated allow-list (compile_default,
     // embedded). `unconfined` ⇒ no filter. Anything else is a PATH to an
     // OCI profile. `None` ⇒ byte-identical to the pre-#108 path.
-    #[cfg(target_arch = "x86_64")]
-    let compiled_seccomp: Option<super::SeccompFilter> = match seccomp {
-        Some("default") => match crate::engine::seccomp::compile_default() {
-            Ok(c) => Some(c),
-            Err(e) => {
-                eprintln!("lightr-engine ns: seccomp: {e}");
-                signal_setup_failed(exec_ready_fd, &format!("seccomp: {e}"));
-                unsafe { libc::_exit(1) };
-            }
-        },
-        Some("unconfined") | None => None,
-        Some(p) => match crate::engine::seccomp::compile_from_path(p) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                eprintln!("lightr-engine ns: seccomp: {e}");
-                signal_setup_failed(exec_ready_fd, &format!("seccomp: {e}"));
-                unsafe { libc::_exit(1) };
-            }
-        },
-    };
-    // seccomp is x86_64-linux-only; the CLI already rejects `--seccomp` on other
-    // arches (honest exit 2). Defense in depth here in PID 1: if a filter still
-    // reaches us, FAIL CLOSED rather than exec unfiltered. `unconfined`/`None` ⇒ no
-    // filter (fine — same as x86_64 with no flag). `SeccompFilter` is uninhabited on
-    // non-x86_64, so `None` is the only inhabitable value.
-    #[cfg(not(target_arch = "x86_64"))]
-    let compiled_seccomp: Option<super::SeccompFilter> = match seccomp {
-        Some("unconfined") | None => None,
-        Some(_) => {
-            eprintln!("lightr-engine ns: seccomp is x86_64-linux-only (unsupported on this arch)");
-            signal_setup_failed(
-                exec_ready_fd,
-                "seccomp: x86_64-linux-only (unsupported on this arch)",
-            );
-            unsafe { libc::_exit(1) };
-        }
-    };
+    // seccomp COMPILE (host path visible, pre-pivot) → the filter carried to the
+    // late install. x86_64-linux-only; fails closed on other arches (see seccomp_ns).
+    let compiled_seccomp: Option<super::SeccompFilter> =
+        super::seccomp_ns::compile_seccomp(seccomp, exec_ready_fd);
 
     // 4. Create put_old dir inside rootfs, then pivot_root
     let put_old = rootfs.join(".put_old");
@@ -364,48 +331,4 @@ pub(super) fn setup_rootfs_and_pivot(
     }
 
     compiled_seccomp
-}
-
-// WP-#112: hermetic proof that `--add-host` APPENDS to /etc/hosts (preserves the
-// image's existing content) rather than truncating it — the base-image-independent
-// version of the CI /etc/hosts check (the alpine probe rootfs ships no `localhost`
-// line, so this property must be pinned with controlled inputs).
-#[cfg(test)]
-mod hosts_tests {
-    use super::append_rootfs_file;
-
-    #[test]
-    fn append_rootfs_file_preserves_existing_then_appends() {
-        let tmp = std::env::temp_dir().join(format!("lightr-hosts-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("etc")).unwrap();
-        // Seed an image-style /etc/hosts.
-        std::fs::write(tmp.join("etc/hosts"), b"127.0.0.1\tlocalhost\n").unwrap();
-        // --add-host adds one line.
-        append_rootfs_file(&tmp, "etc/hosts", b"10.9.8.7\tmyhost.local\n").unwrap();
-        let got = std::fs::read_to_string(tmp.join("etc/hosts")).unwrap();
-        assert!(
-            got.contains("127.0.0.1\tlocalhost"),
-            "existing line preserved"
-        );
-        assert!(got.contains("10.9.8.7\tmyhost.local"), "new line appended");
-        // order: existing first, appended after (no truncation).
-        assert!(
-            got.find("localhost").unwrap() < got.find("myhost.local").unwrap(),
-            "append, not prepend/truncate"
-        );
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn append_rootfs_file_creates_when_missing() {
-        let tmp = std::env::temp_dir().join(format!("lightr-hosts2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        // No pre-existing /etc/hosts (alpine-style): the helper creates it + parent.
-        append_rootfs_file(&tmp, "etc/hosts", b"10.9.8.7\tmyhost.local\n").unwrap();
-        let got = std::fs::read_to_string(tmp.join("etc/hosts")).unwrap();
-        assert_eq!(got, "10.9.8.7\tmyhost.local\n");
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
 }
