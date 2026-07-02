@@ -2,9 +2,12 @@
 //! glob; --from honest-unsupported), exercised through the full `build()` loop +
 //! a hydrate of the final tree. Split out of `exec_tests.rs` for the godfile cap.
 //!
-//! Parallel-safe by construction: each test owns its tempdirs + store and never
-//! mutates process-global state — `build()` takes the store explicitly and uses a
-//! nanos-unique temp work dir. (No `LIGHTR_HOME`; we hydrate into an owned dir.)
+//! Each test owns its tempdirs + store and never MUTATES process-global state,
+//! but `build()`/`hydrate` READ the process-global `LIGHTR_HOME`, so the
+//! `build_df`/`hydrate` helpers hold the crate-wide shared read lock
+//! (`build::LIGHTR_HOME_ENV_LOCK`) to exclude the setter tests
+//! (exec_tests/up_tests) while they run. Readers still parallelize; each test
+//! uses a nanos-unique temp work dir and hydrates into an owned dir.
 //!
 //! `--chmod` is asserted on the hydrated tree (snapshot↔hydrate roundtrips the
 //! full permission bits — proven in lightr-index). `--chown` to an *arbitrary*
@@ -40,6 +43,11 @@ fn fix() -> Fix {
 fn build_df(f: &Fix, name: &str, df_body: &str) -> Result<BuildReport> {
     let df_path = f.ctx_path.join("Dockerfile");
     std::fs::write(&df_path, df_body).unwrap();
+    // build() READs the process-global LIGHTR_HOME; hold the crate-wide shared
+    // read lock so a concurrent setter cannot flip the home mid-build.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     build(
         &f.ctx_path,
         &df_path,
@@ -62,6 +70,10 @@ fn build_err(f: &Fix, name: &str, df_body: &str) -> String {
 /// Hydrate the named built image into a fresh dir and return that dir.
 fn hydrate(f: &Fix, name: &str, tag: &str) -> std::path::PathBuf {
     let dest = f.store_tmp_path.join(format!("hydrated-{tag}"));
+    // hydrate READs the process-global LIGHTR_HOME; hold the shared read lock.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     lightr_index::hydrate(&dest, &f.store, name).unwrap();
     dest
 }

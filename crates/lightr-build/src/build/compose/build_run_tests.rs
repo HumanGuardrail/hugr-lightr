@@ -2,8 +2,12 @@
 //!
 //! Each builds a tiny `FROM scratch` image from an inline Dockerfile in its own
 //! tempdir, then HYDRATES the produced store ref to prove the built filesystem
-//! is reachable under exactly the ref the supervisor will hydrate. Parallel-safe:
-//! own tempdir Store per test, absolute contexts, no process-global state.
+//! is reachable under exactly the ref the supervisor will hydrate. Each test
+//! owns its tempdir Store + absolute contexts and never MUTATES process-global
+//! state, but `build_service_image()` (→ `build_target`) and `hydrate` READ the
+//! process-global `LIGHTR_HOME`, so each test holds the crate-wide shared read
+//! lock (`build::LIGHTR_HOME_ENV_LOCK`) across its build+hydrate to exclude the
+//! setter tests (exec_tests/up_tests). Readers still parallelize among themselves.
 use super::*;
 use crate::build::compose::build_spec::ServiceBuild;
 use crate::build::compose::model::empty_service;
@@ -56,6 +60,12 @@ fn build_only_service_derives_project_service_ref_and_hydrates() {
     let name = uniq_name("app");
 
     let svc = svc_with_build(&name, None, simple_build(dir.path()));
+    // build_service_image() + hydrate READ the process-global LIGHTR_HOME; hold
+    // the crate-wide shared read lock across both so a concurrent setter cannot
+    // flip the home mid-op. Poison-tolerant; many readers coexist.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let resolved = build_service_image(&svc, &store, "proj").unwrap();
 
     assert_eq!(resolved, format!("proj_{name}"), "derived ref");
@@ -76,6 +86,12 @@ fn build_plus_image_tags_under_image_ref() {
     let img = uniq_name("myimg");
 
     let svc = svc_with_build(&name, Some(&img), simple_build(dir.path()));
+    // build_service_image() + hydrate READ the process-global LIGHTR_HOME; hold
+    // the crate-wide shared read lock across both so a concurrent setter cannot
+    // flip the home mid-op. Poison-tolerant; many readers coexist.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let resolved = build_service_image(&svc, &store, "proj").unwrap();
 
     assert_eq!(
@@ -104,6 +120,12 @@ fn build_args_reach_the_build() {
         target: None,
     };
     let svc = svc_with_build(&name, None, build);
+    // build_service_image() + hydrate READ the process-global LIGHTR_HOME; hold
+    // the crate-wide shared read lock across both so a concurrent setter cannot
+    // flip the home mid-op. Poison-tolerant; many readers coexist.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let resolved = build_service_image(&svc, &store, "proj").unwrap();
 
     let dest = store_tmp.path().join("hyd");
@@ -135,6 +157,12 @@ fn target_selects_the_named_stage() {
         target: Some("early".to_string()),
     };
     let svc = svc_with_build(&name, None, build);
+    // build_service_image() + hydrate READ the process-global LIGHTR_HOME; hold
+    // the crate-wide shared read lock across both so a concurrent setter cannot
+    // flip the home mid-op. Poison-tolerant; many readers coexist.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let resolved = build_service_image(&svc, &store, "proj").unwrap();
 
     let dest = store_tmp.path().join("hyd");
@@ -170,6 +198,12 @@ fn dockerfile_path_is_relative_to_context() {
         target: None,
     };
     let svc = svc_with_build(&name, None, build);
+    // build_service_image() + hydrate READ the process-global LIGHTR_HOME; hold
+    // the crate-wide shared read lock across both so a concurrent setter cannot
+    // flip the home mid-op. Poison-tolerant; many readers coexist.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let resolved = build_service_image(&svc, &store, "proj").unwrap();
     let dest = store_tmp.path().join("hyd");
     lightr_index::hydrate(&dest, &store, &resolved).unwrap();

@@ -57,6 +57,12 @@ fn prepare_service_cwd_hydrates_image_ref() {
     std::fs::write(src.path().join("marker.txt"), b"from-image").unwrap();
     let store_tmp = TempDir::new().unwrap();
     let store = Store::open(store_tmp.path()).unwrap();
+    // `snapshot` + the `prepare_service_cwd` hydrate both read the process-global
+    // LIGHTR_HOME (lightr-index codec), so hold the shared READ lock across them so a
+    // concurrent LIGHTR_HOME writer can't repoint it mid-op (see build::LIGHTR_HOME_ENV_LOCK).
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     lightr_index::snapshot(src.path(), &store, "svc-img").unwrap();
     let mut svc = svc_with_deps("hydrate-me", vec![]);
     svc.image_ref = "svc-img".to_string();

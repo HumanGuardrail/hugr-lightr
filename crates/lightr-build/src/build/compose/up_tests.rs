@@ -234,7 +234,7 @@ fn up_and_read_spec(
     // binary). Poison-tolerant. Without this, parallel compose-up tests race and a
     // reader sees another test's home ⇒ wrong/empty spec.json.
     let _env = crate::build::LIGHTR_HOME_ENV_LOCK
-        .lock()
+        .write()
         .unwrap_or_else(|e| e.into_inner());
     std::env::set_var("LIGHTR_HOME", home);
     let compose = parse_compose(yaml).expect("parse compose");

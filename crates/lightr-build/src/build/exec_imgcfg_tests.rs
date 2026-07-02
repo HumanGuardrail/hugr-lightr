@@ -4,9 +4,12 @@
 //! from the hydrated result. Split out of `exec_tests.rs` to keep each file
 //! under the 400-line godfile cap.
 //!
-//! Parallel-safe by construction: each test owns its tempdirs + store and never
-//! mutates process-global state — `build()` takes the store explicitly and uses
-//! a nanos-unique temp work dir.
+//! Each test owns its tempdirs + store and never MUTATES process-global state,
+//! but `build()`/`hydrate` READ the process-global `LIGHTR_HOME`, so every
+//! build/hydrate here holds the crate-wide shared read lock
+//! (`build::LIGHTR_HOME_ENV_LOCK`) to exclude the setter tests
+//! (exec_tests/up_tests) while it runs. Readers still parallelize among
+//! themselves; each test uses a nanos-unique temp work dir.
 use super::*;
 use crate::build::imgcfg::ImageConfig;
 use tempfile::TempDir;
@@ -35,6 +38,12 @@ fn fix() -> Fix {
 fn build_and_load(f: &Fix, name: &str, df_body: &str) -> ImageConfig {
     let df_path = f.ctx_path.join("Dockerfile");
     std::fs::write(&df_path, df_body).unwrap();
+    // build() + hydrate READ the process-global LIGHTR_HOME; hold the crate-wide
+    // shared read lock across both so a concurrent setter (exec_tests/up_tests)
+    // cannot flip the home mid-op. Poison-tolerant; many readers coexist.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     build(
         &f.ctx_path,
         &df_path,
@@ -176,6 +185,9 @@ fn build_with_config_instructions_does_not_error() {
         "FROM scratch\nENTRYPOINT [\"/x\"]\nUSER u\nEXPOSE 1\nSTOPSIGNAL SIGINT\nVOLUME /v\n",
     )
     .unwrap();
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let report = build(
         &f.ctx_path,
         &df_path,
@@ -280,6 +292,9 @@ fn healthcheck_and_onbuild_no_longer_unsupported() {
         "FROM scratch\nHEALTHCHECK NONE\nONBUILD RUN echo deferred\n",
     )
     .unwrap();
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let report = build(
         &f.ctx_path,
         &df_path,

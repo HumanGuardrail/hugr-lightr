@@ -22,7 +22,7 @@ fn step_reads_clock_or_net_heuristic() {
 
 #[test]
 fn build_memoization_scratch_copy_run() {
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_MUTEX.write().unwrap_or_else(|e| e.into_inner());
     let ctx = TempDir::new().unwrap();
     let store_tmp = TempDir::new().unwrap();
     std::env::set_var("LIGHTR_HOME", store_tmp.path());
@@ -95,7 +95,7 @@ fn build_memoization_scratch_copy_run() {
 
 #[test]
 fn build_hydrate_final_tree() {
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_MUTEX.write().unwrap_or_else(|e| e.into_inner());
     let ctx = TempDir::new().unwrap();
     let store_tmp = TempDir::new().unwrap();
     std::env::set_var("LIGHTR_HOME", store_tmp.path());
@@ -160,7 +160,7 @@ fn interpolated_env_value_change_does_not_false_hit() {
     // CORE acceptance: the SAME raw `RUN echo ${X}` keyed under X=A vs X=B must
     // NOT reuse A's cached layer — interpolation makes the step text (and thus
     // the key) differ, so RUN re-runs for B. Proven via a real side effect.
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_MUTEX.write().unwrap_or_else(|e| e.into_inner());
     let ctx = TempDir::new().unwrap();
     let store_tmp = TempDir::new().unwrap();
     std::env::set_var("LIGHTR_HOME", store_tmp.path());
@@ -188,7 +188,7 @@ fn interpolated_env_value_change_does_not_false_hit() {
 fn identical_interpolated_build_is_a_memo_hit() {
     // Identical inputs (same ENV value) ⇒ identical key ⇒ memo HIT: the RUN
     // side effect does NOT repeat on the second build.
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_MUTEX.write().unwrap_or_else(|e| e.into_inner());
     let ctx = TempDir::new().unwrap();
     let store_tmp = TempDir::new().unwrap();
     std::env::set_var("LIGHTR_HOME", store_tmp.path());
@@ -215,7 +215,7 @@ fn identical_interpolated_build_is_a_memo_hit() {
 fn no_var_dockerfile_builds_and_is_stable() {
     // Behavior-preserving: a Dockerfile with NO ${VAR} builds correctly and is
     // fully cached on an identical rebuild (stable key under v2).
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_MUTEX.write().unwrap_or_else(|e| e.into_inner());
     let ctx = TempDir::new().unwrap();
     let store_tmp = TempDir::new().unwrap();
     std::env::set_var("LIGHTR_HOME", store_tmp.path());

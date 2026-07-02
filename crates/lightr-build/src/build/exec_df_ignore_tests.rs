@@ -5,8 +5,11 @@
 //! does NOT change when an IGNORED file is added (the cache is not busted).
 //!
 //! Exercised through the full `build()` loop + a hydrate of the final tree.
-//! Parallel-safe by construction: each test owns its tempdirs + store and never
-//! mutates process-global state (mirrors `exec_df06_tests.rs`).
+//! Each test owns its tempdirs + store and never MUTATES process-global state,
+//! but `build()`/`hydrate` READ the process-global `LIGHTR_HOME`, so the
+//! `build_df`/`hydrate` helpers hold the crate-wide shared read lock
+//! (`build::LIGHTR_HOME_ENV_LOCK`) to exclude the setter tests
+//! (exec_tests/up_tests) while they run (mirrors `exec_df06_tests.rs`).
 use super::*;
 use tempfile::TempDir;
 
@@ -36,6 +39,11 @@ fn fix() -> Fix {
 fn build_df(f: &Fix, name: &str, df_body: &str) -> Result<BuildReport> {
     let df_path = f.ctx_path.join("Dockerfile");
     std::fs::write(&df_path, df_body).unwrap();
+    // build() READs the process-global LIGHTR_HOME; hold the crate-wide shared
+    // read lock so a concurrent setter cannot flip the home mid-build.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     build(
         &f.ctx_path,
         &df_path,
@@ -48,6 +56,10 @@ fn build_df(f: &Fix, name: &str, df_body: &str) -> Result<BuildReport> {
 
 fn hydrate(f: &Fix, name: &str, tag: &str) -> std::path::PathBuf {
     let dest = f.store_tmp_path.join(format!("hydrated-{tag}"));
+    // hydrate READs the process-global LIGHTR_HOME; hold the shared read lock.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     lightr_index::hydrate(&dest, &f.store, name).unwrap();
     dest
 }

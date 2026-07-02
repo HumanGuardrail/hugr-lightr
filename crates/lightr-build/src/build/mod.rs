@@ -25,14 +25,21 @@ pub(crate) mod platform;
 // The engine is WP-DF-02; compose consumes this fn directly (LEAD DECISION).
 pub mod vars;
 
-// Process-global serialization for tests that mutate the `LIGHTR_HOME` env var.
-// The var is process-wide across the whole lightr-build test binary, so EVERY
-// test that `set_var`/`remove_var`s it (exec_tests + compose::up_tests) must hold
-// this lock while the var is set AND consumed — otherwise parallel tests race and
-// a reader sees another test's home (⇒ wrong/empty stack dir, e.g. an empty
-// spec.json). Single shared lock so the serialization is crate-wide, not per-module.
+// Process-global reader-writer serialization for the `LIGHTR_HOME` env var.
+// The var is process-wide across the whole lightr-build test binary. It has two
+// classes of test:
+//   * WRITERS — tests that `set_var`/`remove_var` it (exec_tests + compose::up_tests)
+//     to exercise the memo/action-cache under a custom home. They take the WRITE
+//     lock (exclusive) held across set-var → operation → remove/restore.
+//   * READERS — tests that call `build()`/`lightr_index::hydrate`/`compose_up`, which
+//     internally READ `LIGHTR_HOME` (lightr-index codec + `Store::default_root`) and
+//     assume it stays at the default. They take the READ lock (shared) across those
+//     calls so they parallelize among themselves but are excluded while a writer holds
+//     the lock. Without this, a reader could observe another test's home mid-set-var
+//     (⇒ wrong/empty stack dir, e.g. an empty spec.json or `hydrate` NotFound).
+// Single shared lock so the serialization is crate-wide, not per-module.
 #[cfg(test)]
-pub(crate) static LIGHTR_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static LIGHTR_HOME_ENV_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 pub use compose::{
     compose_down, compose_supervise, compose_up, deep_merge, dir_basename, interpolate_compose,

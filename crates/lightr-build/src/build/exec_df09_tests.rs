@@ -1,9 +1,11 @@
 //! WP-DF-09 end-to-end tests: the SHELL instruction, exercised through the full
 //! `build()` loop. Split out of `exec_tests.rs` for the 400-line godfile cap.
 //!
-//! Parallel-safe by construction: each test owns its tempdirs + store and never
-//! mutates process-global state (no `LIGHTR_HOME`, no shared mutex) — `build()`
-//! takes the store explicitly and uses a nanos-unique temp work dir.
+//! Each test owns its tempdirs + store and never MUTATES process-global state,
+//! but `build()` READs the process-global `LIGHTR_HOME`, so the `run` helper
+//! holds the crate-wide shared read lock (`build::LIGHTR_HOME_ENV_LOCK`) to
+//! exclude the setter tests (exec_tests/up_tests) while it builds. Readers still
+//! parallelize; each test uses a nanos-unique temp work dir.
 //!
 //! "The active SHELL is actually used" is proven WITHOUT relying on a specific
 //! interpreter being installed: we drop an executable wrapper script into the
@@ -66,6 +68,11 @@ fn run(f: &Fix, name: &str, df_body: &str) -> BuildReport {
         .replace("{SH}", &f.shell_path.to_string_lossy());
     let df_path = f.ctx_path.join("Dockerfile");
     std::fs::write(&df_path, &df).unwrap();
+    // build() READs the process-global LIGHTR_HOME; hold the crate-wide shared
+    // read lock so a concurrent setter cannot flip the home mid-build.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     build(
         &f.ctx_path,
         &df_path,

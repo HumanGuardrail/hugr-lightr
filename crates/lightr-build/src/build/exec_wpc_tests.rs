@@ -3,7 +3,12 @@
 //! base image's actual platform and folds into the memo key (two platforms ⇒
 //! distinct keys). Exercised through the full `build`/`build_target` loop.
 //!
-//! Parallel-safe: each test owns its tempdirs + store (no process-global state).
+//! Each test owns its tempdirs + store and never MUTATES process-global state,
+//! but `build_target()`/`hydrate` READ the process-global `LIGHTR_HOME`, so the
+//! `build_target_df`/`hydrate` helpers hold the crate-wide shared read lock
+//! (`build::LIGHTR_HOME_ENV_LOCK`) to exclude the setter tests
+//! (exec_tests/up_tests) while they run. Readers still parallelize among
+//! themselves.
 use super::*;
 use lightr_store::ImageManifestRecord;
 use tempfile::TempDir;
@@ -39,6 +44,11 @@ fn build_target_df(
 ) -> Result<BuildReport> {
     let df_path = f.ctx_path.join("Dockerfile");
     std::fs::write(&df_path, df_body).unwrap();
+    // build_target() READs the process-global LIGHTR_HOME; hold the crate-wide
+    // shared read lock so a concurrent setter cannot flip the home mid-build.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     build_target(
         &f.ctx_path,
         &df_path,
@@ -52,6 +62,10 @@ fn build_target_df(
 
 fn hydrate(f: &Fix, name: &str, tag: &str) -> std::path::PathBuf {
     let dest = f.store_tmp_path.join(format!("hydrated-{tag}"));
+    // hydrate READs the process-global LIGHTR_HOME; hold the shared read lock.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     lightr_index::hydrate(&dest, &f.store, name).unwrap();
     dest
 }
@@ -175,7 +189,14 @@ fn from_platform_mismatch_against_recorded_base_errors() {
     let base_dir = f.store_tmp_path.join("base-src");
     std::fs::create_dir_all(&base_dir).unwrap();
     std::fs::write(base_dir.join("f"), b"base").unwrap();
-    lightr_index::snapshot(&base_dir, &f.store, "amd64base").unwrap();
+    {
+        // snapshot reads the process-global LIGHTR_HOME (codec); hold the shared READ
+        // lock just for it — build_target_df below takes its own (no re-entrant read).
+        let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        lightr_index::snapshot(&base_dir, &f.store, "amd64base").unwrap();
+    }
     f.store
         .image_manifest_put(
             "amd64base",
@@ -200,7 +221,14 @@ fn from_platform_matching_recorded_base_succeeds() {
     let base_dir = f.store_tmp_path.join("base-ok");
     std::fs::create_dir_all(&base_dir).unwrap();
     std::fs::write(base_dir.join("f"), b"base").unwrap();
-    lightr_index::snapshot(&base_dir, &f.store, "okbase").unwrap();
+    {
+        // snapshot reads the process-global LIGHTR_HOME (codec); hold the shared READ
+        // lock just for it — build_target_df below takes its own (no re-entrant read).
+        let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        lightr_index::snapshot(&base_dir, &f.store, "okbase").unwrap();
+    }
     f.store
         .image_manifest_put(
             "okbase",
