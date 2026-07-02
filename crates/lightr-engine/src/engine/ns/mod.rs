@@ -145,6 +145,7 @@ mod ns_impl {
     mod mounts;
     mod rootfs;
     mod run;
+    mod seccomp_ns;
     mod signal;
     mod subid_ns;
     mod user;

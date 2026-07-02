@@ -228,43 +228,10 @@ pub(super) fn setup_rootfs_and_pivot(
     // `default` ⇒ the BUILT-IN curated allow-list (compile_default,
     // embedded). `unconfined` ⇒ no filter. Anything else is a PATH to an
     // OCI profile. `None` ⇒ byte-identical to the pre-#108 path.
-    #[cfg(target_arch = "x86_64")]
-    let compiled_seccomp: Option<super::SeccompFilter> = match seccomp {
-        Some("default") => match crate::engine::seccomp::compile_default() {
-            Ok(c) => Some(c),
-            Err(e) => {
-                eprintln!("lightr-engine ns: seccomp: {e}");
-                signal_setup_failed(exec_ready_fd, &format!("seccomp: {e}"));
-                unsafe { libc::_exit(1) };
-            }
-        },
-        Some("unconfined") | None => None,
-        Some(p) => match crate::engine::seccomp::compile_from_path(p) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                eprintln!("lightr-engine ns: seccomp: {e}");
-                signal_setup_failed(exec_ready_fd, &format!("seccomp: {e}"));
-                unsafe { libc::_exit(1) };
-            }
-        },
-    };
-    // seccomp is x86_64-linux-only; the CLI already rejects `--seccomp` on other
-    // arches (honest exit 2). Defense in depth here in PID 1: if a filter still
-    // reaches us, FAIL CLOSED rather than exec unfiltered. `unconfined`/`None` ⇒ no
-    // filter (fine — same as x86_64 with no flag). `SeccompFilter` is uninhabited on
-    // non-x86_64, so `None` is the only inhabitable value.
-    #[cfg(not(target_arch = "x86_64"))]
-    let compiled_seccomp: Option<super::SeccompFilter> = match seccomp {
-        Some("unconfined") | None => None,
-        Some(_) => {
-            eprintln!("lightr-engine ns: seccomp is x86_64-linux-only (unsupported on this arch)");
-            signal_setup_failed(
-                exec_ready_fd,
-                "seccomp: x86_64-linux-only (unsupported on this arch)",
-            );
-            unsafe { libc::_exit(1) };
-        }
-    };
+    // seccomp COMPILE (host path visible, pre-pivot) → the filter carried to the
+    // late install. x86_64-linux-only; fails closed on other arches (see seccomp_ns).
+    let compiled_seccomp: Option<super::SeccompFilter> =
+        super::seccomp_ns::compile_seccomp(seccomp, exec_ready_fd);
 
     // 4. Create put_old dir inside rootfs, then pivot_root
     let put_old = rootfs.join(".put_old");
