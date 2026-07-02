@@ -25,6 +25,15 @@ pub(crate) mod platform;
 // The engine is WP-DF-02; compose consumes this fn directly (LEAD DECISION).
 pub mod vars;
 
+// Process-global serialization for tests that mutate the `LIGHTR_HOME` env var.
+// The var is process-wide across the whole lightr-build test binary, so EVERY
+// test that `set_var`/`remove_var`s it (exec_tests + compose::up_tests) must hold
+// this lock while the var is set AND consumed — otherwise parallel tests race and
+// a reader sees another test's home (⇒ wrong/empty stack dir, e.g. an empty
+// spec.json). Single shared lock so the serialization is crate-wide, not per-module.
+#[cfg(test)]
+pub(crate) static LIGHTR_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub use compose::{
     compose_down, compose_supervise, compose_up, deep_merge, dir_basename, interpolate_compose,
     parse_compose, parse_compose_merged, parse_compose_project_name, parse_compose_with_scope,

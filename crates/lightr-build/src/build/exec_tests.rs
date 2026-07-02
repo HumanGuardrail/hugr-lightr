@@ -1,8 +1,10 @@
 use super::*;
-use std::sync::Mutex;
 use tempfile::TempDir;
 
-static ENV_MUTEX: Mutex<()> = Mutex::new(());
+// Shared with compose::up_tests via the crate-wide lock, so LIGHTR_HOME mutations
+// are serialized across the WHOLE lightr-build test binary (env is process-global),
+// not just within this module. Aliased to keep the call sites below unchanged.
+use crate::build::LIGHTR_HOME_ENV_LOCK as ENV_MUTEX;
 
 #[test]
 fn step_reads_clock_or_net_heuristic() {

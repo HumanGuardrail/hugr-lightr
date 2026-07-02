@@ -1,8 +1,10 @@
 //! Tests for `up.rs` — CMP-P1-PROFILES active-set selection (behavior-
 //! preserving) and WP-CMP-SECRETS-FULL top-level `file:` source ingestion.
 //!
-//! Parallel-safe: every test that touches the Store uses its OWN tempdir Store +
-//! source files; no process-global state is mutated.
+//! Parallel-safe: the profile/source tests use their OWN tempdir Store + source
+//! files (no process-global state). The `compose_up` tests additionally mutate the
+//! process-global `LIGHTR_HOME`, so they serialize on `build::LIGHTR_HOME_ENV_LOCK`
+//! (shared with exec_tests) via `up_and_read_spec`.
 use super::*;
 use crate::build::compose::model::{empty_service, DepCondition};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -226,8 +228,14 @@ fn up_and_read_spec(
     home: &std::path::Path,
     store: &Store,
 ) -> crate::build::compose::model::StackSpec {
-    // compose_up reads LIGHTR_HOME for the stack dir; the SECRETS test already
-    // proves Store isolation. We set it under a mutex-free unique home per test.
+    // compose_up reads the process-global LIGHTR_HOME for the stack dir, so hold
+    // the crate-wide env lock across the whole set-var → compose_up → read-back
+    // window (SHARED with exec_tests — env is process-global across the test
+    // binary). Poison-tolerant. Without this, parallel compose-up tests race and a
+    // reader sees another test's home ⇒ wrong/empty spec.json.
+    let _env = crate::build::LIGHTR_HOME_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     std::env::set_var("LIGHTR_HOME", home);
     let compose = parse_compose(yaml).expect("parse compose");
     let handle = compose_up(&compose, store, 60, project, &[]).expect("compose up");
