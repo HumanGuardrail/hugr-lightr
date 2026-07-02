@@ -144,6 +144,8 @@ mod ns_impl {
     mod engine;
     mod mounts;
     mod rootfs;
+    #[cfg(test)]
+    mod rootfs_tests;
     mod run;
     mod seccomp_ns;
     mod signal;
