@@ -73,7 +73,7 @@ lightr CLI ──> store (CAS + Action Cache) ──> engines
 ## Quickstart (30 seconds)
 
 ```sh
-$ brew install «tap»/lightr    # or: cargo build --release (bin ~4.5 MB stripped)
+$ brew install humanguardrail/tap/lightr    # or: cargo build --release (bin ~4.5 MB stripped)
 $ lightr snapshot --dir . --name @me/proj
 $ lightr hydrate /tmp/fresh --name @me/proj    # CoW materialize
 $ lightr run --input src -- make test          # run it twice.
@@ -112,5 +112,5 @@ everywhere: unsupported paths error, they don't silently degrade.
 
 ---
 
-Apache-2.0 · «org/repo URL» · Numbers carry their measurement dates above —
+Apache-2.0 · github.com/HumanGuardrail/hugr-lightr · Numbers carry their measurement dates above —
 refresh at publication.

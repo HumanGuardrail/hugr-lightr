@@ -97,7 +97,7 @@ After `release.yml` produces the Release (step E) you have the asset URLs and th
   sha256 values come from the `SHA256SUMS` file attached to the Release.)
   Note: the formula also carries Linux `__TODO_URL_LINUX_*` / `__TODO_SHA256_LINUX_*`
   slots — fill the ones your release matrix actually produced. Then push the
-  formula to the `hugr/homebrew-tap` repo.
+  formula to the `HumanGuardrail/homebrew-tap` repo.
 
 **`packaging/install.sh`** — replace both placeholders (the script fails loudly
 while either still contains `__PLACEHOLDER__`):

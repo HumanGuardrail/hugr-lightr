@@ -93,7 +93,7 @@ repos is not.** Only work on hugr-lightr here.
 ## Conventions
 
 - English for repo documents; lean, evidence-cited (house style).
-- Commits: `Co-Authored-By` trailers; canonical author `gustavo@humangr.com`.
+- Commits: `Co-Authored-By` trailers; canonical author `gustavomalleths@gmail.com`.
 - **Once code exists:** branch → PR → merge, gates green before merge
   (inherit CoreLink/hugit discipline). Rust, exact-pinned deps where the
   house pins (see runners' Cargo conventions).

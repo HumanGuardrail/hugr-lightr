@@ -110,7 +110,7 @@ pod's pinned netns); containerd runs the same image under runc.
 | Resident RSS (KB) | **7,064** (cri-serve) | 65,860 (daemon) | **9.32× smaller** |
 | Per-container shim RSS (KB) | **0** (no shim) | 14,960 (one `containerd-shim-runc-v2` per container) | — |
 
-*(Measured execv-aligned post-WP-#102, run `8b4fec4`, ubuntu-latest; both arms report Running at the same lifecycle point — the workload executing — via crictl/gRPC.)*
+*(Measured execv-aligned post-WP-#102, run `94e32a6`, ubuntu-latest; both arms report Running at the same lifecycle point — the workload executing — via crictl/gRPC.)*
 
 **The robust, signed headline is FOOTPRINT: lightr's resident process is ~9×
 smaller** (7 MB vs 62 MB) AND there is **no per-container shim** — daemonless +

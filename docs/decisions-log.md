@@ -280,3 +280,16 @@ Accepted under the 2026-06-11 overnight mandate (still "subject to morning
 review") are listed as unchecked boxes for explicit owner ratify/revert;
 owner-signed ADRs (0008 license, 0017 cross-platform) and Superseded ones
 (0003→0009, 0005→0014) are listed separately as already resolved.
+
+## 2026-07-02 — author-identity normalization (history rewrite, pre-publication)
+
+- All Gustavo author/committer variants (gmhschn@gmail.com — tied to an
+  unrecoverable blocked GitHub account — and gustavo@humangr.com forms)
+  rewritten to canonical `Gustavo Schneiter <gustavomalleths@gmail.com>` via
+  git-filter-repo --mailmap. Content, messages, dates untouched; bot commits
+  untouched; 484 commits preserved. Repo private/unpublished at rewrite time;
+  pre-rewrite backup bundle retained by the owner.
+- Ledger SHA anchors remapped in place: 8b4fec4→94e32a6, eba3c3b→5a89063,
+  3477cce→e309f3a, e3ef6fd→a46cfb2. Pre-rewrite GitHub Actions runs reference
+  the OLD SHAs per this table.
+- CLAUDE.md canonical-author convention updated to the same identity.

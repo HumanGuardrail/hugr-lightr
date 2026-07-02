@@ -25,8 +25,8 @@ exclude = ["crates/lightr-cri-serve"]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/hugr/hugr-lightr"
-homepage = "https://github.com/hugr/hugr-lightr"
+repository = "https://github.com/HumanGuardrail/hugr-lightr"
+homepage = "https://github.com/HumanGuardrail/hugr-lightr"
 readme = "README.md"
 # publish stays false: ADR-0008 lifted the LICENSE gate (Apache-2.0), but
 # pushing to crates.io is a separate GTM decision (whitepaper §9.8: launch
