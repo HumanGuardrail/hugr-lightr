@@ -4,6 +4,8 @@
 > with a memory: workspaces materialize from a content-addressed store,
 > runs are memoized — identical work never executes twice.
 
+[![ci](https://github.com/HumanGuardrail/hugr-lightr/actions/workflows/ci.yml/badge.svg)](https://github.com/HumanGuardrail/hugr-lightr/actions/workflows/ci.yml)
+
 ![memo demo — the same build twice: 20.6 s, then 10 ms](docs/assets/memo-demo.gif)
 
 ```sh
@@ -61,7 +63,7 @@ registries), isolation, and a 24/7 daemon. Lightr unbundles them: one
 content-addressed plane (a **ref** for any tree of bytes), isolation à la
 carte (native / namespaces / microVM), no resident process, and an action
 cache so the cheapest run is the one that never happens. The store speaks
-the same content-addressed model as CoreLink, the sync fabric it can later
+the same content-addressed model as CoreLink (a companion sync service, not yet public), which it can later
 attach to — but everything here is local-first, offline, and account-free.
 
 ```
@@ -73,7 +75,9 @@ lightr CLI ──> store (CAS + Action Cache) ──> engines
 ## Quickstart (30 seconds)
 
 ```sh
-$ brew install humanguardrail/tap/lightr    # or: cargo build --release (bin ~5.9 MB, measured 2026-07-02)
+$ git clone https://github.com/HumanGuardrail/hugr-lightr && cd hugr-lightr
+$ cargo build --release            # bin ~5.9 MB · Rust 1.96 · brew tap coming at v0.1.0
+$ alias lightr=./target/release/lightr
 $ lightr snapshot --dir . --name @me/proj
 $ lightr hydrate /tmp/fresh --name @me/proj    # CoW materialize
 $ lightr run --input src -- make test          # run it twice.
@@ -112,5 +116,4 @@ everywhere: unsupported paths error, they don't silently degrade.
 
 ---
 
-Apache-2.0 · github.com/HumanGuardrail/hugr-lightr · Numbers carry their measurement dates above —
-refresh at publication.
+Apache-2.0 · github.com/HumanGuardrail/hugr-lightr
