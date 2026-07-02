@@ -144,6 +144,8 @@ mod ns_impl {
     mod engine;
     mod mounts;
     mod rootfs;
+    #[cfg(test)]
+    mod rootfs_tests;
     mod run;
     mod signal;
     mod subid_ns;
