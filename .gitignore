@@ -28,3 +28,6 @@ target/
 packaging/dist/
 /build/
 /.claude/
+
+# Portfolio strategy (private — never ship in the public repo)
+docs/portfolio/

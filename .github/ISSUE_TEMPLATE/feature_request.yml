@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a capability or improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today? Cite the parity-audit row (docs/spec/parity-audit.md) if one exists.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should `lightr` do, on which engine(s)/platform(s)?
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Fit with the principles
+      description: >
+        No daemon, no images, fail-closed, memoize-first. If the feature
+        needs an architectural decision, it needs an ADR first (docs/adr/).

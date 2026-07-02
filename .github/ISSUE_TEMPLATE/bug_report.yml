@@ -1,0 +1,41 @@
+name: Bug report
+description: Something behaved wrongly, silently, or dishonestly
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `lightr --version` (includes git-sha + build date)
+      placeholder: lightr 0.x.y (abc1234 2026-06-30)
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform + engine
+      description: OS/arch and the engine involved (native / ns / vz / wsl)
+      placeholder: macOS 15 Intel x86_64, --engine vz
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Exact commands, minimal as possible
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      description: What should have happened, what happened instead. Silent no-ops and silent degradation are bugs — say so.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output / logs
+      description: Relevant stderr, `--explain`, or `--events` output
+      render: shell

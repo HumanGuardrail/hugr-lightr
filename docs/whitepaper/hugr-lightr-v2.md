@@ -202,7 +202,8 @@ first runtime designed agent-first:
 CI carries these as budgets; a regression is a red gate with the same
 status as a failing test.
 
-**Measured so far** (release 1.9 MB binary on an Intel i7-9750H dev box
+**Measured so far** (release ~4.5 MB stripped binary — parity-audit F-601,
+bench B7 — on an Intel i7-9750H dev box
 under load — `lightr bench`; Apple-Silicon + views numbers stay unclaimed
 until measured there, tense law):
 
@@ -212,7 +213,7 @@ until measured there, tense law):
 | CLI overhead (`--version`) | <5 ms | **~7 ms** (debug ~7; within machine-class) |
 | Native run, memo HIT | ≤10 ms | **~51–77 ms** end-to-end (re-validates inputs via stat-walk; ~ms target binds to R2 views) |
 | Snapshot 10k warm | ≤100 ms | **~233 ms @2k** (stat-index; Intel HDD-syscall bound) |
-| Install (binary) | ≤10 MB | **1.9 MB** |
+| Install (binary) | ≤10 MB | **~4.5 MB stripped** (4,713,904 B — parity-audit F-601, bench B7) |
 | Materialize (CoW) | O(1) view | **CoW clone, rung=Clone** (O(files) on Intel; O(1) views = R2) |
 | OCI import / build-cached / compose-up | measured | **bench B9/B10/B11 green** |
 
@@ -220,7 +221,8 @@ The honest gap: this is an **Intel** box where per-file metadata syscalls
 (~2 ms) dominate, so the sub-10 ms / O(1) headline numbers bind to the
 views layer (R2) and Apple Silicon — they are *targets with a mechanism*,
 not yet *measurements*. Everything the local product actually does is
-green and tested (338 cases, A1–A30); see `docs/spec/parity-audit.md`.
+green and tested (411 tests, 0 failures at go-live 2026-06-17); see
+`docs/spec/parity-audit.md`.
 
 ## 11. What we absorbed (and from whom)
 
