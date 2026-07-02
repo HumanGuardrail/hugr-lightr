@@ -4,7 +4,7 @@
 > with a memory: workspaces materialize from a content-addressed store,
 > runs are memoized — identical work never executes twice.
 
-![memo demo — the same build twice: 20.6 s, then 10 ms](«memo-demo.gif path»)
+![memo demo — the same build twice: 20.6 s, then 10 ms](docs/assets/memo-demo.gif)
 
 ```sh
 $ lightr run --input src -- make test     # 1st: does the work
