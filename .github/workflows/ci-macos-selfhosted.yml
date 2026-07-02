@@ -1,0 +1,74 @@
+# Full macOS gate — SELF-HOSTED runner (founder Intel Mac), DISPATCH-ONLY.
+#
+# Split out of ci.yml (2026-07-02): a self-hosted runner must never be wired
+# to push/pull_request on a public repo (fork PRs would execute arbitrary code
+# on the runner box), and an offline runner was failing every push. The owner
+# dispatches this when the Mac runner is up — REQUIRED before tagging a
+# release (this is the full native suite; ci.yml is the hosted subset).
+#
+# Runner setup: see the original notes — rustup 1.96.0 pinned, mingw-w64,
+# x86_64-pc-windows-gnu target; labels `self-hosted, macOS`.
+
+name: ci-macos-selfhosted
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: gate (macOS native, full suite)
+    runs-on: [self-hosted, macOS]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Toolchain on PATH (pinned bin — rustup-proxy-immune)
+        run: |
+          echo "$HOME/.rustup/toolchains/1.96.0-x86_64-apple-darwin/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo build (fresh bin for acceptance)
+        run: cargo build --workspace
+      - name: cargo test
+        run: cargo test --workspace
+
+  bench:
+    name: bench (perf-regression visibility)
+    runs-on: [self-hosted, macOS]
+    needs: gate
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain on PATH (pinned bin — rustup-proxy-immune)
+        run: |
+          echo "$HOME/.rustup/toolchains/1.96.0-x86_64-apple-darwin/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build release binary
+        run: cargo build --release
+      - name: Run bench --check
+        run: ./target/release/lightr bench --check
+
+  vz-build:
+    name: vz feature build (macOS native)
+    runs-on: [self-hosted, macOS]
+    needs: gate
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain on PATH (pinned bin — rustup-proxy-immune)
+        run: |
+          echo "$HOME/.rustup/toolchains/1.96.0-x86_64-apple-darwin/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: cargo build -p lightr-cli --features vz (Rust + Swift shim)
+        run: cargo build -p lightr-cli --features vz
+      - name: Ad-hoc codesign with vz entitlement
+        run: |
+          codesign --force --sign - --entitlements packaging/vz.entitlements target/debug/lightr
+          codesign -d --entitlements - target/debug/lightr 2>&1 | head -20
+          echo "vz build + ad-hoc codesign OK"

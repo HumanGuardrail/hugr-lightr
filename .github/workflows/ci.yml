@@ -1,31 +1,22 @@
-# CI gate — SELF-HOSTED runner (founder Intel Mac, labels `self-hosted, macOS`).
+# CI gate — GitHub-hosted ONLY (public-repo safe).
 #
-# WHY self-hosted: GitHub-hosted minutes repeatedly exhausted the org Actions
-# spending limit (3× blocks). The founder's Intel Mac runs every gate at $0.
+# History (2026-07-02 restructure): the full macOS suite ran on a self-hosted
+# runner (founder Intel Mac — GitHub-hosted minutes had exhausted the org
+# spending limit 3× while private). Two reasons it left push/PR triggers:
+# (1) a self-hosted runner on a PUBLIC repo would let fork PRs execute
+# arbitrary code on the runner box; (2) an offline runner failed every push.
+# The full native suite lives in ci-macos-selfhosted.yml (workflow_dispatch,
+# owner-run — REQUIRED before tagging a release). On a public repo,
+# GitHub-hosted standard runners are free, so this hosted gate is $0.
 #
-# ONE-TIME RUNNER SETUP (owner): repo → Settings → Actions → Runners → New
-# self-hosted runner → macOS → follow the steps (it self-labels `self-hosted,
-# macOS, X64`). The runner box needs:
-#   - rustup (rust-toolchain.toml pins 1.96.0; `rustup show` installs on demand)
-#   - `brew install mingw-w64` + `rustup target add x86_64-pc-windows-gnu`
-#     (for the windows cross-clippy below)
-# The persistent `target/` makes runs fast; no cache action is used (self-hosted
-# keeps state between runs — caching actions can fight the persistent target).
-#
-# COVERAGE: `gate` runs the FULL workspace suite natively on macOS — the unix
-# runtime suite (incl. lightr-acceptance) executes here. `windows-cross` catches
-# windows-only cfg / dead-code / unused via a cross-clippy to x86_64-pc-windows-gnu
-# (the DF-06 / STATS-TOP class of bugs). Linux-specific cfg is NOT cross-checked
-# per-PR (the macOS-unix build + the windows cross cover the platform splits; the
-# codebase is unix / cfg(unix)). Add a self-hosted Linux runner (colima) later if
-# linux-specific coverage is ever needed.
+# COVERAGE here: fmt (linux) · windows cross-clippy (cfg/dead-code catch) ·
+# godfile guard · linux build+unit-test visibility lane. The linux clippy
+# half stays deferred until the accumulated cfg(linux) clippy drift is
+# cleaned (tracked follow-up).
 
 name: ci
 
 on:
-  # push fires only on main (post-merge validation + the push-only vz-build);
-  # PRs are covered by pull_request. This avoids 2× CI per push on the single
-  # self-hosted runner (a branch push + its PR would otherwise both fire).
   push:
     branches: [main]
   pull_request:
@@ -35,41 +26,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Native macOS gate: fmt + clippy + the FULL workspace test suite (the unix
-  # integration suite runs natively here, so no per-OS matrix is needed).
-  gate:
-    name: gate (macOS native, full suite)
-    runs-on: [self-hosted, macOS]
+  # Native fmt-check on GitHub-hosted (ubuntu) — style gate independent of
+  # any self-hosted box. rust-toolchain.toml pins the toolchain.
+  linux-native-lint:
+    name: linux fmt --check
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Toolchain on PATH (pinned bin — rustup-proxy-immune)
-        # Use the pinned toolchain's REAL binaries directly, not the ~/.cargo/bin
-        # rustup proxies (which have vanished mid-session ≥2×, exit-127'ing the
-        # gate). Toolchain + components + windows-gnu std are pre-installed on the
-        # self-hosted box; no `rustup` call is needed in CI.
-        run: |
-          echo "$HOME/.rustup/toolchains/1.96.0-x86_64-apple-darwin/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
-      - name: cargo clippy -D warnings
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: cargo build (fresh bin for acceptance)
-        # lightr-acceptance execs target/debug/lightr via assert_cmd; build the
-        # runnable bin first so acceptance never runs against a stale binary.
-        run: cargo build --workspace
-      - name: cargo test
-        run: cargo test --workspace
+      - uses: actions/checkout@v4
+      - name: rustfmt component
+        run: rustup component add rustfmt
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
 
-  # Cross-clippy to windows-gnu: catches windows-only cfg dead-code / unused-var
-  # regressions — exactly the class that bit DF-06 and STATS-TOP. Build + clippy
-  # only; windows runtime is a future ring (WSL), so lightr-acceptance (unix
-  # integration) is excluded. Moved to GitHub-hosted (ubuntu-latest) so it's
-  # enforced even when the self-hosted Mac is offline — no macOS needed for a cross
-  # target. The pinned toolchain comes from rust-toolchain.toml; mingw-w64 provides
-  # the C cross-compiler for the C-dep build scripts (xz2/bzip2) — clippy doesn't
-  # link, but those build scripts compile C.
+  # Cross-clippy to windows-gnu: catches windows-only cfg dead-code / unused
+  # regressions (the DF-06 / STATS-TOP class). Build + clippy only; windows
+  # runtime is a future ring, so lightr-acceptance (unix integration) is
+  # excluded. mingw-w64 provides the C cross-compiler for C-dep build scripts.
   windows-cross:
     name: windows cross-clippy (cfg/dead-code catch)
     runs-on: ubuntu-latest
@@ -85,8 +57,6 @@ jobs:
 
   # Enforce the godfile invariant: no source .rs may exceed 400 LOC (examples
   # exempt). Cheap, deterministic, fails loudly on regression.
-  # Moved to GitHub-hosted (ubuntu-latest) so this invariant is ENFORCED even when
-  # the self-hosted Mac is offline — it's a pure shell check (no toolchain needed).
   godfile-guard:
     name: godfile guard (<=400 LOC)
     runs-on: ubuntu-latest
@@ -101,68 +71,18 @@ jobs:
           fi
           echo "OK — every source file is <=400 LOC"
 
-  # Native fmt-check on GitHub-hosted (ubuntu). `cargo fmt --check` is otherwise
-  # enforced ONLY by the self-hosted macOS `gate` job, so when the Mac is offline
-  # it lapses and style drift accumulates silently (16 diffs had piled up). This
-  # linux job restores that enforcement independently of the Mac. The matching
-  # `clippy -D warnings` half is tracked as a follow-up: reactivating it needs the
-  # accumulated clippy drift (in the recently-changed / cfg(linux) code) cleaned
-  # first — see the tracked task. rust-toolchain.toml pins the toolchain.
-  linux-native-lint:
-    name: linux fmt --check
+  # Linux build + unit-test VISIBILITY lane (continue-on-error: signal, not
+  # a merge gate yet). The full acceptance suite is macOS-validated in
+  # ci-macos-selfhosted.yml; this lane proves the workspace compiles and the
+  # hermetic unit tests pass on linux, on free runners. Promote to a hard
+  # gate after a green streak (tracked follow-up).
+  linux-build-test:
+    name: linux build + unit tests (visibility)
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: rustfmt component
-        run: rustup component add rustfmt
-      - name: cargo fmt --all --check
-        run: cargo fmt --all --check
-
-  # Perf-regression visibility (NOT a merge gate): bench budgets are dev-box
-  # tuned; a red here is a signal to investigate, never an automatic block.
-  bench:
-    name: bench (perf-regression visibility)
-    runs-on: [self-hosted, macOS]
-    needs: gate
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - name: Toolchain on PATH (pinned bin — rustup-proxy-immune)
-        # Use the pinned toolchain's REAL binaries directly, not the ~/.cargo/bin
-        # rustup proxies (which have vanished mid-session ≥2×, exit-127'ing the
-        # gate). Toolchain + components + windows-gnu std are pre-installed on the
-        # self-hosted box; no `rustup` call is needed in CI.
-        run: |
-          echo "$HOME/.rustup/toolchains/1.96.0-x86_64-apple-darwin/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build release binary
-        run: cargo build --release
-      - name: Run bench --check
-        run: ./target/release/lightr bench --check
-
-  # vz feature build + ad-hoc codesign — RE-ENABLED on self-hosted (the founder
-  # Intel Mac has the swiftc/codesign toolchain; $0). Push-to-main only (1× per
-  # merge). The 2-VM E2E itself stays box-gated (needs interactive guest boot).
-  vz-build:
-    name: vz feature build (macOS native)
-    runs-on: [self-hosted, macOS]
-    needs: gate
-    if: ${{ github.event_name == 'push' }}
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Toolchain on PATH (pinned bin — rustup-proxy-immune)
-        # Use the pinned toolchain's REAL binaries directly, not the ~/.cargo/bin
-        # rustup proxies (which have vanished mid-session ≥2×, exit-127'ing the
-        # gate). Toolchain + components + windows-gnu std are pre-installed on the
-        # self-hosted box; no `rustup` call is needed in CI.
-        run: |
-          echo "$HOME/.rustup/toolchains/1.96.0-x86_64-apple-darwin/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: cargo build -p lightr-cli --features vz (Rust + Swift shim)
-        run: cargo build -p lightr-cli --features vz
-      - name: Ad-hoc codesign with vz entitlement
-        run: |
-          codesign --force --sign - --entitlements packaging/vz.entitlements target/debug/lightr
-          codesign -d --entitlements - target/debug/lightr 2>&1 | head -20
-          echo "vz build + ad-hoc codesign OK"
+      - name: cargo build --workspace
+        run: cargo build --workspace
+      - name: cargo test --workspace --lib --bins
+        run: cargo test --workspace --lib --bins
