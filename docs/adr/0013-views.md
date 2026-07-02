@@ -1,8 +1,6 @@
 # ADR-0013 — Views: O(1) materialization + the solidifier
 
-- **Status:** Accepted (owner overnight mandate 2026-06-11 — subject to
-  morning review). **Gated on spikes S1/S3** for the mount layer; R0 ships
-  the CoW-clone path (F-103 R0 form).
+- **Status:** Accepted (2026-06-11) (ratified 2026-07-02 under explicit owner delegation to TechLead; basis: implemented + gate-green per docs/spec/parity-audit.md). **Gated on spikes S1/S3** for the mount layer; R0 ships the CoW-clone path (F-103 R0 form).
 - **Date:** 2026-06-11
 
 One line: `hydrate` mounts a **view** of a manifest (appears in O(1),

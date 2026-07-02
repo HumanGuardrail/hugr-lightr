@@ -1,6 +1,6 @@
 # ADR-0002 — clw seam: path-dependencies on the sibling repo
 
-- **Status:** Accepted — narrowed by ADR-0011 (clw direct path-dep deferred to Stage-2)
+- **Status:** Accepted — narrowed by ADR-0011 (clw direct path-dep deferred to Stage-2) (ratified 2026-07-02 under explicit owner delegation to TechLead; basis: implemented + gate-green per docs/spec/parity-audit.md)
 - **Date:** 2026-06-11
 
 One line: v0.1 consumes clw crates via Cargo **path-dependencies** on the

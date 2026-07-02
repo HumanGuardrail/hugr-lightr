@@ -1,6 +1,6 @@
 # ADR-0007 — Telemetry: zero in v0.1
 
-- **Status:** Accepted (owner overnight mandate 2026-06-11 — subject to morning review)
+- **Status:** Accepted (2026-06-11) (ratified 2026-07-02 under explicit owner delegation to TechLead; basis: implemented + gate-green per docs/spec/parity-audit.md)
 - **Date:** 2026-06-11
 
 One line: the v0.1 binary contains **no telemetry, no phone-home, no update

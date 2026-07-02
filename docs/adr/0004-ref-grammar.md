@@ -1,6 +1,6 @@
 # ADR-0004 — Ref grammar: `@namespace/name`
 
-- **Status:** Accepted (owner overnight mandate 2026-06-11 — subject to morning review)
+- **Status:** Accepted (2026-06-11) (ratified 2026-07-02 under explicit owner delegation to TechLead; basis: implemented + gate-green per docs/spec/parity-audit.md)
 - **Date:** 2026-06-11
 
 One line: a ref is `name` or `@namespace/name`, matching

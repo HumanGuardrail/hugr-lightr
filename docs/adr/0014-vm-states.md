@@ -1,7 +1,6 @@
 # ADR-0014 — VM states as refs: boot-never (boot-once-per-machine)
 
-- **Status:** Accepted (owner overnight mandate 2026-06-11 — subject to
-  morning review). **Gated on spikes S2/S5.**
+- **Status:** Accepted (2026-06-11) (ratified 2026-07-02 under explicit owner delegation to TechLead; basis: implemented + gate-green per docs/spec/parity-audit.md). **Gated on spikes S2/S5.**
 - **Date:** 2026-06-11
 
 One line: Linux on macOS runs in microVMs that the user never watches
