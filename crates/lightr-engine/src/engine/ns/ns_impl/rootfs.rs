@@ -7,7 +7,6 @@ use super::mounts::{
     apply_bind_mount, mount_proc, remount_root_readonly, setup_minimal_dev, setup_shm, setup_tmpfs,
 };
 use super::signal::signal_setup_failed;
-use crate::engine::seccomp;
 use crate::engine::spec::{BindMount, TmpfsMount};
 use std::ffi::CString;
 
@@ -74,7 +73,7 @@ pub(super) fn setup_rootfs_and_pivot(
     add_host: &[(String, String)],
     seccomp: Option<&str>,
     exec_ready_fd: Option<libc::c_int>,
-) -> Option<seccomp::CompiledSeccomp> {
+) -> Option<super::SeccompFilter> {
     // Build the rootfs CString (rebuilt here; the setup-process copy is gone).
     let rootfs_c = match CString::new(rootfs.as_os_str().as_encoded_bytes()) {
         Ok(c) => c,
@@ -229,8 +228,9 @@ pub(super) fn setup_rootfs_and_pivot(
     // `default` ⇒ the BUILT-IN curated allow-list (compile_default,
     // embedded). `unconfined` ⇒ no filter. Anything else is a PATH to an
     // OCI profile. `None` ⇒ byte-identical to the pre-#108 path.
-    let compiled_seccomp: Option<seccomp::CompiledSeccomp> = match seccomp {
-        Some("default") => match seccomp::compile_default() {
+    #[cfg(target_arch = "x86_64")]
+    let compiled_seccomp: Option<super::SeccompFilter> = match seccomp {
+        Some("default") => match crate::engine::seccomp::compile_default() {
             Ok(c) => Some(c),
             Err(e) => {
                 eprintln!("lightr-engine ns: seccomp: {e}");
@@ -239,7 +239,7 @@ pub(super) fn setup_rootfs_and_pivot(
             }
         },
         Some("unconfined") | None => None,
-        Some(p) => match seccomp::compile_from_path(p) {
+        Some(p) => match crate::engine::seccomp::compile_from_path(p) {
             Ok(c) => Some(c),
             Err(e) => {
                 eprintln!("lightr-engine ns: seccomp: {e}");
@@ -247,6 +247,23 @@ pub(super) fn setup_rootfs_and_pivot(
                 unsafe { libc::_exit(1) };
             }
         },
+    };
+    // seccomp is x86_64-linux-only; the CLI already rejects `--seccomp` on other
+    // arches (honest exit 2). Defense in depth here in PID 1: if a filter still
+    // reaches us, FAIL CLOSED rather than exec unfiltered. `unconfined`/`None` ⇒ no
+    // filter (fine — same as x86_64 with no flag). `SeccompFilter` is uninhabited on
+    // non-x86_64, so `None` is the only inhabitable value.
+    #[cfg(not(target_arch = "x86_64"))]
+    let compiled_seccomp: Option<super::SeccompFilter> = match seccomp {
+        Some("unconfined") | None => None,
+        Some(_) => {
+            eprintln!("lightr-engine ns: seccomp is x86_64-linux-only (unsupported on this arch)");
+            signal_setup_failed(
+                exec_ready_fd,
+                "seccomp: x86_64-linux-only (unsupported on this arch)",
+            );
+            unsafe { libc::_exit(1) };
+        }
     };
 
     // 4. Create put_old dir inside rootfs, then pivot_root

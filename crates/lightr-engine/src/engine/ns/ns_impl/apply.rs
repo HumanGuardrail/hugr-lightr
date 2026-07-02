@@ -4,7 +4,6 @@
 
 use super::signal::{arm_exec_ready, signal_exec_failed, signal_setup_failed};
 use crate::engine::ns::CAP_LAST_CAP;
-use crate::engine::seccomp;
 use crate::engine::spec::Ulimit;
 
 /// WP-#95: apply the (already-parsed) capability set in the EXECing process,
@@ -133,9 +132,13 @@ pub(super) fn apply_apparmor_if_any(profile: Option<&str>, exec_ready_fd: Option
 /// bytes (so the kernel-closed fd is NOT misread as EOF ⇒ a false `Running`) and
 /// `_exit(1)`s rather than exec UNFILTERED when a filter was requested.
 pub(super) fn apply_seccomp_if_any(
-    compiled: Option<&seccomp::CompiledSeccomp>,
+    compiled: Option<&super::SeccompFilter>,
     exec_ready_fd: Option<libc::c_int>,
 ) {
+    // seccomp install is x86_64-linux-only. On other arches `SeccompFilter` is
+    // uninhabited so `compiled` is always None (the compile path fails closed and
+    // the CLI already rejected `--seccomp` with exit 2) — nothing to install.
+    #[cfg(target_arch = "x86_64")]
     if let Some(c) = compiled {
         if let Err(e) = c.apply() {
             eprintln!("lightr-engine ns: seccomp: {e}");
@@ -143,6 +146,8 @@ pub(super) fn apply_seccomp_if_any(
             unsafe { libc::_exit(1) };
         }
     }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (compiled, exec_ready_fd);
 }
 
 /// WP-#106: write `exec <profile>` to the AppArmor exec attr (aa_change_onexec
@@ -319,7 +324,7 @@ pub(super) fn apply_and_exec(
     apparmor: Option<&str>,
     user: Option<&str>,
     use_range: bool,
-    compiled_seccomp: Option<&seccomp::CompiledSeccomp>,
+    compiled_seccomp: Option<&super::SeccompFilter>,
     ulimits: &[Ulimit],
     oom_score_adj: Option<i32>,
     exec_ready_fd: Option<libc::c_int>,

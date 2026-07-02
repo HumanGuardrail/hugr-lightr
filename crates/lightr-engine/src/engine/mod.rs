@@ -6,8 +6,12 @@ pub mod native;
 pub mod ns;
 pub mod probe;
 // WP-#108 (seccomp): OCI seccomp profile → cBPF compiler + apply, consumed by the
-// `ns` engine (PID 1). Linux-only (the whole module is `#![cfg(target_os = "linux")]`).
-#[cfg(target_os = "linux")]
+// `ns` engine (PID 1). x86_64-linux ONLY: the filter is compiled for
+// AUDIT_ARCH_X86_64 and the `syscall_nr` table uses x86_64 `libc::SYS_*` constants
+// (many of which don't exist on aarch64). On other linux arches the module is
+// absent and `--seccomp` fails closed (honest exit 2 at the CLI / _exit in PID 1) —
+// never a silent unfiltered run. Multi-arch (per-arch table) is tracked as an issue.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) mod seccomp;
 pub mod spec;
 // WP-#114: rootless subuid/subgid RANGE resolution (real non-root `--user`),

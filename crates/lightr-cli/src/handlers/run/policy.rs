@@ -47,7 +47,27 @@ pub(super) fn detached_only_flags_policy(runflags: &RunFlags, detach: bool) -> O
 /// native is no sandbox by design, and vz caps/LSM/seccomp live inside the guest
 /// (not managed by this shim). A silent no-op on a security flag would give false
 /// security (the exact failure WP-#92 refused). `Some(2)` to reject, `None` to allow.
+/// `--seccomp` (a profile path OR the built-in `default`) is **x86_64-linux-only** —
+/// the seccomp-bpf filter is compiled for `AUDIT_ARCH_X86_64`. On any other arch,
+/// refuse rather than exec unfiltered (fail-closed law). Pure + `is_x86_64`-injected
+/// so the fail-closed decision is unit-testable on the x86_64 CI host. `Some(2)` ⇒
+/// abort with the honest Unsupported exit code; `None` ⇒ proceed.
+fn seccomp_arch_policy(seccomp: Option<&str>, is_x86_64: bool) -> Option<i32> {
+    if seccomp.is_some() && !is_x86_64 {
+        eprintln!(
+            "lightr: --seccomp is x86_64-linux-only (the seccomp-bpf filter is compiled \
+             for AUDIT_ARCH_X86_64); refusing to run rather than exec unfiltered on this \
+             architecture"
+        );
+        return Some(2);
+    }
+    None
+}
+
 pub(super) fn engine_capability_policy(engine: EngineKind, rc: &RcConfig) -> Option<i32> {
+    if let Some(code) = seccomp_arch_policy(rc.seccomp.as_deref(), cfg!(target_arch = "x86_64")) {
+        return Some(code);
+    }
     if engine != EngineKind::Ns && (!rc.cap_add.is_empty() || !rc.cap_drop.is_empty()) {
         eprintln!(
             "lightr: --cap-add/--cap-drop capability enforcement is implemented only on \
@@ -307,5 +327,24 @@ pub(super) fn build_detached_spec(
         network_alias: runflags.network_alias.clone(),
         add_host: runflags.add_host.clone(),
         dns: runflags.dns.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seccomp_arch_policy;
+
+    #[test]
+    fn seccomp_is_x86_64_only_and_fails_closed_elsewhere() {
+        // Non-x86_64: ANY --seccomp (a profile path OR the built-in `default`)
+        // refuses with the honest exit 2 — never a silent unfiltered run.
+        assert_eq!(seccomp_arch_policy(Some("default"), false), Some(2));
+        assert_eq!(seccomp_arch_policy(Some("/etc/prof.json"), false), Some(2));
+        // x86_64: the filter is supported ⇒ proceed.
+        assert_eq!(seccomp_arch_policy(Some("default"), true), None);
+        assert_eq!(seccomp_arch_policy(Some("/etc/prof.json"), true), None);
+        // No --seccomp ⇒ no error on any arch (runs without a filter, as before).
+        assert_eq!(seccomp_arch_policy(None, false), None);
+        assert_eq!(seccomp_arch_policy(None, true), None);
     }
 }
