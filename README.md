@@ -21,8 +21,8 @@ a reproduce path. Absent competitors print SKIP — never a fabricated number.
 |---|---|---|---|---|
 | Cold start, full rootless isolation (`ns --net=none`) | **30.8 ms** | podman 124.9 ms | **4.05×** | GitHub-hosted Linux CI, n=100, 2026-06-25 — «CI run link» · [method](docs/benchmarks/RESULTS.md) |
 | Re-build, nothing changed (memoized) | **10.3 ms** | 20,633 ms | **~2,000×** | same CI job, n=10 — «CI run link» |
-| Container re-run (memo, **no VM boot**) | **14 ms** | docker ~1.3 s | **93×, unbounded** | Intel Mac, docker 28.3.2, median of 3, 2026-06-18 · [ledger](docs/spec/benchmark-results.md) — «demo gif» |
-| Materialize 1 GB (CoW) | **322 ms** | docker 38.4 s | **119×** | Intel Mac, same run header — «demo gif» |
+| Container re-run (memo, **no VM boot**) | **14 ms** | docker ~1.3 s | **93×, unbounded** | Intel Mac, docker 28.3.2, median of 3, 2026-06-18 · [ledger](docs/spec/benchmark-results.md) — reproduce: `bench-compare` |
+| Materialize 1 GB (CoW) | **322 ms** | docker 38.4 s | **119×** | Intel Mac, same run header — [live demo](docs/assets/bench-compare-demo.gif) |
 | Install footprint | **4.3 MB** | Docker.app 1,962 MB | **452×** | deterministic; check the release asset |
 | Idle resident processes | **0** | 8 | **∞** | anywhere; `pgrep` proves it |
 | K8s CRI resident footprint | **7.1 MB** | containerd 65.9 MB | **9.32×**, no per-container shim | Linux CI, 2026-06-26 — «CI run link» |
