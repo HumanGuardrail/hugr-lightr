@@ -1,3 +1,5 @@
+> Internal process artifact — published as part of this repo's [transparent build method](../METHOD.md).
+
 # Handoff — CRI backend ready: ask #1 delivered + conformance-proven
 
 **From:** Lightr (real backend) TL · **To:** lightr-cri (shell) TL

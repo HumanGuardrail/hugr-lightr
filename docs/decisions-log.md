@@ -1,3 +1,5 @@
+> Internal process artifact — published as part of this repo's [transparent build method](METHOD.md).
+
 # Decisions log — owner authorizations (verbatim)
 
 Append-only. The rigor compact requires human authorization for gate

@@ -76,7 +76,7 @@ lightr CLI ──> store (CAS + Action Cache) ──> engines
 
 ```sh
 $ git clone https://github.com/HumanGuardrail/hugr-lightr && cd hugr-lightr
-$ cargo build --release            # bin ~5.9 MB · Rust 1.96 · brew tap coming at v0.1.0
+$ cargo build --release            # bin ~5.9 MB · Rust 1.96 — or grab a prebuilt binary from Releases
 $ alias lightr=./target/release/lightr
 $ lightr snapshot --dir . --name @me/proj
 $ lightr hydrate /tmp/fresh --name @me/proj    # CoW materialize

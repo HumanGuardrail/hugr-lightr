@@ -1,3 +1,5 @@
+> Internal process artifact — published as part of this repo's [transparent build method](METHOD.md).
+
 # Owner ratification checklist — ADRs
 
 > **Ratified 2026-07-02** under explicit owner delegation to TechLead
