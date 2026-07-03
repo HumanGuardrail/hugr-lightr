@@ -25,7 +25,7 @@ a reproduce path. Absent competitors print SKIP — never a fabricated number.
 | Re-build, nothing changed (memoized) | **10.3 ms** | 20,633 ms | **~2,000×** | same CI job, n=10 — [CI run](https://github.com/HumanGuardrail/hugr-lightr/actions/runs/28616352978) |
 | Container re-run (memo, **no VM boot**) | **14 ms** | docker ~1.3 s | **93×, unbounded** | Intel Mac, docker 28.3.2, median of 3, 2026-06-18 · [ledger](docs/spec/benchmark-results.md) — reproduce: `bench-compare` |
 | Materialize 1 GB (CoW) | **322 ms** | docker 38.4 s | **119×** | Intel Mac, same run header — [live demo](docs/assets/bench-compare-demo.gif) |
-| Install footprint | **4.3 MB** | Docker.app 1,962 MB | **452×** | deterministic; check the release asset |
+| Install footprint | **6.3 MB** | Docker.app 1,962 MB | **311×** | deterministic — verify: [v0.1.0 release asset](https://github.com/HumanGuardrail/hugr-lightr/releases/tag/v0.1.0) |
 | Idle resident processes | **0** | 8 | **∞** | anywhere; `pgrep` proves it |
 | K8s CRI resident footprint | **7.1 MB** | containerd 65.9 MB | **9.32×**, no per-container shim | Linux CI, 2026-06-26 — [CI run](https://github.com/HumanGuardrail/hugr-lightr/actions/runs/28616351333) |
 
@@ -76,7 +76,7 @@ lightr CLI ──> store (CAS + Action Cache) ──> engines
 
 ```sh
 $ git clone https://github.com/HumanGuardrail/hugr-lightr && cd hugr-lightr
-$ cargo build --release            # bin ~5.9 MB · Rust 1.96 — or grab a prebuilt binary from Releases
+$ cargo build --release            # bin ~6 MB · Rust 1.96 — or grab a prebuilt binary from Releases
 $ alias lightr=./target/release/lightr
 $ lightr snapshot --dir . --name @me/proj
 $ lightr hydrate /tmp/fresh --name @me/proj    # CoW materialize
