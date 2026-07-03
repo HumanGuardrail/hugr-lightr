@@ -3,8 +3,8 @@
 - **Status:** Owner directive, 2026-06-11. This document outranks comfort.
 - **Companion:** `feature-parity.md` (directive #2: full Docker parity ×
   zero weight — "every feature exists; no feature weighs until invoked").
-- **Owner's words (verbatim, pt-BR):** "essa porra precisa ser warp speed,
-  não é eficiente e melhor que o docker, é humilhar e obliterar o docker em
+- **Owner's words (verbatim, pt-BR, profanity elided):** "[…] precisa ser warp
+  speed, não é eficiente e melhor que o docker, é humilhar e obliterar o docker em
   todos os indicadores […] precisa ser muito leve, muito rápido, precisa
   voar, precisa fritar a mente de quem usar de tão bom e eficiente que é."
 
