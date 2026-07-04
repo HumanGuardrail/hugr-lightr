@@ -360,9 +360,9 @@ jobs:
           RUN() { sudo -E env "LIGHTR_HOME=$LIGHTR_HOME" "$BIN" "$@"; }
 
           # ── MEMORY: busybox awk doubles a string forever → must be OOM-killed
-          # AUDIT #101 (true differential): the SAME ~100MB allocator is OOM-KILLED
+          # AUDIT #101 (true differential): the SAME ~400MB-peak allocator is OOM-KILLED
           # (signal death, exit >=128) under --memory 64m but COMPLETES (exit 0)
-          # under a generous --memory 512m — proving the cap binds at its VALUE, not
+          # under a generous --memory 1g — proving the cap binds at its VALUE, not
           # just "an unbounded bomb eventually dies". memory.swap.max=0 makes
           # memory.max a HARD RAM cap (the 2026-06-26 audit saw it spill to swap +
           # exit 1 gracefully without it). 2^28 doubling ⇒ ~268MB final, ~400MB peak
@@ -424,10 +424,10 @@ jobs:
 
           # ── GATE (no false-green: every proof must hold or the job fails) ─────────
           FAIL=0
-          # memory.max binds at its VALUE: 64m OOM-KILLS the ~100MB alloc (signal
-          # death >=128, NOT a graceful exit-1 swap-thrash), 512m allows it (exit 0).
-          [ "$MEM_CAP_EXIT" -ge 128 ] || { echo "FAIL: --memory 64m did NOT OOM-kill the ~100MB alloc (exit $MEM_CAP_EXIT; want signal-death >=128, not a graceful exit ⇒ cap didn't bind)"; FAIL=1; }
-          [ "$MEM_FREE_EXIT" = 0 ]    || { echo "FAIL: --memory 512m did NOT allow the ~100MB alloc (exit $MEM_FREE_EXIT, want 0)"; FAIL=1; }
+          # memory.max binds at its VALUE: 64m OOM-KILLS the ~400MB-peak alloc (signal
+          # death >=128, NOT a graceful exit-1 swap-thrash), 1g allows it (exit 0).
+          [ "$MEM_CAP_EXIT" -ge 128 ] || { echo "FAIL: --memory 64m did NOT OOM-kill the ~400MB-peak alloc (exit $MEM_CAP_EXIT; want signal-death >=128, not a graceful exit ⇒ cap didn't bind)"; FAIL=1; }
+          [ "$MEM_FREE_EXIT" = 0 ]    || { echo "FAIL: --memory 1g did NOT allow the ~400MB-peak alloc (exit $MEM_FREE_EXIT, want 0)"; FAIL=1; }
           # cpu.max throttles: both complete, but the 0.2-core run takes >=2x the
           # uncapped wall-time (guard against an instant/zero free run).
           { [ "$CPU_CAP_EXIT" = 0 ] && [ "$CPU_FREE_EXIT" = 0 ]; } || { echo "FAIL: cpu loops did not complete (cap=$CPU_CAP_EXIT free=$CPU_FREE_EXIT)"; FAIL=1; }
