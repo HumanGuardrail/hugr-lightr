@@ -183,15 +183,16 @@ fn compile(profile: &OciSeccomp) -> std::io::Result<CompiledSeccomp> {
     // EVERY conditional jump uses jt/jf of ONLY 0 or 1 — never a far jump — so the
     // u8 jt/jf fields cannot overflow regardless of how many syscalls the profile
     // lists. (The earlier "flat JEQ → far listed-RET" layout silently TRUNCATED the
-    // u8 offset once the listed-RET was >255 instructions away, i.e. for ~>252
-    // syscalls — producing a WRONG filter: early JEQs jumped to garbage. That latent
-    // #108 bug was exposed by the ~289-entry built-in default profile (#117): an
-    // early syscall like `arch_prctl` mapped wrong ⇒ the workload trapped. This
+    // u8 offset once the first JEQ's distance to the listed-RET exceeded 255, i.e.
+    // for 256 or more syscalls — producing a WRONG filter: early JEQs jumped to
+    // garbage. That latent #108 bug was exposed by the 289-entry built-in default
+    // profile (#117): an early syscall like `arch_prctl` mapped wrong ⇒ the workload
+    // was denied at startup, before `main`. This
     // inline-RET layout removes far jumps entirely.)
     //
     //   [0] LD  arch
     //   [1] JEQ arch == X86_64 ? jt=1 (skip the foreign-RET) : jf=0 (fall into it)
-    //   [2] RET default            ; foreign/x32 arch → the default action (inline)
+    //   [2] RET default            ; foreign arch → the default action (inline)
     //   [3] LD  nr
     //   per listed syscall (a 2-insn pair):
     //     JEQ nr ? jt=0 (fall to its RET) : jf=1 (skip its RET, try the next)
@@ -200,8 +201,10 @@ fn compile(profile: &OciSeccomp) -> std::io::Result<CompiledSeccomp> {
     //
     // The DEFAULT action is what a non-matching syscall reaches (the final RET); a
     // MATCH falls into its own inline RET. (WP-#108's first cut inverted match vs
-    // default → deny-all → musl SIGSEGV; the `run_bpf` simulator tests below pin
-    // BOTH that selectivity AND — via a >256-entry profile — this no-overflow.)
+    // default → deny-all: under a deny-list the workload's own execve was itself
+    // denied, so it never started — recorded as exit 139 at the time, unreproducible
+    // since. The `run_bpf` simulator tests below pin BOTH that selectivity AND —
+    // via a >256-entry profile — this no-overflow.)
     let n = nrs.len();
     let mut prog: Vec<libc::sock_filter> = Vec::with_capacity(4 + 2 * n + 1);
 
@@ -209,7 +212,10 @@ fn compile(profile: &OciSeccomp) -> std::io::Result<CompiledSeccomp> {
     prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARCH_OFFSET));
     // [1] JEQ arch == X86_64: match → skip the foreign-RET; foreign → fall into it.
     prog.push(jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0));
-    // [2] foreign/x32 arch → the default action (inline RET, no far jump).
+    // [2] foreign arch → the default action (inline RET, no far jump). NOTE: an x32
+    // syscall carries arch == AUDIT_ARCH_X86_64, so it PASSES this gate and is not
+    // caught here; it reaches the default action only by matching no native-nr JEQ
+    // (the x32 deny-list-bypass gap — tracked, see the seccomp writeup Limitations).
     prog.push(stmt(BPF_RET | BPF_K, default_ret));
     // [3] LD nr
     prog.push(stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR_OFFSET));
